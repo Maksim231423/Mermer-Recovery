@@ -1,0 +1,71 @@
+# ===========================
+# .NET / C# Build Artifacts
+# ===========================
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+*.dll
+*.exe
+*.pdb
+*.cache
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# NuGet
+*.nupkg
+**/packages/*
+!**/packages/build/
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# Visual Studio
+.vs/
+*.rsuser
+*.userprefs
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+launchSettings.json
+
+# JetBrains Rider
+.idea/
+*.sln.iml
+
+# OS Files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+nlog-*.log
+
+# Runtime secrets ó never commit
+.env
+*.env
+appsettings.Local.json
+appsettings.local.json
+
+# Dev-only docs ó not for repo
+PROJECT_STATUS.md
+STAGE1_REPORT.md
+Œ“◊®“_ƒÀﬂ_ À»≈Õ“¿.md
+
+# Build output
+publish/
+/Mermer.Core/Localization/tk.json
+/Mermer.Core/Localization/ru.json
+
+# ===========================
+# Allow DLLs in lib folder
+# ===========================
+!Mermer.Ui.Pc/lib/
+!Mermer.Ui.Pc/lib/*.dll

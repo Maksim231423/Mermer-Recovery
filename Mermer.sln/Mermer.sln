@@ -1,0 +1,108 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36429.23
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mermer", "..\..\Mermer-Recovery\Mermer.Base\Mermer.csproj", "{47348382-F4BA-606B-DC4A-FE8DF392B2FA}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mermer.Core.Couch", "..\..\Mermer-Recovery\Mermer.Core.Couch\Mermer.Core.Couch.csproj", "{1990AA97-53DD-A055-EF27-53FFEDC1BBE6}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mermer.Core", "..\..\Mermer-Recovery\Mermer.Core\Mermer.Core.csproj", "{2DD58E89-C6BA-4A24-F628-2EF3627A7540}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mermer.Data.Patcher", "..\..\Mermer-Recovery\Mermer.Data.Patcher\Mermer.Data.Patcher.csproj", "{EDA669F2-6355-4B98-1130-8BE04FD613AD}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mermer.Data.Synchronizer.Core", "..\..\Mermer-Recovery\Mermer.Data.Synchronizer.Core\Mermer.Data.Synchronizer.Core.csproj", "{89DCBCCB-4044-6E4D-D5DD-27F88BB6356C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mermer.Data.Synchronizer.Core.Couch", "..\..\Mermer-Recovery\Mermer.Data.Synchronizer.Core.Couch\Mermer.Data.Synchronizer.Core.Couch.csproj", "{39914BF3-09FE-5224-26D6-63BEE903E525}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mermer.Licensing.Client", "..\..\Mermer-Recovery\Mermer.Licensing.Client\Mermer.Licensing.Client.csproj", "{62F241B3-C1AF-BB42-046C-15A6A3FE3954}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mermer.Mvvm", "..\..\Mermer-Recovery\Mermer.Mvvm\Mermer.Mvvm.csproj", "{7FBA4B30-D484-7DC1-5469-4E8BE7FBCE1E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mermer.Ui.Core.Pc", "..\..\Mermer-Recovery\Mermer.Ui.Core.Pc\Mermer.Ui.Core.Pc.csproj", "{CEDFCAE8-42F4-A281-4FCD-B309D1CCADAD}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mermer.Ui.Core", "..\..\Mermer-Recovery\Mermer.Ui.Core\Mermer.Ui.Core.csproj", "{9EDBF773-A977-5A7B-FAE3-105B58BB07C9}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mermer.Ui.Pc", "..\..\Mermer-Recovery\Mermer.Ui.Pc\Mermer.Ui.Pc.csproj", "{0BC96A02-F176-1FCA-4FE9-CC91111ECC6A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mermer.Main", "..\..\Mermer-Recovery\Mermer\Mermer.Main.csproj", "{29624062-8F00-0037-4DF0-64EBFDF4169C}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Элементы решения", "Элементы решения", "{754FC069-D67B-A9D7-50A1-8D1CA196D8F1}"
+	ProjectSection(SolutionItems) = preProject
+		.gitignore = .gitignore
+	EndProjectSection
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mermer.Api", "..\..\Mermer-Recovery\Mermer.Api\Mermer.Api.csproj", "{EA3F24EF-9898-5E7D-004B-B848FEF11DCD}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Mermer.Data.Postgres", "..\..\Mermer-Recovery\Mermer.Data.Postgres\Mermer.Data.Postgres.csproj", "{CDE54C2E-25F0-AA35-B9F8-9EBD2AA72098}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{47348382-F4BA-606B-DC4A-FE8DF392B2FA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{47348382-F4BA-606B-DC4A-FE8DF392B2FA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{47348382-F4BA-606B-DC4A-FE8DF392B2FA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{47348382-F4BA-606B-DC4A-FE8DF392B2FA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1990AA97-53DD-A055-EF27-53FFEDC1BBE6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1990AA97-53DD-A055-EF27-53FFEDC1BBE6}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1990AA97-53DD-A055-EF27-53FFEDC1BBE6}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1990AA97-53DD-A055-EF27-53FFEDC1BBE6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2DD58E89-C6BA-4A24-F628-2EF3627A7540}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2DD58E89-C6BA-4A24-F628-2EF3627A7540}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2DD58E89-C6BA-4A24-F628-2EF3627A7540}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2DD58E89-C6BA-4A24-F628-2EF3627A7540}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EDA669F2-6355-4B98-1130-8BE04FD613AD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EDA669F2-6355-4B98-1130-8BE04FD613AD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EDA669F2-6355-4B98-1130-8BE04FD613AD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EDA669F2-6355-4B98-1130-8BE04FD613AD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{89DCBCCB-4044-6E4D-D5DD-27F88BB6356C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{89DCBCCB-4044-6E4D-D5DD-27F88BB6356C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{89DCBCCB-4044-6E4D-D5DD-27F88BB6356C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{89DCBCCB-4044-6E4D-D5DD-27F88BB6356C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{39914BF3-09FE-5224-26D6-63BEE903E525}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{39914BF3-09FE-5224-26D6-63BEE903E525}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{39914BF3-09FE-5224-26D6-63BEE903E525}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{39914BF3-09FE-5224-26D6-63BEE903E525}.Release|Any CPU.Build.0 = Release|Any CPU
+		{62F241B3-C1AF-BB42-046C-15A6A3FE3954}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{62F241B3-C1AF-BB42-046C-15A6A3FE3954}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{62F241B3-C1AF-BB42-046C-15A6A3FE3954}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{62F241B3-C1AF-BB42-046C-15A6A3FE3954}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7FBA4B30-D484-7DC1-5469-4E8BE7FBCE1E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7FBA4B30-D484-7DC1-5469-4E8BE7FBCE1E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7FBA4B30-D484-7DC1-5469-4E8BE7FBCE1E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7FBA4B30-D484-7DC1-5469-4E8BE7FBCE1E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CEDFCAE8-42F4-A281-4FCD-B309D1CCADAD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CEDFCAE8-42F4-A281-4FCD-B309D1CCADAD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CEDFCAE8-42F4-A281-4FCD-B309D1CCADAD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CEDFCAE8-42F4-A281-4FCD-B309D1CCADAD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9EDBF773-A977-5A7B-FAE3-105B58BB07C9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9EDBF773-A977-5A7B-FAE3-105B58BB07C9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9EDBF773-A977-5A7B-FAE3-105B58BB07C9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9EDBF773-A977-5A7B-FAE3-105B58BB07C9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0BC96A02-F176-1FCA-4FE9-CC91111ECC6A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0BC96A02-F176-1FCA-4FE9-CC91111ECC6A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0BC96A02-F176-1FCA-4FE9-CC91111ECC6A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0BC96A02-F176-1FCA-4FE9-CC91111ECC6A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{29624062-8F00-0037-4DF0-64EBFDF4169C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{29624062-8F00-0037-4DF0-64EBFDF4169C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{29624062-8F00-0037-4DF0-64EBFDF4169C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{29624062-8F00-0037-4DF0-64EBFDF4169C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EA3F24EF-9898-5E7D-004B-B848FEF11DCD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EA3F24EF-9898-5E7D-004B-B848FEF11DCD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EA3F24EF-9898-5E7D-004B-B848FEF11DCD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EA3F24EF-9898-5E7D-004B-B848FEF11DCD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CDE54C2E-25F0-AA35-B9F8-9EBD2AA72098}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CDE54C2E-25F0-AA35-B9F8-9EBD2AA72098}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CDE54C2E-25F0-AA35-B9F8-9EBD2AA72098}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CDE54C2E-25F0-AA35-B9F8-9EBD2AA72098}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {E012BB8A-8350-4263-96BC-BF249F1F4378}
+	EndGlobalSection
+EndGlobal

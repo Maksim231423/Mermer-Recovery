@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  # 1. Сервер PostgreSQL 18
+  mermer-db:
+    image: postgres:18-alpine
+    container_name: mermer-postgres-18
+    restart: always
+    environment:
+      POSTGRES_DB: mermer_db
+      POSTGRES_USER: mermer_app
+      POSTGRES_PASSWORD: ChuliyevSecurePassword2026!
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Автоматический накатывание таблиц при первом старте БД:
+      - ./Mermer.Data.Postgres/Scripts/001_create_database.sql:/docker-entrypoint-initdb.d/001_create_database.sql
+
+  # 2. Веб-сервер Mermer.Api
+  mermer-api:
+    container_name: mermer-api
+    build:
+      context: .
+      dockerfile: Mermer.Api/Dockerfile
+    restart: always
+    ports:
+      - "5050:80"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ConnectionStrings__Postgres=Host=mermer-db;Database=mermer_db;Username=mermer_app;Password=ChuliyevSecurePassword2026!
+      - Cors__AllowedOrigins__0=*
+    depends_on:
+      - mermer-db
+
+volumes:
+  postgres_data:
