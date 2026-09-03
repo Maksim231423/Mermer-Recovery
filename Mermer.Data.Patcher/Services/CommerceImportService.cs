@@ -408,6 +408,105 @@ public class CommerceImportService
         _dbContext.ChangeTracker.Clear();
     }
 
+    public async Task MigrateStockTransfersAsync(string jsonFilePath)
+    {
+        Console.WriteLine("Начинаем импорт документов StockTransfer (Перемещения со склада на склад)...");
+
+        var validWarehouses = (await _dbContext.Warehouses.Select(x => x.Id).ToListAsync()).ToHashSet();
+        var validStocks = (await _dbContext.Stocks.Select(x => x.Id).ToListAsync()).ToHashSet();
+        var validUnits = (await _dbContext.StockUnits.Select(x => x.Id).ToListAsync()).ToHashSet();
+        var validCurrencies = (await _dbContext.Currencies.Select(x => x.Id).ToListAsync()).ToHashSet();
+
+        using var stream = File.OpenRead(jsonFilePath);
+        using var reader = new StreamReader(stream);
+
+        var transfersBatch = new List<StockTransferEntity>();
+        var linesBatch = new List<StockTransferLineEntity>();
+
+        var processedTransferIds = new HashSet<Guid>();
+        var processedLineIds = new HashSet<Guid>();
+        string? line;
+
+        while ((line = await reader.ReadLineAsync()) != null)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+
+            if (IsTargetDocType(root, "StockTransfer"))
+            {
+                var c = GetTargetContainer(root);
+                if (!TryGetGuidProperty(root, c, "id", out var transferId) || !processedTransferIds.Add(transferId)) continue;
+
+                var transfer = new StockTransferEntity
+                {
+                    Id = transferId,
+                    Code = GetStringProperty(c, "code"),
+                    Date = c.TryGetProperty("date", out var dP) && DateTimeOffset.TryParse(dP.GetString(), out var dV) ? dV.ToUniversalTime() : DateTimeOffset.UtcNow,
+                    WarehouseId = GetValidId(c, "warehouseId", validWarehouses),
+                    DestinationWarehouseId = GetValidId(c, "destinationWarehouseId", validWarehouses),
+                    DisplayCurrencyId = GetValidId(c, "displayCurrencyId", validCurrencies),
+                    IsCompleted = GetBoolProperty(c, "isCompleted"),
+                    IsDisabled = GetBoolProperty(c, "isDisabled"),
+                    UserName = GetStringProperty(c, "userName"),
+                    GroupName = GetStringProperty(c, "group") ?? GetStringProperty(c, "groupName"),
+                    Description = GetStringProperty(c, "description"),
+                    Tags = GetStringArrayProperty(c, "tags"),
+                    ActionTotal = GetDecimalProperty(c, "actionTotal") ?? 0m,
+                    ActionReceivedTotal = GetDecimalProperty(c, "actionReceivedTotal") ?? 0m,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    UpdatedAt = DateTimeOffset.UtcNow
+                };
+
+                transfersBatch.Add(transfer);
+
+                if (c.TryGetProperty("lines", out var linesArray) && linesArray.ValueKind == JsonValueKind.Array)
+                {
+                    int sortOrder = 0;
+                    foreach (var elem in linesArray.EnumerateArray())
+                    {
+                        if (!elem.TryGetProperty("id", out var idProp) || !Guid.TryParse(idProp.GetString(), out var lineId)) continue;
+                        if (!processedLineIds.Add(lineId)) continue;
+
+                        linesBatch.Add(new StockTransferLineEntity
+                        {
+                            Id = lineId,
+                            StockTransferId = transferId,
+                            StockId = GetValidId(elem, "stockId", validStocks),
+                            UnitId = GetValidId(elem, "unitId", validUnits),
+                            ReceivedUnitId = GetValidId(elem, "receivedUnitId", validUnits) ?? GetValidId(elem, "unitId", validUnits),
+                            Quantity = GetDecimalProperty(elem, "quantity") ?? 0m,
+                            ReceivedQuantity = GetDecimalProperty(elem, "receivedQuantity") ?? GetDecimalProperty(elem, "quantity") ?? 0m,
+                            Price = GetDecimalProperty(elem, "price") ?? 0m,
+                            ActionTotal = GetDecimalProperty(elem, "actionTotal") ?? 0m,
+                            ActionReceivedTotal = GetDecimalProperty(elem, "actionReceivedTotal") ?? 0m,
+                            SortOrder = sortOrder++
+                        });
+                    }
+                }
+
+                if (transfersBatch.Count >= 500)
+                {
+                    await _dbContext.Set<StockTransferEntity>().AddRangeAsync(transfersBatch);
+                    await _dbContext.Set<StockTransferLineEntity>().AddRangeAsync(linesBatch);
+                    await _dbContext.SaveChangesAsync();
+                    _dbContext.ChangeTracker.Clear();
+
+                    transfersBatch.Clear();
+                    linesBatch.Clear();
+                }
+            }
+        }
+
+        if (transfersBatch.Any())
+        {
+            await _dbContext.Set<StockTransferEntity>().AddRangeAsync(transfersBatch);
+            await _dbContext.Set<StockTransferLineEntity>().AddRangeAsync(linesBatch);
+            await _dbContext.SaveChangesAsync();
+            _dbContext.ChangeTracker.Clear();
+        }
+    }
+
     #region Вспомогательные методы парсинга
 
     private Guid? GetValidId(JsonElement container, string propertyName, HashSet<Guid> validIds)

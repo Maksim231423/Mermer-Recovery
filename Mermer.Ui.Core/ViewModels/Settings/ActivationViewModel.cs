@@ -1,10 +1,4 @@
-﻿// Decompiled with JetBrains decompiler
-// Type: Mermer.Ui.Core.ViewModels.Settings.ActivationViewModel
-// Assembly: Mermer.Ui.Core, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
-// MVID: DC92D011-8413-44AC-9F10-F866D891CF66
-// Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.Ui.Core.dll
-
-using MvvmCross.Core.Navigation;
+﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
 using MvvmCross.Plugins.Messenger;
 using Mermer.Activations.Models;
@@ -20,254 +14,255 @@ namespace Mermer.Ui.Core.ViewModels.Settings;
 
 public class ActivationViewModel : DialogViewModel
 {
-  private readonly IBinyatActivationService _activationService;
-  private string _note;
-  private string _clientLicenseId;
-  private ActivationStatus _clientActivationStatus;
-  private string _serverLicenseId;
-  private ActivationStatus _serverActivationStatus;
+    private readonly IBinyatActivationService _activationService;
+    private string _note;
+    private string _clientLicenseId;
+    private ActivationStatus _clientActivationStatus;
+    private string _serverLicenseId;
+    private ActivationStatus _serverActivationStatus;
 
-  public ActivationViewModel(
-    IMvxMessenger messenger,
-    IMvxNavigationService navigationService,
-    IBinyatActivationService activationService,
-    IUserInteractionService userInteractionService)
-    : base(messenger, navigationService, userInteractionService)
-  {
-    this._activationService = activationService;
-  }
+    public ActivationViewModel(
+        IMvxMessenger messenger,
+        IMvxNavigationService navigationService,
+        IBinyatActivationService activationService,
+        IUserInteractionService userInteractionService)
+        : base(messenger, navigationService, userInteractionService)
+    {
+        _activationService = activationService;
+    }
 
-  protected override async Task OnLoad()
-  {
-    await base.OnLoad();
-    await Task.WhenAll(this.OnUpdateClientStatusAsync(), this.OnUpdateServerStatusAsync());
-  }
+    protected override async Task OnLoad()
+    {
+        await base.OnLoad();
+        await Task.WhenAll(OnUpdateClientStatusAsync(), OnUpdateServerStatusAsync());
+    }
 
-  public virtual string Note
-  {
-    get => this._note;
-    set => this.SetProperty<string>(ref this._note, value, nameof (Note));
-  }
+    public virtual string Note
+    {
+        get => _note;
+        set => SetProperty(ref _note, value, nameof(Note));
+    }
 
-  public virtual string ClientLicenseId
-  {
-    get => this._clientLicenseId;
-    set => this.SetProperty<string>(ref this._clientLicenseId, value, nameof (ClientLicenseId));
-  }
+    // ==========================================
+    // CLIENT LICENSE
+    // ==========================================
 
-  public ActivationStatus ClientActivationStatus
-  {
-    get => this._clientActivationStatus;
-    set
+    public virtual string ClientLicenseId
     {
-      this.SetProperty<ActivationStatus>(ref this._clientActivationStatus, value, nameof (ClientActivationStatus));
+        get => _clientLicenseId;
+        set => SetProperty(ref _clientLicenseId, value, nameof(ClientLicenseId));
     }
-  }
 
-  public ICommand UpdateClientStatusCommand
-  {
-    get
+    public ActivationStatus ClientActivationStatus
     {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnUpdateClientStatusAsync), (Func<bool>) (() => !this.IsBusy));
+        get => _clientActivationStatus;
+        set => SetProperty(ref _clientActivationStatus, value, nameof(ClientActivationStatus));
     }
-  }
 
-  private async Task OnUpdateClientStatusAsync()
-  {
-    ActivationViewModel activationViewModel = this;
-    activationViewModel.IsBusy = true;
-    try
-    {
-      ActivationStatus activeDatesAsync = await activationViewModel._activationService.GetClientActiveDatesAsync();
-      activationViewModel.ClientActivationStatus = activeDatesAsync;
-    }
-    catch (Exception ex)
-    {
-      activationViewModel.UserInteractionService.ShowExceptionMessage(ex);
-    }
-    activationViewModel.IsBusy = false;
-  }
+    public ICommand UpdateClientStatusCommand =>
+        new MvxAsyncCommand(OnUpdateClientStatusAsync, () => !IsBusy);
 
-  public ICommand ActivateClientCommand
-  {
-    get
+    private async Task OnUpdateClientStatusAsync()
     {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnActivateClientAsync), (Func<bool>) (() => !this.IsBusy && !string.IsNullOrEmpty(this.ClientLicenseId)));
+        IsBusy = true;
+        try
+        {
+            ClientActivationStatus = await _activationService.GetClientActiveDatesAsync();
+        }
+        catch (Exception ex)
+        {
+            UserInteractionService.ShowExceptionMessage(ex);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
     }
-  }
 
-  public virtual async Task OnActivateClientAsync()
-  {
-    ActivationViewModel activationViewModel = this;
-    activationViewModel.IsBusy = true;
-    try
-    {
-      await activationViewModel._activationService.ActivateClientAsync(activationViewModel.ClientLicenseId, activationViewModel.Note);
-    }
-    catch (Exception ex)
-    {
-      activationViewModel.UserInteractionService.ShowExceptionMessage(ex);
-    }
-    activationViewModel.IsBusy = false;
-    activationViewModel.UpdateClientStatusCommand.Execute((object) null);
-  }
+    public ICommand ActivateClientCommand =>
+        new MvxAsyncCommand(OnActivateClientAsync, () => !IsBusy && !string.IsNullOrEmpty(ClientLicenseId));
 
-  public ICommand ReactivateClientCommand
-  {
-    get
+    public virtual async Task OnActivateClientAsync()
     {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnReactivateClientAsync), (Func<bool>) (() => !this.IsBusy));
+        IsBusy = true;
+        try
+        {
+            await _activationService.ActivateClientAsync(ClientLicenseId, Note);
+            UserInteractionService.ShowMessage("Успешно", "Лицензия клиента успешно активирована!");
+        }
+        catch (Exception ex)
+        {
+            UserInteractionService.ShowMessage("Ошибка активации", CleanErrorMessage(ex.Message));
+        }
+        finally
+        {
+            IsBusy = false;
+            UpdateClientStatusCommand.Execute(null);
+        }
     }
-  }
 
-  private async Task OnReactivateClientAsync()
-  {
-    ActivationViewModel activationViewModel = this;
-    activationViewModel.IsBusy = true;
-    try
-    {
-      await activationViewModel._activationService.ReactivateClientAsync();
-    }
-    catch (Exception ex)
-    {
-      activationViewModel.UserInteractionService.ShowExceptionMessage(ex);
-    }
-    activationViewModel.IsBusy = false;
-    activationViewModel.UpdateClientStatusCommand.Execute((object) null);
-  }
+    public ICommand ReactivateClientCommand =>
+        new MvxAsyncCommand(OnReactivateClientAsync, () => !IsBusy);
 
-  public ICommand DeactivateClientCommand
-  {
-    get
+    private async Task OnReactivateClientAsync()
     {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnDeactivateClientAsync), (Func<bool>) (() => !this.IsBusy));
+        IsBusy = true;
+        try
+        {
+            await _activationService.ReactivateClientAsync();
+            UserInteractionService.ShowMessage("Успешно", "Лицензия клиента успешно обновлена!");
+        }
+        catch (Exception ex)
+        {
+            UserInteractionService.ShowMessage("Ошибка реактивации", CleanErrorMessage(ex.Message));
+        }
+        finally
+        {
+            IsBusy = false;
+            UpdateClientStatusCommand.Execute(null);
+        }
     }
-  }
 
-  private async Task OnDeactivateClientAsync()
-  {
-    ActivationViewModel activationViewModel = this;
-    activationViewModel.IsBusy = true;
-    try
-    {
-      await activationViewModel._activationService.DeactivateClientAsync();
-    }
-    catch (Exception ex)
-    {
-      activationViewModel.UserInteractionService.ShowExceptionMessage(ex);
-    }
-    activationViewModel.IsBusy = false;
-    activationViewModel.UpdateClientStatusCommand.Execute((object) null);
-  }
+    public ICommand DeactivateClientCommand =>
+        new MvxAsyncCommand(OnDeactivateClientAsync, () => !IsBusy);
 
-  public string ServerLicenseId
-  {
-    get => this._serverLicenseId;
-    set => this.SetProperty<string>(ref this._serverLicenseId, value, nameof (ServerLicenseId));
-  }
+    private async Task OnDeactivateClientAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            await _activationService.DeactivateClientAsync();
+            UserInteractionService.ShowMessage("Успешно", "Лицензия клиента деактивирована.");
+        }
+        catch (Exception ex)
+        {
+            UserInteractionService.ShowMessage("Ошибка деактивации", CleanErrorMessage(ex.Message));
+        }
+        finally
+        {
+            IsBusy = false;
+            UpdateClientStatusCommand.Execute(null);
+        }
+    }
 
-  public ActivationStatus ServerActivationStatus
-  {
-    get => this._serverActivationStatus;
-    set
-    {
-      this.SetProperty<ActivationStatus>(ref this._serverActivationStatus, value, nameof (ServerActivationStatus));
-    }
-  }
+    // ==========================================
+    // SERVER LICENSE
+    // ==========================================
 
-  public ICommand UpdateServerStatusCommand
-  {
-    get
+    public string ServerLicenseId
     {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnUpdateServerStatusAsync), (Func<bool>) (() => !this.IsBusy));
+        get => _serverLicenseId;
+        set => SetProperty(ref _serverLicenseId, value, nameof(ServerLicenseId));
     }
-  }
 
-  private async Task OnUpdateServerStatusAsync()
-  {
-    ActivationViewModel activationViewModel = this;
-    activationViewModel.IsBusy = true;
-    try
+    public ActivationStatus ServerActivationStatus
     {
-      ActivationStatus activeDatesAsync = await activationViewModel._activationService.GetServerActiveDatesAsync();
-      activationViewModel.ServerActivationStatus = activeDatesAsync;
+        get => _serverActivationStatus;
+        set => SetProperty(ref _serverActivationStatus, value, nameof(ServerActivationStatus));
     }
-    catch (Exception ex)
-    {
-      activationViewModel.UserInteractionService.ShowExceptionMessage(ex);
-    }
-    activationViewModel.IsBusy = false;
-  }
 
-  public ICommand ActivateServerCommand
-  {
-    get
-    {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnActivateServerAsync), (Func<bool>) (() => !this.IsBusy && !string.IsNullOrEmpty(this.ServerLicenseId)));
-    }
-  }
+    public ICommand UpdateServerStatusCommand =>
+        new MvxAsyncCommand(OnUpdateServerStatusAsync, () => !IsBusy);
 
-  public virtual async Task OnActivateServerAsync()
-  {
-    ActivationViewModel activationViewModel = this;
-    activationViewModel.IsBusy = true;
-    try
+    private async Task OnUpdateServerStatusAsync()
     {
-      await activationViewModel._activationService.ActivateServerAsync(activationViewModel.ServerLicenseId, activationViewModel.Note);
+        IsBusy = true;
+        try
+        {
+            ServerActivationStatus = await _activationService.GetServerActiveDatesAsync();
+        }
+        catch (Exception ex)
+        {
+            UserInteractionService.ShowExceptionMessage(ex);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
     }
-    catch (Exception ex)
-    {
-      activationViewModel.UserInteractionService.ShowExceptionMessage(ex);
-    }
-    activationViewModel.IsBusy = false;
-    activationViewModel.UpdateServerStatusCommand.Execute((object) null);
-  }
 
-  public ICommand ReactivateServerCommand
-  {
-    get
-    {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnReactivateServerAsync), (Func<bool>) (() => !this.IsBusy));
-    }
-  }
+    public ICommand ActivateServerCommand =>
+        new MvxAsyncCommand(OnActivateServerAsync, () => !IsBusy && !string.IsNullOrEmpty(ServerLicenseId));
 
-  private async Task OnReactivateServerAsync()
-  {
-    ActivationViewModel activationViewModel = this;
-    activationViewModel.IsBusy = true;
-    try
+    public virtual async Task OnActivateServerAsync()
     {
-      await activationViewModel._activationService.ReactivateServerAsync();
+        IsBusy = true;
+        try
+        {
+            await _activationService.ActivateServerAsync(ServerLicenseId, Note);
+            UserInteractionService.ShowMessage("Успешно", "Лицензия сервера успешно активирована!");
+        }
+        catch (Exception ex)
+        {
+            UserInteractionService.ShowMessage("Ошибка активации", CleanErrorMessage(ex.Message));
+        }
+        finally
+        {
+            IsBusy = false;
+            UpdateServerStatusCommand.Execute(null);
+        }
     }
-    catch (Exception ex)
-    {
-      activationViewModel.UserInteractionService.ShowExceptionMessage(ex);
-    }
-    activationViewModel.IsBusy = false;
-    activationViewModel.UpdateServerStatusCommand.Execute((object) null);
-  }
 
-  public ICommand DeactivateServerCommand
-  {
-    get
-    {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnDeactivateServerAsync), (Func<bool>) (() => !this.IsBusy));
-    }
-  }
+    public ICommand ReactivateServerCommand =>
+        new MvxAsyncCommand(OnReactivateServerAsync, () => !IsBusy);
 
-  private async Task OnDeactivateServerAsync()
-  {
-    ActivationViewModel activationViewModel = this;
-    activationViewModel.IsBusy = true;
-    try
+    private async Task OnReactivateServerAsync()
     {
-      await activationViewModel._activationService.DeactivateServerAsync();
+        IsBusy = true;
+        try
+        {
+            await _activationService.ReactivateServerAsync();
+            UserInteractionService.ShowMessage("Успешно", "Лицензия сервера успешно обновлена!");
+        }
+        catch (Exception ex)
+        {
+            UserInteractionService.ShowMessage("Ошибка реактивации", CleanErrorMessage(ex.Message));
+        }
+        finally
+        {
+            IsBusy = false;
+            UpdateServerStatusCommand.Execute(null);
+        }
     }
-    catch (Exception ex)
+
+    public ICommand DeactivateServerCommand =>
+        new MvxAsyncCommand(OnDeactivateServerAsync, () => !IsBusy);
+
+    private async Task OnDeactivateServerAsync()
     {
-      activationViewModel.UserInteractionService.ShowExceptionMessage(ex);
+        IsBusy = true;
+        try
+        {
+            await _activationService.DeactivateServerAsync();
+            UserInteractionService.ShowMessage("Успешно", "Лицензия сервера деактивирована.");
+        }
+        catch (Exception ex)
+        {
+            UserInteractionService.ShowMessage("Ошибка деактивации", CleanErrorMessage(ex.Message));
+        }
+        finally
+        {
+            IsBusy = false;
+            UpdateServerStatusCommand.Execute(null);
+        }
     }
-    activationViewModel.IsBusy = false;
-    activationViewModel.UpdateServerStatusCommand.Execute((object) null);
-  }
+
+    // ==========================================
+    // HELPERS
+    // ==========================================
+
+    private static string CleanErrorMessage(string rawMessage)
+    {
+        if (string.IsNullOrWhiteSpace(rawMessage))
+            return "Не удалось активировать лицензию. Проверьте правильность введённого ключа.";
+
+        var message = rawMessage;
+        var colonIndex = message.IndexOf(':');
+        if (colonIndex >= 0 && message.StartsWith("HTTP", StringComparison.OrdinalIgnoreCase))
+        {
+            message = message.Substring(colonIndex + 1);
+        }
+
+        return message.Trim(' ', '"', '\r', '\n');
+    }
 }

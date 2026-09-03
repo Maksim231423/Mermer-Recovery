@@ -156,18 +156,39 @@ public class MainViewModel : BaseViewModel
     private async Task LogoutAsync()
     {
         MainViewModel mainViewModel = this;
+        mainViewModel.IsBusy = true;
         try
         {
-            if (!mainViewModel.ChangePresentation((MvxPresentationHint)new MvxCloseAllPresentationHint()))
-                return;
+            // Обязательно глушим слушатель изменений базы, чтобы остановить фоновые потоки
+            try
+            {
+                mainViewModel._changeListener?.Stop();
+            }
+            catch { }
 
+            // Сбрасываем сессию пользователя
             await mainViewModel._loginService.LogoutAsync();
-            mainViewModel._changeListener.Stop();
+
+            // Безопасно пытаемся закрыть дочерние окна
+            try
+            {
+                mainViewModel.ChangePresentation(new MvxCloseAllPresentationHint());
+            }
+            catch { }
+
+            // Переходим на экран логина
             await mainViewModel.NavigationService.Navigate<LoginViewModel>();
+
+            // Закрываем сам MainViewModel
+            await mainViewModel.NavigationService.Close(mainViewModel);
         }
         catch (Exception ex)
         {
             mainViewModel.UserInteractionService.ShowExceptionMessage(ex);
+        }
+        finally
+        {
+            mainViewModel.IsBusy = false;
         }
     }
 

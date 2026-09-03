@@ -79,32 +79,64 @@ public class LoginViewModel : BaseViewModel
 
     private async Task LoginAsync()
     {
-        LoginViewModel loginViewModel = this;
-        loginViewModel.IsBusy = true;
+        IsBusy = true;
         try
         {
-            // Режим Бога (отключена активация)
-            // await Task.WhenAll(loginViewModel._activationService.ValidateClientActivationAsync(), loginViewModel._activationService.ValidateServerActivationAsync());
+            // Проверяем отдельно клиентскую и серверную лицензии
+            var clientStatus = await _activationService.GetClientActiveDatesAsync();
+            var serverStatus = await _activationService.GetServerActiveDatesAsync();
 
-            await loginViewModel._loginService.LoginAsync(loginViewModel.Username, loginViewModel.Password);
+            if (!clientStatus.IsActive && !serverStatus.IsActive)
+            {
+                UserInteractionService.ShowMessage(
+                    "Требуется активация",
+                    "Лицензии клиента и сервера не активны. Пожалуйста, активируйте оба модуля для продолжения."
+                );
+                await NavigationService.Navigate<ActivationViewModel>();
+                return;
+            }
 
-            // Открываем главное окно программы
-            await loginViewModel.NavigationService.Navigate<MainViewModel>();
+            if (!clientStatus.IsActive)
+            {
+                UserInteractionService.ShowMessage(
+                    "Лицензия клиента не активна",
+                    "Лицензия пользователя (клиента) не активирована или её срок действия истёк."
+                );
+                await NavigationService.Navigate<ActivationViewModel>();
+                return;
+            }
 
+            if (!serverStatus.IsActive)
+            {
+                UserInteractionService.ShowMessage(
+                    "Лицензия сервера не активна",
+                    "Лицензия сервера не активирована или её срок действия истёк."
+                );
+                await NavigationService.Navigate<ActivationViewModel>();
+                return;
+            }
+
+            await _loginService.LoginAsync(Username, Password);
+            await NavigationService.Navigate<MainViewModel>();
         }
-        catch (ApplicationException ex)
+        catch (InvalidOperationException)
         {
-            loginViewModel.UserInteractionService.ShowMessage(loginViewModel["Application is not activated", Array.Empty<object>()], loginViewModel["Please activate this copy of your application!", Array.Empty<object>()]);
-        }
-        catch (InvalidOperationException ex)
-        {
-            loginViewModel.UserInteractionService.ShowMessage(loginViewModel["Error Logging In", Array.Empty<object>()], loginViewModel["User not exists, or wrong password!", Array.Empty<object>()]);
+            UserInteractionService.ShowMessage(
+                this["Error Logging In", Array.Empty<object>()],
+                this["User not exists, or wrong password!", Array.Empty<object>()]
+            );
         }
         catch (Exception ex)
         {
-            loginViewModel.UserInteractionService.ShowExceptionMessage(ex, $"{loginViewModel["Error Logging In!", Array.Empty<object>()]} ({ex.GetType()})");
+            UserInteractionService.ShowExceptionMessage(
+                ex,
+                $"{this["Error Logging In!", Array.Empty<object>()]} ({ex.GetType().Name})"
+            );
         }
-        loginViewModel.IsBusy = false;
+        finally
+        {
+            IsBusy = false;
+        }
     }
 
     public ICommand ShowSettingsCommand

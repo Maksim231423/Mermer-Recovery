@@ -39,12 +39,12 @@ builder.Services.AddSwaggerGen(options =>
 {
     options.SwaggerDoc("v1", new OpenApiInfo
     {
-        Title = "Mermer Binyat ERP API",
+        Title = "Mermer ERP API",
         Version = "v1",
         Description =
             "HTTP API over the new PostgreSQL data layer. " +
             "Replaces the legacy Couchbase access for the WPF client.",
-        Contact = new OpenApiContact { Name = "Mermer Binyat" }
+        Contact = new OpenApiContact { Name = "Mermer" }
     });
 
     options.ResolveConflictingActions(apiDescriptions => apiDescriptions.First());
@@ -102,6 +102,7 @@ app.MapRevenueReportsEndpoints();
 app.MapUsersEndpoints();
 app.MapRolesEndpoints();
 app.MapStockOrderTemplatesEndpoints();
+app.MapLicensingEndpoints();
 
 
 app.Run();

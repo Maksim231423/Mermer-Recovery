@@ -1,9 +1,12 @@
-﻿using MvvmCross.Wpf.Views;
+﻿using Mermer.Mvvm.ViewModels;
 using Mermer.Ui.Core.ViewModels.Commerce;
-using System.Windows.Input;
+using MvvmCross.Wpf.Views;
+using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Input;
+using System.Windows.Navigation;
+using static System.Windows.Forms.VisualStyles.VisualStyleElement.ListView;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
-using Mermer.Ui.Pc.Helpers;
 
 namespace Mermer.Ui.Pc.Views.Commerce;
 
@@ -22,11 +25,6 @@ public partial class InvoiceDetailsView : MvxWpfView
                 dataContext.UpdatePaymentCommand.Execute(null);
                 e.Handled = true;
                 break;
-            case Key.Home:
-                //PartnerEditor.Focus();
-                //PartnerEditor.OpenPopupCommand.Execute(null);
-                e.Handled = true;
-                break;
             case Key.Insert:
                 dataContext.SelectedLinePlusOneCommand.Execute(null);
                 e.Handled = true;
@@ -42,15 +40,19 @@ public partial class InvoiceDetailsView : MvxWpfView
         }
     }
 
-    // ========================================================
-    // ПРАВИЛЬНОЕ ЗАКРЫТИЕ ЧЕРЕЗ VIEWMODEL
-    // ========================================================
     private void CloseButton_Click(object sender, RoutedEventArgs e)
     {
-        // Получаем текущую ViewModel
-        if (this.DataContext is Mermer.Mvvm.ViewModels.BaseViewModel viewModel)
+        if (DataContext is InvoiceDetailsViewModel invoiceVm)
         {
-            // Вызываем правильную команду закрытия из ViewModel (где лежит наше оригинальное белое окно)
+            if (invoiceVm.CloseCommand != null && invoiceVm.CloseCommand.CanExecute(null))
+            {
+                invoiceVm.CloseCommand.Execute(null);
+                return;
+            }
+        }
+
+        if (DataContext is Mermer.Mvvm.ViewModels.BaseViewModel viewModel)
+        {
             if (viewModel.CloseCommand != null && viewModel.CloseCommand.CanExecute(null))
             {
                 viewModel.CloseCommand.Execute(null);

@@ -183,6 +183,12 @@ public class InvoiceDetailsViewModel :
         Offices.Filter = x => !x.IsDisabled || x.Id == Details?.OfficeId;
 
         UpdateFacilityFilters();
+
+        // Если это новый документ и пользователь ещё ничего не добавлял в строки
+        if (string.IsNullOrEmpty(ItemId) && (Details.Lines == null || Details.Lines.Count == 0))
+        {
+            this.IsDirty = false;
+        }
     }
 
     protected override void Details_PropertyChanged(object sender, PropertyChangedEventArgs e)
@@ -498,5 +504,40 @@ public class InvoiceDetailsViewModel :
     private async Task OnSelectOfficeAsync()
     {
         Details.OfficeId = await NavigationService.Navigate<ListViewModel<Office>, string, string>(Details.OfficeId ?? Guid.Empty.ToString());
+    }
+
+    public new ICommand CloseCommand
+    {
+        get
+        {
+            return new MvxAsyncCommand(async () =>
+            {
+                // Если накладная новая и не добавлено ни одной строки с товаром
+                if (string.IsNullOrEmpty(ItemId) && (Details?.Lines == null || Details.Lines.Count == 0))
+                {
+                    this.IsDirty = false;
+                    await NavigationService.Close(this);
+                    return;
+                }
+
+                // Иначе вызываем оригинальную команду закрытия с диалогом подтверждения
+                base.CloseCommand?.Execute(null);
+            }, () => !IsBusy);
+        }
+    }
+
+    public override async Task<bool> OnCloseAsync()
+    {
+        // Если это новый документ и в накладной нет ни одной добавленной строки с товаром
+        if (string.IsNullOrEmpty(ItemId) && (Details?.Lines == null || Details.Lines.Count == 0))
+        {
+            this.IsDirty = false;
+            await this.NavigationService.Close(this);
+            BaseViewModel.RequestComponentCloseAction?.Invoke(this);
+            return true;
+        }
+
+        // Если строки добавлены или документ уже сохранен — штатная проверка с диалогом
+        return await base.OnCloseAsync();
     }
 }

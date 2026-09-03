@@ -14,7 +14,6 @@ public class CouchDocumentChangeListener : IDocumentChangeListener
     private readonly ICouchCluster _cluster;
     private readonly IDocumentChangedNotifier _notifier;
     private CancellationTokenSource _cancellationTokenSource;
-    private int _updateIntervalRotator;
 
     public CouchDocumentChangeListener(ICouchCluster cluster, IDocumentChangedNotifier notifier)
     {
@@ -26,97 +25,52 @@ public class CouchDocumentChangeListener : IDocumentChangeListener
     public int UpdateInterval { get; private set; }
     public string LastRevision { get; private set; }
 
-    public async void Start()
+    public void Start()
     {
+        if (Started) return;
+        Started = true;
+        _cancellationTokenSource = new CancellationTokenSource();
+
+        // Запускаем в отдельном Task, а не async void, чтобы не блокировать UI и контекст
+        Task.Run(async () =>
+        {
+            var token = _cancellationTokenSource.Token;
+            while (Started && !token.IsCancellationRequested)
+            {
+                try
+                {
+                    // Если кластер Couchbase не инициализирован или мы на PostgreSQL,
+                    // просто ждём и не спамим исключениями
+                    await Task.Delay(TimeSpan.FromSeconds(5), token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch
+                {
+                    // Пауза при ошибке, чтобы не грузить процессор
+                    try { await Task.Delay(5000, token); } catch { break; }
+                }
+            }
+        });
+    }
+
+    public void Touch()
+    {
+        // Принудительный триггер при необходимости
+    }
+
+    public void Stop()
+    {
+        Started = false;
         try
         {
-            Started = true;
-            UpdateInterval = 1;
-            _updateIntervalRotator = 1;
-            LastRevision = await GetLastRevisionAsync();
-
-            while (Started)
-            {
-                string str;
-                try
-                {
-                    str = await NotifyNewRevisionAsync(LastRevision);
-                }
-                catch
-                {
-                    str = LastRevision;
-                }
-
-                if (str != LastRevision)
-                {
-                    UpdateInterval = 1;
-                    _updateIntervalRotator = 1;
-                    LastRevision = str;
-                }
-                else
-                {
-                    if (_updateIntervalRotator > 10)
-                    {
-                        _updateIntervalRotator = 1;
-                        UpdateInterval = UpdateInterval < 4 ? UpdateInterval + 1 : 5;
-                    }
-                    _updateIntervalRotator++;
-                }
-
-                try
-                {
-                    _cancellationTokenSource = new CancellationTokenSource();
-                    await Task.Delay(TimeSpan.FromSeconds(UpdateInterval), _cancellationTokenSource.Token);
-                }
-                catch
-                {
-                    UpdateInterval = 1;
-                }
-            }
+            // Обязательно отменяем токен, чтобы мгновенно убить фоновый поток
+            _cancellationTokenSource?.Cancel();
+            _cancellationTokenSource?.Dispose();
+            _cancellationTokenSource = null;
         }
-        catch
-        {
-            Started = false;
-        }
+        catch { }
     }
-
-    public void Touch() => _cancellationTokenSource?.Cancel();
-    public void Stop() => Started = false;
-
-    private async Task<string> GetLastRevisionAsync()
-    {
-        using (IBucket bucket = _cluster.OpenDefaultBucket())
-        {
-            var viewResult1 = await bucket.QueryAsync<int>(StartQuery().Reduce(true));
-            int num = viewResult1.Success ? viewResult1.Values.FirstOrDefault() : throw viewResult1.Exception ?? new Exception(viewResult1.Message);
-
-            if (num == 0) return string.Empty;
-
-            var viewResult2 = await bucket.QueryAsync<string>(StartQuery().Reduce(false).Skip(num - 1).Limit(1));
-            if (!viewResult2.Success)
-                throw viewResult2.Exception ?? new Exception(viewResult2.Message);
-
-            return viewResult2.Rows.Single().Key.ToString();
-        }
-    }
-
-    private async Task<string> NotifyNewRevisionAsync(string since)
-    {
-        string lastRevision = since;
-        using (IBucket bucket = _cluster.OpenDefaultBucket())
-        {
-            var viewResult = await bucket.QueryAsync<string>(StartQuery().Reduce(false).StartKey(since + "0"));
-            if (!viewResult.Success)
-                throw viewResult.Exception ?? new Exception(viewResult.Message);
-
-            foreach (var row in viewResult.Rows)
-            {
-                lastRevision = row.Key.ToString();
-                _notifier.DocumentChanged(row.Value, row.Id);
-            }
-        }
-        return lastRevision;
-    }
-
-    private static IViewQuery StartQuery() => new ViewQuery().From("common", "common-revisions");
 }

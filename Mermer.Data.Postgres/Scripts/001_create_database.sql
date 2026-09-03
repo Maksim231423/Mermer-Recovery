@@ -1,7 +1,7 @@
 ﻿-- ============================================================================
 -- Mermer ERP — PostgreSQL Database Schema
 -- Migration from Couchbase (NoSQL) to PostgreSQL (Relational)
--- Version: 1.7.0 | Stage 1
+-- Version: 1.8.0 | Core + Licensing
 -- ============================================================================
 
 -- Enable required extensions
@@ -17,7 +17,7 @@ CREATE TABLE offices (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name            VARCHAR(200) NOT NULL,
     region          VARCHAR(200),
-    description      TEXT,
+    description     TEXT,
     tags            TEXT[],
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -29,7 +29,7 @@ CREATE TABLE warehouses (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     office_id       UUID REFERENCES offices(id),
     name            VARCHAR(200) NOT NULL,
-    description      TEXT,
+    description     TEXT,
     tags            TEXT[],
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -43,7 +43,7 @@ CREATE TABLE depositories (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     office_id       UUID REFERENCES offices(id),
     name            VARCHAR(200) NOT NULL,
-    description      TEXT,
+    description     TEXT,
     tags            TEXT[],
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -58,7 +58,7 @@ CREATE TABLE currencies (
     name            VARCHAR(100) NOT NULL,
     decimals        INT NOT NULL DEFAULT 2,
     is_default      BOOLEAN NOT NULL DEFAULT FALSE,
-    description      TEXT,
+    description     TEXT,
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -90,7 +90,7 @@ CREATE TABLE users (
     password        VARCHAR(500) NOT NULL DEFAULT '',
     is_admin        BOOLEAN NOT NULL DEFAULT FALSE,
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
-    description      TEXT,
+    description     TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -98,7 +98,7 @@ CREATE TABLE users (
 CREATE TABLE roles (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name            VARCHAR(200) NOT NULL,
-    description      TEXT,
+    description     TEXT,
     authorizations  TEXT,
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -124,7 +124,7 @@ CREATE TABLE partners (
     group_name      VARCHAR(200),
     credit_limit    NUMERIC(18,4),
     tags            TEXT[],
-    description      TEXT,
+    description     TEXT,
     rating          NUMERIC(18,4) NOT NULL DEFAULT 0,
     currency_id     UUID REFERENCES currencies(id),
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
@@ -148,7 +148,7 @@ CREATE TABLE partner_slips (
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
     group_name      VARCHAR(200),
     tags            TEXT[],
-    description      TEXT,
+    description     TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -169,7 +169,7 @@ CREATE TABLE partner_slip_lines (
 CREATE INDEX idx_partner_slip_lines_slip_id ON partner_slip_lines(partner_slip_id);
 CREATE INDEX idx_partner_slip_lines_partner_id ON partner_slip_lines(partner_id);
 
--- Partner Transfers (Переводы между партнерами/офисами)
+-- Partner Transfers
 CREATE TABLE partner_transfers (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code            VARCHAR(50) NOT NULL,
@@ -180,7 +180,7 @@ CREATE TABLE partner_transfers (
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
     group_name      VARCHAR(200),
     tags            TEXT[],
-    description      TEXT,
+    description     TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -218,7 +218,7 @@ CREATE TABLE stocks (
     barcodes        TEXT[],
     limit_min       NUMERIC(18,4),
     limit_max       NUMERIC(18,4),
-    description      TEXT,
+    description     TEXT,
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -276,7 +276,7 @@ CREATE TABLE stock_name_composers (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     "order"         INT NOT NULL DEFAULT 0,
     name            VARCHAR(500) NOT NULL,
-    description      TEXT,
+    description     TEXT,
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -299,7 +299,7 @@ CREATE INDEX idx_snc_values_composer_id ON stock_name_composer_values(composer_i
 CREATE TABLE stock_alternatives (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name            VARCHAR(500) NOT NULL,
-    description      TEXT,
+    description     TEXT,
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -327,7 +327,7 @@ CREATE TABLE stock_slips (
     is_completed        BOOLEAN NOT NULL DEFAULT FALSE,
     is_stock_income     BOOLEAN NOT NULL DEFAULT FALSE,
     display_total       NUMERIC(18,4) NOT NULL DEFAULT 0,
-    description          TEXT,
+    description         TEXT,
     group_name          VARCHAR(200),
     tags                TEXT[],
     date                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -369,7 +369,7 @@ CREATE TABLE stock_transfers (
     is_disabled                 BOOLEAN NOT NULL DEFAULT FALSE,
     user_name                   VARCHAR(100),
     group_name                  VARCHAR(200),
-    description                  TEXT,
+    description                 TEXT,
     tags                        TEXT[],
     action_total                NUMERIC(18,4) NOT NULL DEFAULT 0,
     action_received_total       NUMERIC(18,4) NOT NULL DEFAULT 0,
@@ -414,7 +414,7 @@ CREATE TABLE stock_revisions (
     is_disabled         BOOLEAN NOT NULL DEFAULT FALSE,
     group_name          VARCHAR(100),
     tags                TEXT[],
-    description          TEXT,
+    description         TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -454,7 +454,7 @@ CREATE TABLE stock_orders (
     is_disabled         BOOLEAN NOT NULL DEFAULT FALSE,
     group_name          VARCHAR(200),
     tags                TEXT[],
-    description          TEXT,
+    description         TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -493,7 +493,7 @@ CREATE TABLE stock_order_templates (
     name                VARCHAR(500) NOT NULL,
     group_name          VARCHAR(200),
     tags                TEXT[],
-    description          TEXT,
+    description         TEXT,
     is_disabled         BOOLEAN NOT NULL DEFAULT FALSE,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -522,7 +522,7 @@ CREATE TABLE aggregated_stock_orders (
     is_disabled         BOOLEAN NOT NULL DEFAULT FALSE,
     group_name          VARCHAR(200),
     tags                TEXT[],
-    description          TEXT,
+    description         TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -629,7 +629,7 @@ CREATE TABLE invoice_discounts (
     invoice_id      UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
     discount_type   VARCHAR(20) NOT NULL CHECK (discount_type IN ('Flat', 'Percentage')),
     amount          NUMERIC(18,4) NOT NULL DEFAULT 0,
-    description      TEXT,
+    description     TEXT,
     sort_order      INT NOT NULL DEFAULT 0
 );
 
@@ -653,7 +653,7 @@ CREATE TABLE invoice_overheads (
     invoice_id      UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
     amount          NUMERIC(18,4) NOT NULL DEFAULT 0,
     currency_id     UUID REFERENCES currencies(id),
-    description      TEXT,
+    description     TEXT,
     sort_order      INT NOT NULL DEFAULT 0
 );
 
@@ -696,7 +696,7 @@ CREATE TABLE funds_slips (
     is_disabled         BOOLEAN NOT NULL DEFAULT FALSE,
     group_name          VARCHAR(200),
     tags                TEXT[],
-    description          TEXT,
+    description         TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -726,7 +726,7 @@ CREATE TABLE funds_transfers (
     is_disabled         BOOLEAN NOT NULL DEFAULT FALSE,
     group_name          VARCHAR(200),
     tags                TEXT[],
-    description          TEXT,
+    description         TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -752,7 +752,7 @@ CREATE TABLE expenses (
     name            VARCHAR(255) NOT NULL,
     type            VARCHAR(100),
     group_name      VARCHAR(200),
-    description      TEXT,
+    description     TEXT,
     tags            TEXT[],
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -777,7 +777,7 @@ CREATE TABLE expense_slips (
     is_disabled         BOOLEAN NOT NULL DEFAULT FALSE,
     group_name          VARCHAR(200),
     tags                TEXT[],
-    description          TEXT,
+    description         TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -809,7 +809,7 @@ CREATE TABLE daily_funds_registeries (
     is_disabled         BOOLEAN NOT NULL DEFAULT FALSE,
     group_name          VARCHAR(200),
     tags                TEXT[],
-    description          TEXT,
+    description         TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -834,7 +834,7 @@ CREATE TABLE IF NOT EXISTS partner_actions (
     action_type     VARCHAR(20) NOT NULL CHECK (action_type IN ('Debit','Credit')),
     amount          NUMERIC(18,4) NOT NULL DEFAULT 0,
     currency_id     UUID REFERENCES currencies(id),
-    description      TEXT,
+    description     TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

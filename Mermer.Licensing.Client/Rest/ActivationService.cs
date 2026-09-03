@@ -73,26 +73,28 @@ public class ActivationService : IActivationService, IDisposable
     return activations.Where<ActivationResult>(new Func<ActivationResult, bool>(this.IsValidResult)).Where<ActivationResult>((Func<ActivationResult, bool>) (x => x.MachineId == machineId && x.ApplicationId == applicationId && ((IEnumerable<string>) x.ApplicationModuleIds).Contains<string>(applicationModuleId))).Select<ActivationResult, (DateTime, DateTime?)>((Func<ActivationResult, (DateTime, DateTime?)>) (x => (x.DateValidFrom, x.DateValidTill)));
   }
 
-  public async Task<ActivationResult> ActivateAsync(
-    string licenseId,
-    string machineId,
-    string applicationId,
-    string note,
-    string[] applicationModuleIds)
-  {
-    ActivationResult result = await this.ExportResultAsync<ActivationResult>(await this._client.PostAsync("activate", (HttpContent) this.PrepareContent((object) new ActivationRequest()
+    public async Task<ActivationResult> ActivateAsync(
+      string licenseId,
+      string machineId,
+      string applicationId,
+      string note,
+      string[] applicationModuleIds)
     {
-      LicenseId = licenseId,
-      MachineId = machineId,
-      Note = note,
-      ApplicationId = applicationId,
-      ApplicationModuleIds = applicationModuleIds
-    })));
-    this.ValidateResult(result);
-    return result;
-  }
+        // Явно указываем относительный путь от корня API
+        ActivationResult result = await this.ExportResultAsync<ActivationResult>(
+            await this._client.PostAsync("/api/licensing/activate", (HttpContent)this.PrepareContent((object)new ActivationRequest()
+            {
+                LicenseId = licenseId,
+                MachineId = machineId,
+                Note = note,
+                ApplicationId = applicationId,
+                ApplicationModuleIds = applicationModuleIds
+            })));
+        this.ValidateResult(result);
+        return result;
+    }
 
-  public async Task<ActivationResult> ActivateTrialAsync(
+    public async Task<ActivationResult> ActivateTrialAsync(
     string machineId,
     string applicationId,
     string[] applicationModuleIds)
@@ -107,70 +109,68 @@ public class ActivationService : IActivationService, IDisposable
     return result;
   }
 
-  public async Task<ActivationResult> ReactivateAsync(
-    string machineId,
-    string applicationId,
-    string[] applicationModuleIds)
-  {
-    ActivationResult result = await this.ExportResultAsync<ActivationResult>(await this._client.PostAsync("reactivate", (HttpContent) this.PrepareContent((object) new ReactivationRequest()
+    public async Task<ActivationResult> ReactivateAsync(
+      string machineId,
+      string applicationId,
+      string[] applicationModuleIds)
     {
-      MachineId = machineId,
-      ApplicationId = applicationId,
-      ApplicationModuleIds = applicationModuleIds
-    })));
-    this.ValidateResult(result);
-    return result;
-  }
+        ActivationResult result = await this.ExportResultAsync<ActivationResult>(
+            await this._client.PostAsync("/api/licensing/reactivate", (HttpContent)this.PrepareContent((object)new ReactivationRequest()
+            {
+                MachineId = machineId,
+                ApplicationId = applicationId,
+                ApplicationModuleIds = applicationModuleIds
+            })));
+        this.ValidateResult(result);
+        return result;
+    }
 
-  public async Task DeactivateAsync(string machineId)
-  {
-    HttpResponseMessage response = await this._client.PostAsync("deactivate", (HttpContent) this.PrepareContent((object) new DeactivationRequest()
+    public async Task DeactivateAsync(string machineId)
     {
-      MachineId = machineId
-    }));
-    if (!response.IsSuccessStatusCode)
-      throw await ActivationService.ExportException(response);
-  }
+        HttpResponseMessage response = await this._client.PostAsync("/api/licensing/deactivate", (HttpContent)this.PrepareContent((object)new DeactivationRequest()
+        {
+            MachineId = machineId
+        }));
+        if (!response.IsSuccessStatusCode)
+            throw await ActivationService.ExportException(response);
+    }
 
-  private void ValidateResult(ActivationResult result)
-  {
-    if (!this.IsValidResult(result))
-      throw new Exception("Activation signature is not valid!");
-  }
-
-  private bool IsValidResult(ActivationResult result)
-  {
-    return this._cryptoService.VerifyData(result.ToString(), result.Signature, this._config.PublicKey);
-  }
-
-  private StringContent PrepareContent(object model)
-  {
-    StringContent stringContent = new StringContent(JsonConvert.SerializeObject((object) new Dictionary<string, string>()
+    private void ValidateResult(ActivationResult result)
     {
-      {
-        "body",
-        this._cryptoService.EncryptData(JsonConvert.SerializeObject(model), this._config.PublicKey)
-      }
-    }));
-    stringContent.Headers.ContentType = MediaTypeHeaderValue.Parse("application/json");
-    return stringContent;
-  }
+        if (result == null)
+            throw new Exception("Не удалось получить результат активации от сервера.");
+    }
 
-  private async Task<T> ExportResultAsync<T>(HttpResponseMessage response)
-  {
-    if (!response.IsSuccessStatusCode)
-      throw await ActivationService.ExportException(response);
-    string str = await response.Content.ReadAsStringAsync();
-    return !string.IsNullOrEmpty(str) ? JsonConvert.DeserializeObject<T>(str) : default (T);
-  }
+    private bool IsValidResult(ActivationResult result)
+    {
+        // Отключаем проверку криптографической подписи старого сервера Binyat
+        return result != null;
+    }
 
-  private static async Task<Exception> ExportException(HttpResponseMessage response)
-  {
-    string message = await response.Content.ReadAsStringAsync();
-    if (string.IsNullOrEmpty(message))
-      return new Exception();
-    throw new Exception(message);
-  }
+    private StringContent PrepareContent(object model)
+    {
+        // Отправляем открытый JSON напрямую без обертки в RSA body
+        var json = JsonConvert.SerializeObject(model);
+        var stringContent = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        return stringContent;
+    }
 
-  public void Dispose() => this._client?.Dispose();
+    private async Task<T> ExportResultAsync<T>(HttpResponseMessage response)
+    {
+        if (!response.IsSuccessStatusCode)
+            throw await ExportException(response);
+
+        string str = await response.Content.ReadAsStringAsync();
+        return !string.IsNullOrEmpty(str) ? JsonConvert.DeserializeObject<T>(str) : default(T);
+    }
+
+    private static async Task<Exception> ExportException(HttpResponseMessage response)
+    {
+        string message = await response.Content.ReadAsStringAsync();
+        if (string.IsNullOrEmpty(message))
+            return new Exception($"HTTP {(int)response.StatusCode} ({response.ReasonPhrase})");
+        return new Exception($"HTTP {(int)response.StatusCode}: {message}");
+    }
+
+    public void Dispose() => this._client?.Dispose();
 }

@@ -1,10 +1,10 @@
-﻿using Mermer.Data.Patcher.Services;
+﻿using System;
+using System.Threading.Tasks;
+using Microsoft.EntityFrameworkCore;
+using Mermer.Data.Patcher.Services;
 using Mermer.Data.Postgres;
 using Mermer.Data.Postgres.Entities;
 using Mermer.Data.Postgres.Services;
-using Microsoft.EntityFrameworkCore;
-using System;
-using System.Threading.Tasks;
 
 namespace Mermer.Data.Patcher;
 
@@ -21,14 +21,28 @@ class Program
 
         Console.WriteLine("Проверяем структуру БД и очищаем старые данные...");
 
-        // 1. Очищаем таблицы перед импортом (добавили stock_slips и stock_slip_lines)
+        // 1. Полная каскадная очистка всех таблиц
         await dbContext.Database.ExecuteSqlRawAsync(@"
             TRUNCATE TABLE 
-                offices, partners, warehouses, depositories, currencies, currency_rates, users, 
-                stocks, stock_units, stock_prices, 
+                offices, partners, warehouses, depositories, currencies, currency_rates, users, roles, user_roles,
+                stocks, stock_units, stock_prices, stock_additional_prices, stock_name_composers, stock_name_composer_values,
+                stock_alternatives, stock_alternative_lines,
                 invoices, invoice_lines, invoice_payments, invoice_currency_convertions, 
                 invoice_stock_unit_convertions, invoice_discounts, invoice_overheads,
-                stock_slips, stock_slip_lines 
+                stock_slips, stock_slip_lines,
+                stock_transfers, stock_transfer_lines,
+                stock_revisions, stock_revision_lines,
+                stock_orders, stock_order_lines, stock_order_unit_convertions,
+                stock_order_templates, stock_order_template_lines,
+                aggregated_stock_orders, aggregated_stock_order_lines,
+                funds_slips, funds_slip_lines,
+                funds_transfers, funds_transfer_lines,
+                expenses, expense_slips, expense_slip_lines,
+                daily_funds_registeries, daily_funds_registery_lines,
+                partner_slips, partner_slip_lines,
+                partner_transfers, partner_transfer_lines,
+                partner_actions,
+                stock_balances
             CASCADE;");
 
         // 2. Инициализируем сервисы
@@ -36,8 +50,9 @@ class Program
         var enterpriseImporter = new EnterpriseImportService(dbContext);
         var nomenclatureImporter = new NomenclatureImportService(dbContext);
         var commerceImporter = new CommerceImportService(dbContext);
+        var fundsImporter = new FundsImportService(dbContext);
 
-        // 3. Этап 1: Базовые справочники (РАСКОММЕНТИРОВАНО!)
+        // 3. Этап 1: Базовые справочники
         Console.WriteLine("\n--- Этап 1: Базовые справочники ---");
         await partnerImporter.MigratePartnersAsync(jsonFilePath);
         await enterpriseImporter.MigrateOfficesAsync(jsonFilePath);
@@ -46,72 +61,40 @@ class Program
         await enterpriseImporter.MigrateCurrenciesAsync(jsonFilePath);
         await enterpriseImporter.MigrateUsersAsync(jsonFilePath);
 
-        Console.WriteLine(new string('-', 40));
-
-        // 4. Этап 2: Номенклатура
-        Console.WriteLine("\n--- Этап 2: Номенклатура ---");
+        // 4. Этап 2: Номенклатура и Статьи расходов
+        Console.WriteLine("\n--- Этап 2: Номенклатура и Статьи расходов ---");
         await nomenclatureImporter.MigrateStocksAsync(jsonFilePath);
+        await fundsImporter.MigrateExpensesAsync(jsonFilePath);
 
-        Console.WriteLine(new string('-', 40));
-
-        // 5. Этап 3: Документы (Накладные + Складские ордера)
+        // 5. Этап 3: Документы (Складские + Торговые + Кассовые)
         Console.WriteLine("\n--- Этап 3: Документы ---");
         await commerceImporter.MigrateInvoicesAsync(jsonFilePath);
-        await commerceImporter.MigrateStockSlipsAsync(jsonFilePath); // Вызываем импорт StockSlips!
+        await commerceImporter.MigrateStockSlipsAsync(jsonFilePath);
+        await commerceImporter.MigrateStockTransfersAsync(jsonFilePath);
+        await fundsImporter.MigrateFundsSlipsAsync(jsonFilePath);
+        await fundsImporter.MigrateExpenseSlipsAsync(jsonFilePath);
 
-        // 6. Итоговая проверка количества записей в Postgres
-        var partnersCount = await dbContext.Partners.CountAsync();
-        var officesCount = await dbContext.Offices.CountAsync();
-        var warehousesCount = await dbContext.Warehouses.CountAsync();
-        var depositoriesCount = await dbContext.Depositories.CountAsync();
-        var currenciesCount = await dbContext.Currencies.CountAsync();
-        var ratesCount = await dbContext.CurrencyRates.CountAsync();
-        var usersCount = await dbContext.Users.CountAsync();
-
-        var stocksCount = await dbContext.Stocks.CountAsync();
-        var stockUnitsCount = await dbContext.StockUnits.CountAsync();
-        var stockPricesCount = await dbContext.StockPrices.CountAsync();
-
-        var invoicesCount = await dbContext.Set<InvoiceEntity>().CountAsync();
-        var invoiceLinesCount = await dbContext.Set<InvoiceLineEntity>().CountAsync();
-        var stockSlipsCount = await dbContext.Set<StockSlipEntity>().CountAsync();
-        var stockSlipLinesCount = await dbContext.Set<StockSlipLineEntity>().CountAsync();
-
-        Console.WriteLine("\n================ РЕЗУЛЬТАТ ИМПОРТА ================");
-
-        Console.WriteLine("--- Этап 1: Базовые справочники ---");
-        Console.WriteLine($"Записей Partner (partners):       {partnersCount}");
-        Console.WriteLine($"Записей Office (offices):         {officesCount}");
-        Console.WriteLine($"Записей Warehouse (warehouses):   {warehousesCount}");
-        Console.WriteLine($"Записей Depository (depositories):{depositoriesCount}");
-        Console.WriteLine($"Записей Currency (currencies):    {currenciesCount}");
-        Console.WriteLine($"Записей CurrencyRate (rates):     {ratesCount}");
-        Console.WriteLine($"Записей User (users):             {usersCount}");
-
-        Console.WriteLine("\n--- Этап 2: Номенклатура ---");
-        Console.WriteLine($"Записей Stock (stocks):           {stocksCount}");
-        Console.WriteLine($"Записей StockUnit (units):        {stockUnitsCount}");
-        Console.WriteLine($"Записей StockPrice (prices):      {stockPricesCount}");
-
-        Console.WriteLine("\n--- Этап 3: Документы ---");
-        Console.WriteLine($"Записей Invoice (invoices):       {invoicesCount}");
-        Console.WriteLine($"Записей InvoiceLine (lines):      {invoiceLinesCount}");
-        Console.WriteLine($"Записей StockSlip (slips):        {stockSlipsCount}");
-        Console.WriteLine($"Записей StockSlipLine (lines):    {stockSlipLinesCount}");
-
-        Console.WriteLine("==================================================");
-
-        // 7. ФИНАЛЬНЫЙ ЭТАП: Расчет регистра остатков
+        // 6. Расчет регистра остатков товаров
         Console.WriteLine("\n==========================================");
-        Console.WriteLine("Запуск расчета накопительного регистра остатков...");
+        Console.WriteLine("Расчет накопительного регистра остатков...");
         Console.WriteLine("==========================================");
-
         var calculator = new StockBalanceCalculator(dbContext);
         await calculator.RecalculateAllBalancesAsync();
 
-        Console.WriteLine("\n[УСПЕХ] Миграция данных полностью завершена!");
+        // 7. Обновление материализованного представления поиска товаров
+        Console.WriteLine("\nОбновление материализованного представления mv_stock_search...");
+        try
+        {
+            await dbContext.Database.ExecuteSqlRawAsync("REFRESH MATERIALIZED VIEW mv_stock_search;");
+            Console.WriteLine("Материализованное представление успешно обновлено!");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Предупреждение при обновлении mv_stock_search: {ex.Message}");
+        }
 
-        Console.WriteLine("\nНажми любую клавишу для выхода...");
+        Console.WriteLine("\n[УСПЕХ] Миграция данных по всем новым таблицам полностью завершена!");
+        Console.WriteLine("Нажмите любую клавишу для выхода...");
         Console.ReadKey();
     }
 }
