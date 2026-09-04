@@ -3,7 +3,6 @@ using Microsoft.Extensions.Logging;
 using Mermer.Api.DTOs;
 using Mermer.Data.Postgres;
 using Mermer.Data.Postgres.Entities;
-using Mermer.Data.Postgres.Services;
 using System;
 using System.Linq;
 using System.Threading;

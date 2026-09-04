@@ -1,17 +1,15 @@
 ﻿using Mermer.Api.Endpoints;
 using Mermer.Api.Services;
 using Mermer.Data.Postgres;
-using Mermer.Data.Postgres.Services;
 using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
 var connectionString =
     builder.Configuration.GetConnectionString("Postgres")
+    ?? builder.Configuration.GetConnectionString("DefaultConnection")
     ?? throw new InvalidOperationException(
-        "Connection string 'Postgres' is not configured. " +
-        "Set it in appsettings.json or via environment variable " +
-        "ConnectionStrings__Postgres.");
+        "Connection string is not configured. Set 'Postgres' or 'DefaultConnection'.");
 
 builder.Services.AddMermerPostgres(connectionString);
 
