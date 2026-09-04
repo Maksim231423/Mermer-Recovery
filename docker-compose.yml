@@ -1,18 +1,22 @@
-version: '3.8'
-
 services:
   db:
     image: postgres:16-alpine
     container_name: mermer_postgres
     restart: always
     environment:
-      POSTGRES_DB: payhas
-      POSTGRES_USER: payhas_app
-      POSTGRES_PASSWORD: payhas_password
+      POSTGRES_DB: mermer_creation
+      POSTGRES_USER: mermer_creation
+      POSTGRES_PASSWORD: mermer_strong_password_123
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./init-db/001_create_database.sql:/docker-entrypoint-initdb.d/001_create_database.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mermer_creation -d mermer_creation"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   api:
     build:
@@ -21,9 +25,10 @@ services:
     container_name: mermer_api
     restart: always
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     environment:
-      - ConnectionStrings__DefaultConnection=Host=db;Port=5432;Database=payhas;Username=payhas_app;Password=payhas_password
+      - ConnectionStrings__DefaultConnection=Host=db;Port=5432;Database=mermer_creation;Username=mermer_creation;Password=mermer_strong_password_123
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_HTTP_PORTS=8080
     ports:
