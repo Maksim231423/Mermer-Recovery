@@ -25,51 +25,64 @@ public static class AuthEndpoints
         // 1. Авторизация
         group.MapPost("/login", async (LoginRequestDto request, MermerDbContext db) =>
         {
-            if (string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrWhiteSpace(request.Password))
+            try
             {
-                return Results.BadRequest(new { message = "Логин и пароль обязательны." });
+                if (string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrWhiteSpace(request.Password))
+                {
+                    return Results.BadRequest(new { message = "Логин и пароль обязательны." });
+                }
+
+                var user = await db.Users
+                    .FirstOrDefaultAsync(u => u.Username.ToLower() == request.Username.Trim().ToLower());
+
+                if (user == null)
+                {
+                    return Results.Json(new { message = $"Пользователь '{request.Username}' не найден в БД." }, statusCode: StatusCodes.Status401Unauthorized);
+                }
+
+                if (user.IsDisabled)
+                {
+                    return Results.BadRequest(new { message = "Учетная запись отключена." });
+                }
+
+                string inputSha256 = HashPassword(request.Password);
+
+                bool isPasswordValid = string.Equals(user.Password, request.Password, StringComparison.Ordinal)
+                                    || string.Equals(user.Password, inputSha256, StringComparison.Ordinal)
+                                    || (request.Password == "admin" && user.Password == "0DPiKuNIrrVmD8IUCuw1hQxNqZc=");
+
+                if (!isPasswordValid)
+                {
+                    return Results.Json(new
+                    {
+                        message = "Неверный пароль.",
+                        debug = $"В БД: '{user.Password}', Введено: '{request.Password}', SHA-256: '{inputSha256}'"
+                    }, statusCode: StatusCodes.Status401Unauthorized);
+                }
+
+                string role = user.IsAdmin ? "Admin" : "User";
+                string name = !string.IsNullOrEmpty(user.Description) ? user.Description : user.Username;
+
+                var response = new UserSessionDto(
+                    Id: user.Id.ToString(),
+                    Username: user.Username,
+                    Name: name,
+                    Role: role,
+                    Token: Guid.NewGuid().ToString()
+                );
+
+                return Results.Ok(response);
             }
-
-            var user = await db.Users
-                .FirstOrDefaultAsync(u => u.Username.ToLower() == request.Username.Trim().ToLower());
-
-            if (user == null)
+            catch (Exception ex)
             {
-                return Results.Unauthorized();
+                return Results.Json(new
+                {
+                    message = "Исключение на сервере!",
+                    error = ex.Message,
+                    inner = ex.InnerException?.Message,
+                    stackTrace = ex.StackTrace
+                }, statusCode: StatusCodes.Status500InternalServerError);
             }
-
-            if (user.IsDisabled)
-            {
-                return Results.BadRequest(new { message = "Учетная запись отключена." });
-            }
-
-            string inputSha256 = HashPassword(request.Password);
-
-            // Проверка:
-            // 1) Прямое совпадение (если клиент передал уже готовый хеш)
-            // 2) Совпадение по вычисленному SHA-256
-            // 3) Маппинг для дефолтного администратора
-            bool isPasswordValid = string.Equals(user.Password, request.Password, StringComparison.Ordinal)
-                                || string.Equals(user.Password, inputSha256, StringComparison.Ordinal)
-                                || (request.Password == "admin" && user.Password == "0DPiKuNIrrVmD8IUCuw1hQxNqZc=");
-
-            if (!isPasswordValid)
-            {
-                return Results.Unauthorized();
-            }
-
-            string role = user.IsAdmin ? "Admin" : "User";
-            string name = !string.IsNullOrEmpty(user.Description) ? user.Description : user.Username;
-
-            var response = new UserSessionDto(
-                Id: user.Id.ToString(),
-                Username: user.Username,
-                Name: name,
-                Role: role,
-                Token: Guid.NewGuid().ToString()
-            );
-
-            return Results.Ok(response);
         })
         .WithName("Login")
         .WithSummary("Авторизация пользователя в системе");

@@ -128,12 +128,33 @@ public class Setup : MvxWpfSetup
         // ШАГ 3: ПОВЕРХ ЗАГЛУШЕК СТАВИМ НАШИ НАСТОЯЩИЕ REST API КЛАССЫ
         // =====================================================================
 
+        // =====================================================================
+        // ШАГ 3: ПОВЕРХ ЗАГЛУШЕК СТАВИМ НАШИ НАСТОЯЩИЕ REST API КЛАССЫ
+        // =====================================================================
+
         builder.Register(c =>
         {
-            var client = new System.Net.Http.HttpClient();
-            var apiUrl = Configuration["ApiUrl"] ?? "http://localhost:5000";
-            client.BaseAddress = new Uri(apiUrl);
-            client.Timeout = TimeSpan.FromSeconds(2); // ТАЙМАУТ 2 СЕКУНДЫ ДЛЯ ОФФЛАЙНА
+            var configurator = c.Resolve<IConfigurator>();
+            var connSettings = configurator.GetConfig<ConnectionSettings>();
+
+            // 1. Приоритет: адрес из окна настроек пользователя
+            string serviceUrl = connSettings?.ServiceAddress;
+
+            // 2. Если пусто — берем из appsettings.json или дефолтный порт Docker (5050)
+            if (string.IsNullOrWhiteSpace(serviceUrl))
+            {
+                serviceUrl = Configuration["ApiUrl"] ?? "http://localhost:5050";
+            }
+
+            // Убираем случайные слэши на конце для чистоты URI
+            serviceUrl = serviceUrl.TrimEnd('/') + "/";
+
+            var client = new System.Net.Http.HttpClient
+            {
+                BaseAddress = new Uri(serviceUrl),
+                Timeout = TimeSpan.FromSeconds(15) // Запас времени для Docker
+            };
+
             return client;
         }).AsSelf().SingleInstance();
 

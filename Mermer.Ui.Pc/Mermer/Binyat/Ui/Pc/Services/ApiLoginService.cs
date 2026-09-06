@@ -33,7 +33,7 @@ namespace Mermer.Ui.Pc.Services
 
                 if (apiResponse == null)
                 {
-                    throw new InvalidOperationException("Неверный логин или пароль!");
+                    throw new Exception("API вернул пустой ответ (null).");
                 }
 
                 bool isAdmin = string.Equals(apiResponse.Role, "Admin", StringComparison.OrdinalIgnoreCase);
@@ -47,7 +47,9 @@ namespace Mermer.Ui.Pc.Services
             }
             catch (Exception ex)
             {
-                throw new InvalidOperationException($"Ошибка входа: {ex.Message}", ex);
+                // Выводим все детали исключения: сообщение, внутреннее исключение
+                string detail = ex.InnerException != null ? $"{ex.Message} -> {ex.InnerException.Message}" : ex.Message;
+                throw new Exception($"[Auth Debug] {detail}", ex);
             }
         }
 

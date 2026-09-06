@@ -224,23 +224,24 @@ CREATE INDEX IF NOT EXISTS ix_partner_actions_partner ON partner_actions(partner
 
 -- 15. Stocks
 CREATE TABLE IF NOT EXISTS stocks (
-    id           TEXT PRIMARY KEY,
-    code         TEXT,
-    name         TEXT NOT NULL,
-    short_name   TEXT,
-    type         TEXT,
-    group_name   TEXT,
-    tags         TEXT,
-    barcodes     TEXT,
-    limit_min    NUMERIC(18,4),
-    limit_max    NUMERIC(18,4),
-    description  TEXT,
-    is_disabled  INTEGER NOT NULL DEFAULT 0,
-    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
-    row_version  INTEGER NOT NULL DEFAULT 1,
-    sync_state   TEXT    NOT NULL DEFAULT 'synced',
-    last_synced  TEXT
+    id            TEXT PRIMARY KEY,
+    code          TEXT,
+    name          TEXT NOT NULL,
+    short_name    TEXT,
+    type          TEXT,
+    group_name    TEXT,
+    tags          TEXT,
+    barcodes      TEXT,
+    limit_min     NUMERIC(18,4),
+    limit_max     NUMERIC(18,4),
+    description   TEXT,
+    search_vector TEXT,
+    is_disabled   INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    row_version   INTEGER NOT NULL DEFAULT 1,
+    sync_state    TEXT    NOT NULL DEFAULT 'synced',
+    last_synced   TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_stocks_code ON stocks(code);
 CREATE INDEX IF NOT EXISTS ix_stocks_disabled ON stocks(is_disabled);

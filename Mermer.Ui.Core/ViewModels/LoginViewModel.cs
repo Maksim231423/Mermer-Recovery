@@ -119,18 +119,20 @@ public class LoginViewModel : BaseViewModel
             await _loginService.LoginAsync(Username, Password);
             await NavigationService.Navigate<MainViewModel>();
         }
-        catch (InvalidOperationException)
+        catch (InvalidOperationException ex)
         {
-            UserInteractionService.ShowMessage(
-                this["Error Logging In", Array.Empty<object>()],
-                this["User not exists, or wrong password!", Array.Empty<object>()]
-            );
+            // Выводим РЕАЛЬНОЕ сообщение об ошибке и внутреннее исключение (InnerException)
+            string details = ex.InnerException != null
+                ? $"{ex.Message}\n\nДетали: {ex.InnerException.Message}"
+                : ex.Message;
+
+            UserInteractionService.ShowMessage("Ошибка входа (InvalidOperation)", details);
         }
         catch (Exception ex)
         {
             UserInteractionService.ShowExceptionMessage(
                 ex,
-                $"{this["Error Logging In!", Array.Empty<object>()]} ({ex.GetType().Name})"
+                $"Критическая ошибка ({ex.GetType().Name})"
             );
         }
         finally

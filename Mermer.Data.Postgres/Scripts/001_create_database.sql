@@ -218,6 +218,7 @@ CREATE TABLE stocks (
     barcodes        TEXT[],
     limit_min       NUMERIC(18,4),
     limit_max       NUMERIC(18,4),
+    search_vector tsvector,
     description     TEXT,
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -229,6 +230,7 @@ CREATE INDEX idx_stocks_name_trgm ON stocks USING GIN (name gin_trgm_ops);
 CREATE INDEX idx_stocks_code_trgm ON stocks USING GIN (code gin_trgm_ops) WHERE code IS NOT NULL;
 CREATE INDEX idx_stocks_barcodes ON stocks USING GIN (barcodes);
 CREATE INDEX idx_stocks_is_disabled ON stocks(is_disabled) WHERE NOT is_disabled;
+CREATE INDEX IF NOT EXISTS ix_stocks_search_vector ON stocks USING gin(search_vector);
 
 -- Stock Units
 CREATE TABLE stock_units (
