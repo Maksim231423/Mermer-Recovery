@@ -3,10 +3,9 @@ using System.IO;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
-using Microsoft.Win32;
+using Npgsql;
 using Mermer.Data.Patcher.Services;
 using Mermer.Data.Postgres;
-using Mermer.Data.Postgres.Entities;
 using Mermer.Data.Postgres.Services;
 
 namespace Mermer.Data.Patcher;
@@ -18,104 +17,90 @@ class Program
         Console.OutputEncoding = System.Text.Encoding.UTF8;
         Console.WriteLine("=== MERMER DATA PATCHER (MIGRATION TOOL) ===");
 
-        // 1. Дефолтные настройки для нашего Docker PostgreSQL
-        string defaultHost = "localhost";
-        string defaultPort = "5433";
-        string defaultDb = "mermer_creation";
-        string defaultUser = "mermer_creation";
-        string defaultPass = "mermer_strong_password_123";
+        // Загрузка конфигурации: CLI args -> Environment -> appsettings.json
+        var config = new ConfigurationBuilder()
+            .SetBasePath(AppContext.BaseDirectory)
+            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
+            .AddEnvironmentVariables()
+            .AddCommandLine(args)
+            .Build();
 
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(@"Software\MermerCS\Binyat");
-            if (key != null)
-            {
-                var addr = key.GetValue("DatabaseAddress")?.ToString()
-                        ?? key.GetValue("ServiceAddress")?.ToString();
+        // 1. Определение параметров подключения
+        string? configuredConnStr = config.GetConnectionString("Postgres");
+        var builder = new NpgsqlConnectionStringBuilder(!string.IsNullOrWhiteSpace(configuredConnStr)
+            ? configuredConnStr
+            : "Host=localhost;Port=5433;Database=mermer_creation;Username=mermer_creation;Password=mermer_strong_password_123");
 
-                if (!string.IsNullOrWhiteSpace(addr))
-                {
-                    addr = addr.Replace("http://", "").Replace("https://", "").TrimEnd('/');
-                    var parts = addr.Split(':');
-                    if (parts.Length > 0 && !string.IsNullOrWhiteSpace(parts[0]))
-                        defaultHost = parts[0];
+        Console.WriteLine("\nНастройка подключения к PostgreSQL (Enter для подтверждения):");
 
-                    // Игнорируем порты Couchbase (8091-8094, 11210) и Web API (5050, 8080)
-                    if (parts.Length > 1 && int.TryParse(parts[1], out var parsedPort))
-                    {
-                        if (parsedPort == 5432 || parsedPort == 5433)
-                        {
-                            defaultPort = parts[1];
-                        }
-                    }
-                }
-
-                var db = key.GetValue("DatabaseName")?.ToString();
-                if (!string.IsNullOrWhiteSpace(db) && !db.Contains("binyat"))
-                    defaultDb = db;
-
-                var u = key.GetValue("DatabaseUser")?.ToString();
-                if (!string.IsNullOrWhiteSpace(u) && u != "admin")
-                    defaultUser = u;
-
-                var p = key.GetValue("DatabasePassword")?.ToString();
-                if (!string.IsNullOrWhiteSpace(p) && p != "PwdAdm321")
-                    defaultPass = p;
-            }
-        }
-        catch { }
-
-        // 2. Интерактивный ввод/подтверждение параметров
-        Console.WriteLine("\nПараметры подключения к PostgreSQL (нажмите Enter для значения в скобках):");
-
-        Console.Write($"Хост [{defaultHost}]: ");
+        Console.Write($"Хост [{builder.Host}]: ");
         var inputHost = Console.ReadLine();
-        string host = string.IsNullOrWhiteSpace(inputHost) ? defaultHost : inputHost.Trim();
+        if (!string.IsNullOrWhiteSpace(inputHost)) builder.Host = inputHost.Trim();
 
-        Console.Write($"Порт [{defaultPort}]: ");
+        Console.Write($"Порт [{builder.Port}]: ");
         var inputPort = Console.ReadLine();
-        string port = string.IsNullOrWhiteSpace(inputPort) ? defaultPort : inputPort.Trim();
+        if (int.TryParse(inputPort, out var p)) builder.Port = p;
 
-        Console.Write($"База данных [{defaultDb}]: ");
+        Console.Write($"База данных [{builder.Database}]: ");
         var inputDb = Console.ReadLine();
-        string database = string.IsNullOrWhiteSpace(inputDb) ? defaultDb : inputDb.Trim();
+        if (!string.IsNullOrWhiteSpace(inputDb)) builder.Database = inputDb.Trim();
 
-        Console.Write($"Пользователь [{defaultUser}]: ");
+        Console.Write($"Пользователь [{builder.Username}]: ");
         var inputUser = Console.ReadLine();
-        string user = string.IsNullOrWhiteSpace(inputUser) ? defaultUser : inputUser.Trim();
+        if (!string.IsNullOrWhiteSpace(inputUser)) builder.Username = inputUser.Trim();
 
-        Console.Write($"Пароль [{defaultPass}]: ");
+        Console.Write($"Пароль [{(string.IsNullOrEmpty(builder.Password) ? "не задан" : "******")}]: ");
         var inputPass = Console.ReadLine();
-        string password = string.IsNullOrWhiteSpace(inputPass) ? defaultPass : inputPass.Trim();
+        if (!string.IsNullOrWhiteSpace(inputPass)) builder.Password = inputPass.Trim();
 
-        string connectionString = $"Host={host};Port={port};Database={database};Username={user};Password={password}";
+        // 2. Определение пути к файлу JSON экспорта
+        string defaultPath = config["MigrationSettings:ExportJsonPath"] ?? @"D:\Программирование\binyat_export.json";
+        string jsonFilePath = string.Empty;
 
-        Console.WriteLine($"\nПодключение к: Host={host};Port={port};Database={database};Username={user}");
-
-        // 3. Путь к исходному JSON
-        string defaultJsonPath = @"D:\Программирование\binyat_export.json";
-        Console.Write($"Путь к файлу экспорта [{defaultJsonPath}]: ");
-        var inputJson = Console.ReadLine();
-        string jsonFilePath = string.IsNullOrWhiteSpace(inputJson) ? defaultJsonPath : inputJson.Trim();
-
-        if (!File.Exists(jsonFilePath))
+        while (true)
         {
+            Console.Write($"\nПуть к файлу экспорта [{defaultPath}]: ");
+            var inputPath = Console.ReadLine();
+            jsonFilePath = string.IsNullOrWhiteSpace(inputPath) ? defaultPath : inputPath.Trim();
+
+            if (File.Exists(jsonFilePath)) break;
+
             Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"\n[ОШИБКА] Файл не найден: {jsonFilePath}");
+            Console.WriteLine($"[ОШИБКА] Файл не найден: {Path.GetFullPath(jsonFilePath)}");
             Console.ResetColor();
-            Console.WriteLine("Нажмите любую клавишу для выхода...");
-            Console.ReadKey();
-            return;
+            Console.WriteLine("Пожалуйста, введите корректный путь к файлу.");
         }
+
+        // 3. Выбор очистки таблиц
+        bool defaultClean = bool.TryParse(config["MigrationSettings:CleanDatabaseBeforeImport"], out var cl) && cl;
+        string defaultCleanPrompt = defaultClean ? "Y/n" : "y/N";
+
+        Console.Write($"\nОчистить целевые таблицы перед импортом (TRUNCATE CASCADE)? [{defaultCleanPrompt}]: ");
+        var cleanInput = Console.ReadLine()?.Trim().ToLowerInvariant();
+
+        bool shouldClean;
+        if (string.IsNullOrEmpty(cleanInput))
+        {
+            shouldClean = defaultClean;
+        }
+        else
+        {
+            shouldClean = cleanInput == "y" || cleanInput == "yes" || cleanInput == "да" || cleanInput == "д";
+        }
+
+        Console.WriteLine("\nИтоговые параметры:");
+        Console.WriteLine($"Подключение: Host={builder.Host};Port={builder.Port};Database={builder.Database};Username={builder.Username}");
+        Console.WriteLine($"Файл данных: {Path.GetFullPath(jsonFilePath)}");
+        Console.WriteLine($"Режим очистки: {(shouldClean ? "ПОЛНАЯ ОЧИСТКА БАЗЫ ПЕРЕД ИМПОРТОМ" : "ДОПОЛНЕНИЕ СУЩЕСТВУЮЩИХ ДАННЫХ (БЕЗ ОЧИСТКИ)")}");
 
         var optionsBuilder = new DbContextOptionsBuilder<MermerDbContext>();
-        optionsBuilder.UseNpgsql(connectionString);
+        optionsBuilder.UseNpgsql(builder.ConnectionString);
 
         using var dbContext = new MermerDbContext(optionsBuilder.Options);
 
         try
         {
-            Console.WriteLine("\nПроверяем доступность базы данных...");
+            Console.WriteLine("\nПроверка соединения с базой данных...");
             await dbContext.Database.CanConnectAsync();
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine("Связь с PostgreSQL успешно установлена!");
@@ -131,33 +116,42 @@ class Program
             return;
         }
 
-        Console.WriteLine("\nОчищаем целевые таблицы в PostgreSQL...");
+        if (shouldClean)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("\nОчищаем целевые таблицы в PostgreSQL (TRUNCATE CASCADE)...");
+            Console.ResetColor();
 
-        // Очистка таблиц
-        await dbContext.Database.ExecuteSqlRawAsync(@"
-            TRUNCATE TABLE 
-                offices, partners, warehouses, depositories, currencies, currency_rates, users, roles, user_roles,
-                stocks, stock_units, stock_prices, stock_additional_prices, stock_name_composers, stock_name_composer_values,
-                stock_alternatives, stock_alternative_lines,
-                invoices, invoice_lines, invoice_payments, invoice_currency_convertions, 
-                invoice_stock_unit_convertions, invoice_discounts, invoice_overheads,
-                stock_slips, stock_slip_lines,
-                stock_transfers, stock_transfer_lines,
-                stock_revisions, stock_revision_lines,
-                stock_orders, stock_order_lines, stock_order_unit_convertions,
-                stock_order_templates, stock_order_template_lines,
-                aggregated_stock_orders, aggregated_stock_order_lines,
-                funds_slips, funds_slip_lines,
-                funds_transfers, funds_transfer_lines,
-                expenses, expense_slips, expense_slip_lines,
-                daily_funds_registeries, daily_funds_registery_lines,
-                partner_slips, partner_slip_lines,
-                partner_transfers, partner_transfer_lines,
-                partner_actions,
-                stock_balances
-            CASCADE;");
+            await dbContext.Database.ExecuteSqlRawAsync(@"
+                TRUNCATE TABLE 
+                    offices, partners, warehouses, depositories, currencies, currency_rates, users, roles, user_roles,
+                    stocks, stock_units, stock_prices, stock_additional_prices, stock_name_composers, stock_name_composer_values,
+                    stock_alternatives, stock_alternative_lines,
+                    invoices, invoice_lines, invoice_payments, invoice_currency_convertions, 
+                    invoice_stock_unit_convertions, invoice_discounts, invoice_overheads,
+                    stock_slips, stock_slip_lines,
+                    stock_transfers, stock_transfer_lines,
+                    stock_revisions, stock_revision_lines,
+                    stock_orders, stock_order_lines, stock_order_unit_convertions,
+                    stock_order_templates, stock_order_template_lines,
+                    aggregated_stock_orders, aggregated_stock_order_lines,
+                    funds_slips, funds_slip_lines,
+                    funds_transfers, funds_transfer_lines,
+                    expenses, expense_slips, expense_slip_lines,
+                    daily_funds_registeries, daily_funds_registery_lines,
+                    partner_slips, partner_slip_lines,
+                    partner_transfers, partner_transfer_lines,
+                    partner_actions,
+                    stock_balances
+                CASCADE;");
+            Console.WriteLine("Таблицы успешно очищены.");
+        }
+        else
+        {
+            Console.WriteLine("\nОчистка таблиц пропущена. Импорт работает в режиме дополнения.");
+        }
 
-        // Инициализация сервисов
+        // Инициализация сервисов импорта
         var partnerImporter = new PartnerImportService(dbContext);
         var enterpriseImporter = new EnterpriseImportService(dbContext);
         var nomenclatureImporter = new NomenclatureImportService(dbContext);
@@ -184,6 +178,7 @@ class Program
         await commerceImporter.MigrateStockSlipsAsync(jsonFilePath);
         await commerceImporter.MigrateStockTransfersAsync(jsonFilePath);
         await fundsImporter.MigrateFundsSlipsAsync(jsonFilePath);
+        await fundsImporter.MigrateFundsTransfersAsync(jsonFilePath);
         await fundsImporter.MigrateExpenseSlipsAsync(jsonFilePath);
 
         // Расчет остатков
@@ -193,7 +188,7 @@ class Program
         var calculator = new StockBalanceCalculator(dbContext);
         await calculator.RecalculateAllBalancesAsync();
 
-        // Обновление View
+        // Обновление View поиска товаров
         Console.WriteLine("\nОбновление материализованного представления mv_stock_search...");
         try
         {

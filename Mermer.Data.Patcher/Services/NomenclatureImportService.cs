@@ -43,7 +43,6 @@ public class NomenclatureImportService
             using var doc = JsonDocument.Parse(line);
             var root = doc.RootElement;
 
-            // Определяем, где лежит основа документа (в корне или внутри "patch")
             JsonElement docBody = root;
             if (TryGetPropertyCaseInsensitive(root, "patch", out var patchObj) && patchObj.ValueKind == JsonValueKind.Object)
             {
@@ -53,13 +52,12 @@ public class NomenclatureImportService
             if (!TryGetPropertyCaseInsensitive(docBody, "docType", out var docTypeProp) ||
                 !string.Equals(docTypeProp.GetString(), "Stock", StringComparison.OrdinalIgnoreCase))
             {
-                continue; // Пропускаем всё, что не является товаром
+                continue;
             }
 
-            if (!TryGetPropertyCaseInsensitive(docBody, "id", out var idProp) || !Guid.TryParse(idProp.GetString(), out var stockId))
+            if (!TryGetGuidAnywhere(root, docBody, "id", out var stockId))
                 continue;
 
-            // Инициализируем товар, если видим его впервые
             if (!stockMap.TryGetValue(stockId, out var stock))
             {
                 stock = new StockEntity
@@ -72,9 +70,8 @@ public class NomenclatureImportService
                 stockMap[stockId] = stock;
             }
 
-            // Извлекаем скалярные свойства (из propertyPatches или из корня)
-            if (TryGetDynamicString(docBody, "code", out var code)) stock.Code = code;
-            if (TryGetDynamicString(docBody, "name", out var name)) stock.Name = name;
+            if (TryGetDynamicString(docBody, "code", out var code) && !string.IsNullOrWhiteSpace(code)) stock.Code = code;
+            if (TryGetDynamicString(docBody, "name", out var name) && !string.IsNullOrWhiteSpace(name)) stock.Name = name;
             if (TryGetDynamicString(docBody, "shortName", out var shortName)) stock.ShortName = shortName;
             if (TryGetDynamicString(docBody, "type", out var type)) stock.Type = type;
             if (TryGetDynamicString(docBody, "group", out var group)) stock.Group = group;
@@ -87,9 +84,8 @@ public class NomenclatureImportService
             if (TryGetDynamicArray(docBody, "tags", out var tags)) stock.Tags = tags;
             if (TryGetDynamicArray(docBody, "barcodes", out var barcodes)) stock.Barcodes = barcodes;
 
-            // Извлекаем списки (units и prices)
-            ExtractUnits(docBody, stockId, unitMap);
-            ExtractPrices(docBody, stockId, validCurrencyIds, priceMap);
+            ExtractUnits(root, docBody, stockId, unitMap);
+            ExtractPrices(root, docBody, stockId, validCurrencyIds, priceMap);
 
             if (linesRead % 10000 == 0)
             {
@@ -104,7 +100,7 @@ public class NomenclatureImportService
 
     private async Task SaveAllInBatchesAsync(List<StockEntity> stocks, List<StockUnitEntity> units, List<StockPriceEntity> prices)
     {
-        const int batchSize = 2000;
+        const int batchSize = 1000;
 
         for (int i = 0; i < stocks.Count; i += batchSize)
         {
@@ -128,7 +124,7 @@ public class NomenclatureImportService
         }
     }
 
-    #region Умный парсинг патчей
+    #region Умный парсинг
 
     private static bool TryGetPropertyCaseInsensitive(JsonElement element, string propertyName, out JsonElement value)
     {
@@ -155,15 +151,23 @@ public class NomenclatureImportService
 
     private static bool TryGetPropAnywhere(JsonElement docBody, string propName, out JsonElement value)
     {
-        // 1. Ищем прямо в объекте
         if (TryGetPropertyCaseInsensitive(docBody, propName, out value)) return true;
 
-        // 2. Ищем внутри propertyPatches
         if (TryGetPropertyCaseInsensitive(docBody, "propertyPatches", out var pp) && pp.ValueKind == JsonValueKind.Object)
         {
             if (TryGetPropertyCaseInsensitive(pp, propName, out value)) return true;
         }
 
+        return false;
+    }
+
+    private static bool TryGetGuidAnywhere(JsonElement root, JsonElement docBody, string propName, out Guid result)
+    {
+        result = Guid.Empty;
+        if (TryGetPropAnywhere(docBody, propName, out var val) && val.ValueKind == JsonValueKind.String && Guid.TryParse(val.GetString(), out result))
+            return true;
+        if (TryGetPropAnywhere(root, propName, out var rVal) && rVal.ValueKind == JsonValueKind.String && Guid.TryParse(rVal.GetString(), out result))
+            return true;
         return false;
     }
 
@@ -192,10 +196,10 @@ public class NomenclatureImportService
     private static bool TryGetDynamicDecimal(JsonElement docBody, string propName, out decimal result)
     {
         result = 0m;
-        if (TryGetPropAnywhere(docBody, propName, out var val) && val.ValueKind == JsonValueKind.Number)
+        if (TryGetPropAnywhere(docBody, propName, out var val))
         {
-            result = val.GetDecimal();
-            return true;
+            if (val.ValueKind == JsonValueKind.Number) { result = val.GetDecimal(); return true; }
+            if (val.ValueKind == JsonValueKind.String && decimal.TryParse(val.GetString(), out var d)) { result = d; return true; }
         }
         return false;
     }
@@ -214,15 +218,15 @@ public class NomenclatureImportService
         return false;
     }
 
-    private static void ExtractUnits(JsonElement docBody, Guid stockId, Dictionary<Guid, StockUnitEntity> unitMap)
+    private static void ExtractUnits(JsonElement root, JsonElement docBody, Guid stockId, Dictionary<Guid, StockUnitEntity> unitMap)
     {
-        // Ищем units напрямую или внутри subListPatches
-        if (!TryGetPropertyCaseInsensitive(docBody, "units", out var unitsArray))
+        JsonElement unitsArray = default;
+        if (!TryGetPropertyCaseInsensitive(docBody, "units", out unitsArray))
         {
             if (TryGetPropertyCaseInsensitive(docBody, "subListPatches", out var slp) && slp.ValueKind == JsonValueKind.Object)
-            {
                 TryGetPropertyCaseInsensitive(slp, "units", out unitsArray);
-            }
+            else if (root.TryGetProperty("patch", out var pObj) && pObj.TryGetProperty("subListPatches", out var rSlp))
+                TryGetPropertyCaseInsensitive(rSlp, "units", out unitsArray);
         }
 
         if (unitsArray.ValueKind == JsonValueKind.Array)
@@ -234,27 +238,27 @@ public class NomenclatureImportService
 
                 if (!unitMap.TryGetValue(unitId, out var unit))
                 {
-                    unit = new StockUnitEntity { Id = unitId, StockId = stockId };
+                    unit = new StockUnitEntity { Id = unitId, StockId = stockId, Name = "шт" };
                     unitMap[unitId] = unit;
                 }
 
-                if (TryGetDynamicString(elem, "name", out var name)) unit.Name = name;
-                if (TryGetDynamicDecimal(elem, "multiplier", out var mult)) unit.Multiplier = mult;
-                if (TryGetDynamicDecimal(elem, "divider", out var div)) unit.Divider = div;
+                if (TryGetDynamicString(elem, "name", out var name) && !string.IsNullOrWhiteSpace(name)) unit.Name = name;
+                if (TryGetDynamicDecimal(elem, "multiplier", out var mult)) unit.Multiplier = mult > 0 ? mult : 1m;
+                if (TryGetDynamicDecimal(elem, "divider", out var div)) unit.Divider = div > 0 ? div : 1m;
                 if (TryGetDynamicBool(elem, "isDefault", out var isDef)) unit.IsDefault = isDef;
             }
         }
     }
 
-    private static void ExtractPrices(JsonElement docBody, Guid stockId, HashSet<Guid> validCurrencyIds, Dictionary<Guid, StockPriceEntity> priceMap)
+    private static void ExtractPrices(JsonElement root, JsonElement docBody, Guid stockId, HashSet<Guid> validCurrencyIds, Dictionary<Guid, StockPriceEntity> priceMap)
     {
-        // Ищем prices напрямую или внутри subListPatches
-        if (!TryGetPropertyCaseInsensitive(docBody, "prices", out var pricesArray))
+        JsonElement pricesArray = default;
+        if (!TryGetPropertyCaseInsensitive(docBody, "prices", out pricesArray))
         {
             if (TryGetPropertyCaseInsensitive(docBody, "subListPatches", out var slp) && slp.ValueKind == JsonValueKind.Object)
-            {
                 TryGetPropertyCaseInsensitive(slp, "prices", out pricesArray);
-            }
+            else if (root.TryGetProperty("patch", out var pObj) && pObj.TryGetProperty("subListPatches", out var rSlp))
+                TryGetPropertyCaseInsensitive(rSlp, "prices", out pricesArray);
         }
 
         if (pricesArray.ValueKind == JsonValueKind.Array)

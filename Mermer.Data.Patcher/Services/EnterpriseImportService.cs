@@ -7,7 +7,6 @@ using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Mermer.Data.Postgres;
 using Mermer.Data.Postgres.Entities;
-using Mermer.Data.Patcher.DTOs; // Оставлено для CouchPartnerDto, если он там используется
 
 namespace Mermer.Data.Patcher.Services;
 
@@ -20,37 +19,6 @@ public class EnterpriseImportService
         _dbContext = dbContext;
     }
 
-    /// <summary>
-    /// Универсальный метод для вывода структуры JSON документа любого типа
-    /// </summary>
-    public async Task DumpJsonAsync(string jsonFilePath, string targetDocType, int takeCount = 3)
-    {
-        Console.WriteLine($"--- Поиск {takeCount} записей с docType == {targetDocType} ---");
-        using var stream = File.OpenRead(jsonFilePath);
-        using var reader = new StreamReader(stream);
-        string? line;
-        int found = 0;
-
-        while ((line = await reader.ReadLineAsync()) != null && found < takeCount)
-        {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            using var doc = JsonDocument.Parse(line);
-            var root = doc.RootElement;
-
-            if (IsTargetDocType(root, targetDocType))
-            {
-                found++;
-                Console.WriteLine($"\n[Найден {targetDocType} #{found}]:");
-                Console.WriteLine(line);
-            }
-        }
-
-        if (found == 0) Console.WriteLine($"Записей {targetDocType} не найдено!");
-    }
-
-    /// <summary>
-    /// 1. Миграция контрагентов (Partner)
-    /// </summary>
     public async Task MigratePartnersAsync(string jsonFilePath)
     {
         Console.WriteLine("Начинаем импорт справочника Partner...");
@@ -59,7 +27,7 @@ public class EnterpriseImportService
         using var reader = new StreamReader(stream);
 
         var batch = new List<PartnerEntity>();
-        var processedIds = new HashSet<Guid>(); // Добавлена защита от дубликатов для партнеров
+        var processedIds = new HashSet<Guid>();
         string? line;
         int totalImported = 0;
 
@@ -72,41 +40,38 @@ public class EnterpriseImportService
 
             if (IsTargetDocType(root, "Partner"))
             {
-                var couchPartner = JsonSerializer.Deserialize<CouchPartnerDto>(line);
+                var targetContainer = GetTargetContainer(root);
+                if (!TryGetGuidProperty(root, targetContainer, "id", out var partnerId)) continue;
+                if (!processedIds.Add(partnerId)) continue;
 
-                if (couchPartner != null && couchPartner.Id != Guid.Empty)
+                var pgPartner = new PartnerEntity
                 {
-                    if (!processedIds.Add(couchPartner.Id)) continue; // Пропускаем дубликат
+                    Id = partnerId,
+                    Code = GetStringProperty(targetContainer, "code") ?? string.Empty,
+                    Name = GetStringProperty(targetContainer, "name") ?? "Без названия",
+                    Phone = GetStringProperty(targetContainer, "phone"),
+                    Address = GetStringProperty(targetContainer, "address"),
+                    IsDisabled = GetBoolProperty(targetContainer, "isDisabled")
+                };
 
-                    var pgPartner = new PartnerEntity
-                    {
-                        Id = couchPartner.Id,
-                        Code = couchPartner.Code ?? string.Empty,
-                        Name = couchPartner.Name ?? string.Empty,
-                        Phone = couchPartner.Phone,
-                        Address = couchPartner.Address,
-                        IsDisabled = couchPartner.IsDisabled
-                    };
+                batch.Add(pgPartner);
 
-                    batch.Add(pgPartner);
+                if (batch.Count >= 500)
+                {
+                    await _dbContext.Partners.AddRangeAsync(batch);
+                    await _dbContext.SaveChangesAsync();
+                    _dbContext.ChangeTracker.Clear();
 
-                    if (batch.Count >= 500)
-                    {
-                        await _dbContext.AddRangeAsync(batch);
-                        await _dbContext.SaveChangesAsync();
-                        _dbContext.ChangeTracker.Clear();
-
-                        totalImported += batch.Count;
-                        Console.WriteLine($"Сохранено контрагентов: {totalImported}...");
-                        batch.Clear();
-                    }
+                    totalImported += batch.Count;
+                    Console.WriteLine($"Сохранено контрагентов: {totalImported}...");
+                    batch.Clear();
                 }
             }
         }
 
         if (batch.Any())
         {
-            await _dbContext.AddRangeAsync(batch);
+            await _dbContext.Partners.AddRangeAsync(batch);
             await _dbContext.SaveChangesAsync();
             _dbContext.ChangeTracker.Clear();
             totalImported += batch.Count;
@@ -115,9 +80,6 @@ public class EnterpriseImportService
         Console.WriteLine($"Готово! Всего импортировано Partner: {totalImported}");
     }
 
-    /// <summary>
-    /// 2. Миграция Офисов (Office)
-    /// </summary>
     public async Task MigrateOfficesAsync(string jsonFilePath)
     {
         Console.WriteLine("Начинаем импорт справочника Офисов (Office)...");
@@ -171,9 +133,6 @@ public class EnterpriseImportService
         Console.WriteLine($"Готово! Всего импортировано уникальных Офисов: {totalImported}");
     }
 
-    /// <summary>
-    /// 3. Миграция складов (Warehouse)
-    /// </summary>
     public async Task MigrateWarehousesAsync(string jsonFilePath)
     {
         Console.WriteLine("Начинаем импорт справочника Складов (Warehouse)...");
@@ -204,6 +163,7 @@ public class EnterpriseImportService
                     if (!processedIds.Add(entity.Id)) continue;
 
                     batch.Add(entity);
+
                     if (batch.Count >= 500)
                     {
                         await _dbContext.AddRangeAsync(batch);
@@ -229,9 +189,6 @@ public class EnterpriseImportService
         Console.WriteLine($"Готово! Всего импортировано уникальных Складов: {totalImported}");
     }
 
-    /// <summary>
-    /// 4. Миграция касс (Depository)
-    /// </summary>
     public async Task MigrateDepositoriesAsync(string jsonFilePath)
     {
         Console.WriteLine("Начинаем импорт справочника Касс (Depository)...");
@@ -262,6 +219,7 @@ public class EnterpriseImportService
                     if (!processedIds.Add(entity.Id)) continue;
 
                     batch.Add(entity);
+
                     if (batch.Count >= 500)
                     {
                         await _dbContext.AddRangeAsync(batch);
@@ -287,9 +245,6 @@ public class EnterpriseImportService
         Console.WriteLine($"Готово! Всего импортировано уникальных Касс: {totalImported}");
     }
 
-    /// <summary>
-    /// 5. Миграция валют (Currency)
-    /// </summary>
     public async Task MigrateCurrenciesAsync(string jsonFilePath)
     {
         Console.WriteLine("Начинаем импорт справочника Валют (Currency) и Курсов...");
@@ -318,7 +273,6 @@ public class EnterpriseImportService
                 var targetContainer = GetTargetContainer(root);
                 if (!TryGetGuidProperty(root, targetContainer, "id", out var currencyId)) continue;
 
-                // 1. Импортируем или обновляем саму валюту
                 if (processedCurrencyIds.Add(currencyId))
                 {
                     var currency = new CurrencyEntity
@@ -336,7 +290,6 @@ public class EnterpriseImportService
                     currencyBatch.Add(currency);
                 }
 
-                // 2. Извлекаем курсы валют (subListPatches -> rates)
                 ExtractCurrencyRates(root, targetContainer, currencyId, ratesBatch, processedRateIds);
 
                 if (currencyBatch.Count >= 100 || ratesBatch.Count >= 500)
@@ -379,9 +332,6 @@ public class EnterpriseImportService
         Console.WriteLine($"Готово! Валют: {totalImportedCurrencies}, Курсов: {totalImportedRates}");
     }
 
-    /// <summary>
-    /// 6. Миграция пользователей (User)
-    /// </summary>
     public async Task MigrateUsersAsync(string jsonFilePath)
     {
         Console.WriteLine("Начинаем импорт справочника Пользователей (User)...");
@@ -448,8 +398,7 @@ public class EnterpriseImportService
         Console.WriteLine($"Готово! Всего импортировано Пользователей: {totalImported}");
     }
 
-    #region Вспомогательные методы безопасного парсинга JSON
-
+    #region Вспомогательные методы
     private static bool IsTargetDocType(JsonElement root, string targetDocType)
     {
         if (root.ValueKind != JsonValueKind.Object) return false;
@@ -524,13 +473,12 @@ public class EnterpriseImportService
     }
 
     private static void ExtractCurrencyRates(
-    JsonElement root,
-    JsonElement targetContainer,
-    Guid currencyId,
-    List<CurrencyRateEntity> ratesBatch,
-    HashSet<Guid> processedRateIds)
+        JsonElement root,
+        JsonElement targetContainer,
+        Guid currencyId,
+        List<CurrencyRateEntity> ratesBatch,
+        HashSet<Guid> processedRateIds)
     {
-        // Ищем subListPatches -> rates
         JsonElement subList = default;
         if (targetContainer.TryGetProperty("subListPatches", out var slP)) subList = slP;
         else if (root.TryGetProperty("patch", out var p) && p.TryGetProperty("subListPatches", out var slP2)) subList = slP2;

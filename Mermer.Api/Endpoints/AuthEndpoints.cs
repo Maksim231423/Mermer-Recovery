@@ -45,19 +45,9 @@ public static class AuthEndpoints
                     return Results.BadRequest(new { message = "Учетная запись отключена." });
                 }
 
-                string inputSha256 = HashPassword(request.Password);
-
-                bool isPasswordValid = string.Equals(user.Password, request.Password, StringComparison.Ordinal)
-                                    || string.Equals(user.Password, inputSha256, StringComparison.Ordinal)
-                                    || (request.Password == "admin" && user.Password == "0DPiKuNIrrVmD8IUCuw1hQxNqZc=");
-
-                if (!isPasswordValid)
+                if (!VerifyPassword(user.Password, request.Password))
                 {
-                    return Results.Json(new
-                    {
-                        message = "Неверный пароль.",
-                        debug = $"В БД: '{user.Password}', Введено: '{request.Password}', SHA-256: '{inputSha256}'"
-                    }, statusCode: StatusCodes.Status401Unauthorized);
+                    return Results.Json(new { message = "Неверный пароль." }, statusCode: StatusCodes.Status401Unauthorized);
                 }
 
                 string role = user.IsAdmin ? "Admin" : "User";
@@ -106,18 +96,12 @@ public static class AuthEndpoints
                 return Results.NotFound(new { message = "Пользователь не найден." });
             }
 
-            string currentSha256 = HashPassword(request.CurrentPassword);
-
-            bool isCurrentValid = string.Equals(user.Password, request.CurrentPassword, StringComparison.Ordinal)
-                               || string.Equals(user.Password, currentSha256, StringComparison.Ordinal)
-                               || (request.CurrentPassword == "admin" && user.Password == "0DPiKuNIrrVmD8IUCuw1hQxNqZc=");
-
-            if (!isCurrentValid)
+            if (!VerifyPassword(user.Password, request.CurrentPassword))
             {
                 return Results.BadRequest(new { message = "Неверный текущий пароль!" });
             }
 
-            user.Password = HashPassword(request.NewPassword);
+            user.Password = HashPasswordSha256Base64(request.NewPassword);
             user.UpdatedAt = DateTimeOffset.UtcNow;
 
             await db.SaveChangesAsync();
@@ -152,11 +136,51 @@ public static class AuthEndpoints
         .WithSummary("Получение ролей пользователя");
     }
 
-    private static string HashPassword(string password)
+    private static bool VerifyPassword(string storedPassword, string providedPassword)
+    {
+        if (string.IsNullOrEmpty(storedPassword) || string.IsNullOrEmpty(providedPassword))
+            return false;
+
+        // 1. Прямое совпадение
+        if (string.Equals(storedPassword, providedPassword, StringComparison.Ordinal))
+            return true;
+
+        // 2. Стандартный SHA-256 (Base64)
+        if (string.Equals(storedPassword, HashPasswordSha256Base64(providedPassword), StringComparison.Ordinal))
+            return true;
+
+        // 3. SHA-256 (HEX)
+        if (string.Equals(storedPassword, HashPasswordSha256Hex(providedPassword), StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // 4. Легаси Binyat / Couchbase SHA-1 (Base64)
+        if (string.Equals(storedPassword, HashPasswordSha1Base64(providedPassword), StringComparison.Ordinal))
+            return true;
+
+        return false;
+    }
+
+    private static string HashPasswordSha256Base64(string password)
     {
         if (string.IsNullOrEmpty(password)) return string.Empty;
         using var sha256 = SHA256.Create();
         var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(password));
+        return Convert.ToBase64String(bytes);
+    }
+
+    private static string HashPasswordSha256Hex(string password)
+    {
+        if (string.IsNullOrEmpty(password)) return string.Empty;
+        using var sha256 = SHA256.Create();
+        var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(password));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    private static string HashPasswordSha1Base64(string password)
+    {
+        if (string.IsNullOrEmpty(password)) return string.Empty;
+        using var sha1 = SHA1.Create();
+        var bytes = sha1.ComputeHash(Encoding.UTF8.GetBytes(password));
         return Convert.ToBase64String(bytes);
     }
 }
