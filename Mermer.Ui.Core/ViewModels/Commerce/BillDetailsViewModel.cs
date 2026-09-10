@@ -139,6 +139,35 @@ public class BillDetailsViewModel :
         Offices.Filter = x => !x.IsDisabled || x.Id == Details?.OfficeId;
 
         UpdateFacilityFilters();
+
+        // Сбрасываем флаг изменений после полной привязки и отрисовки UI
+        if (string.IsNullOrEmpty(ItemId))
+        {
+            System.Windows.Application.Current?.Dispatcher.BeginInvoke(
+                System.Windows.Threading.DispatcherPriority.ContextIdle,
+                new Action(() =>
+                {
+                    IsDirty = false;
+                    RaisePropertyChanged(() => Caption);
+                }));
+        }
+    }
+
+    public override bool IsDirty
+    {
+        get
+        {
+            // Если это новый документ, у которого нет строк и не выбран контрагент — он пустой
+            if (string.IsNullOrEmpty(ItemId) &&
+                (Details?.Lines == null || Details.Lines.Count == 0) &&
+                string.IsNullOrEmpty(Details?.PartnerId))
+            {
+                return false;
+            }
+
+            return base.IsDirty;
+        }
+        set => base.IsDirty = value;
     }
 
     protected override async Task<bool> OnSaveAsync()

@@ -11,28 +11,29 @@ public static class DepositoriesEndpoints
 {
     public static void MapDepositoriesEndpoints(this IEndpointRouteBuilder routes)
     {
-        var group = routes.MapGroup("/api/depositories").WithTags("Depositories");
-
         var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
 
-        group.MapGet("/", async (MermerDbContext db) =>
+        async Task<IResult> GetAll(MermerDbContext db)
         {
             var depositories = await db.Depositories.AsNoTracking().Where(d => !d.IsDisabled).ToListAsync();
             var result = depositories.Select(d => new
             {
                 Id = d.Id.ToString(),
                 Name = d.Name,
-                OfficeId = d.OfficeId?.ToString(),
+                OfficeId = d.OfficeId.HasValue ? d.OfficeId.Value.ToString() : null,
                 IsDisabled = d.IsDisabled
             });
             return Results.Json(result, jsonOptions);
-        });
+        }
 
-        group.MapGet("/next-code", async (MermerDbContext db) =>
+        routes.MapGet("/api/depositories", GetAll).WithTags("Depositories");
+        routes.MapGet("/api/enterprise/depositories", GetAll).WithTags("Depositories");
+
+        routes.MapGet("/api/depositories/next-code", async (MermerDbContext db) =>
         {
             var count = await db.Depositories.CountAsync();
             var nextCode = $"DEP-{(count + 1):D5}";
             return Results.Ok(new { code = nextCode });
-        });
+        }).WithTags("Depositories");
     }
 }

@@ -16,30 +16,28 @@ namespace Mermer.Api.Endpoints;
 
 public static class FinanceEndpoints
 {
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = null, // Сохраняем PascalCase для WPF клиента
+        PropertyNameCaseInsensitive = true
+    };
+
     public static void MapFinanceEndpoints(this IEndpointRouteBuilder routes)
     {
         // 1. СПИСОК ДЛЯ COMMERCE (BILLS)
         Func<DateTime?, DateTime?, string?, string?, MermerDbContext, CancellationToken, Task<IResult>> getBillsHandler =
             async (from, till, depositoryId, partnerId, db, ct) =>
             {
-                var startDate = from ?? DateTime.MinValue;
-                var endDate = till ?? DateTime.MaxValue;
-
-                var defaultCurrency = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
-                                      ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
-                var defaultCurrencyId = defaultCurrency?.Id.ToString();
-
-                var allConvertions = await GetCurrencyConvertionsAsync(db, DateTime.UtcNow, ct);
+                var startDate = EnsureUtc(from ?? DateTime.UtcNow.AddYears(-15));
+                var endDate = EnsureUtc(till ?? DateTime.UtcNow.AddYears(15));
 
                 var query = db.FundsSlips
-                    .Include(s => s.Lines)
-                    .AsSplitQuery()
                     .AsNoTracking()
-                    .Where(s => s.Date >= startDate && s.Date <= endDate);
+                    .Where(s => s.Date >= startDate && s.Date <= endDate && !s.IsDisabled);
 
-                query = query.Where(s => s.FundsSlipType != "FundsOpening" &&
-                                         s.FundsSlipType != "FundsRevisionExceed" &&
-                                         s.FundsSlipType != "FundsRevisionDeficit");
+                query = query.Where(s => s.FundsSlipType != null &&
+                                        (s.FundsSlipType.ToLower() == "payment" ||
+                                         s.FundsSlipType.ToLower() == "collection"));
 
                 if (Guid.TryParse(depositoryId, out var depGuid))
                     query = query.Where(s => s.DepositoryId == depGuid);
@@ -47,70 +45,82 @@ public static class FinanceEndpoints
                 if (Guid.TryParse(partnerId, out var partGuid))
                     query = query.Where(s => s.PartnerId == partGuid);
 
-                var slips = await query.OrderByDescending(s => s.Date).ToListAsync(ct);
-
-                var result = slips.Select(s =>
-                {
-                    string billType = "Collection";
-                    if (!string.IsNullOrEmpty(s.FundsSlipType) &&
-                        (s.FundsSlipType.Equals("Payment", StringComparison.OrdinalIgnoreCase) ||
-                         s.FundsSlipType.Equals("Expense", StringComparison.OrdinalIgnoreCase)))
-                    {
-                        billType = "Payment";
-                    }
-
-                    var docCurrencyId = s.DisplayCurrencyId?.ToString() ?? defaultCurrencyId;
-                    decimal totalAmount = s.Lines != null && s.Lines.Any() ? s.Lines.Sum(l => l.Amount) : 0m;
-
-                    return new
+                // Оптимизированная выборка сразу в DTO без лишних Include(Lines)
+                var rawSlips = await query
+                    .OrderByDescending(s => s.Date)
+                    .Select(s => new
                     {
                         Id = s.Id.ToString(),
                         Code = s.Code ?? string.Empty,
                         Date = s.Date,
-                        FundsSlipType = billType,
-                        SlipType = billType,
-                        BillType = billType,
-                        Type = billType,
-                        OfficeId = s.OfficeId?.ToString(),
-                        DepositoryId = s.DepositoryId?.ToString(),
-                        PartnerId = s.PartnerId?.ToString(),
-                        DisplayCurrencyId = docCurrencyId,
-                        CurrencyId = docCurrencyId,
-                        CurrencyConvertions = allConvertions,
+                        RawType = s.FundsSlipType,
+                        OfficeId = s.OfficeId.HasValue ? s.OfficeId.Value.ToString() : null,
+                        DepositoryId = s.DepositoryId.HasValue ? s.DepositoryId.Value.ToString() : null,
+                        PartnerId = s.PartnerId.HasValue ? s.PartnerId.Value.ToString() : null,
+                        DisplayCurrencyId = s.DisplayCurrencyId.HasValue ? s.DisplayCurrencyId.Value.ToString() : null,
                         UserName = s.UserName,
                         IsCompleted = s.IsCompleted,
                         IsDisabled = s.IsDisabled,
                         Group = s.Group ?? string.Empty,
+                        Tags = s.Tags,
+                        Description = s.Description ?? string.Empty,
+                        // Считаем сумму строк сразу в БД одним SQL-выражением
+                        TotalAmount = s.Lines.Sum(l => (decimal?)l.Amount) ?? 0m
+                    })
+                    .ToListAsync(ct);
+
+                var defaultCurrency = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
+                                      ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
+                var defaultCurrencyId = defaultCurrency?.Id.ToString();
+
+                var result = rawSlips.Select(s =>
+                {
+                    bool isPayment = !string.IsNullOrEmpty(s.RawType) &&
+                        (s.RawType.Equals("Payment", StringComparison.OrdinalIgnoreCase) ||
+                         s.RawType.Equals("Expense", StringComparison.OrdinalIgnoreCase));
+
+                    string billTypeStr = isPayment ? "Payment" : "Collection";
+                    int billTypeInt = isPayment ? 1 : 0;
+                    var docCurrencyId = s.DisplayCurrencyId ?? defaultCurrencyId;
+
+                    return new
+                    {
+                        s.Id,
+                        s.Code,
+                        s.Date,
+                        FundsSlipType = billTypeStr,
+                        SlipType = billTypeStr,
+                        BillType = billTypeInt,
+                        Type = billTypeStr,
+                        s.OfficeId,
+                        s.DepositoryId,
+                        s.PartnerId,
+                        DisplayCurrencyId = docCurrencyId,
+                        CurrencyId = docCurrencyId,
+                        CurrencyConvertions = Array.Empty<object>(),
+                        s.UserName,
+                        s.IsCompleted,
+                        s.IsDisabled,
+                        Group = string.IsNullOrWhiteSpace(s.Group) ? "Общие" : s.Group, // Чтобы GroupIndex="0" не спотыкался о пустые значения
                         Tags = s.Tags != null ? s.Tags.ToList() : new List<string>(),
                         Description = s.Description ?? string.Empty,
-                        Total = totalAmount,
-                        DisplayTotal = totalAmount,
-                        ActionTotal = totalAmount,
-                        Amount = totalAmount,
-                        Lines = s.Lines != null && s.Lines.Any()
-                            ? s.Lines.Select(l => (object)new
-                            {
-                                Id = l.Id.ToString(),
-                                FundsSlipId = s.Id.ToString(),
-                                Amount = l.Amount,
-                                Total = l.Amount,
-                                ActionTotal = l.Amount,
-                                CurrencyId = l.CurrencyId?.ToString() ?? docCurrencyId,
-                                SortOrder = l.SortOrder
-                            })
-                            : Array.Empty<object>()
+                        Total = s.TotalAmount,
+                        DisplayTotal = s.TotalAmount,
+                        ActionTotal = s.TotalAmount,
+                        Amount = s.TotalAmount,
+                        Lines = Array.Empty<object>()
                     };
                 });
 
-                return Results.Ok(result);
+                return Results.Json(result, JsonOptions);
             };
 
         // 2. СПИСОК ДЛЯ FINANCE (FUNDS SLIPS)
         Func<DateTime?, DateTime?, string?, string?, MermerDbContext, CancellationToken, Task<IResult>> getFundsSlipsHandler =
             async (from, till, depositoryId, partnerId, db, ct) =>
             {
-                var startDate = from ?? DateTime.MinValue;
-                var endDate = till ?? DateTime.MaxValue;
+                var startDate = from.HasValue ? from.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+                var endDate = till.HasValue ? till.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
                 var defaultCurrency = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
                                       ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
@@ -122,12 +132,12 @@ public static class FinanceEndpoints
                     .Include(s => s.Lines)
                     .AsSplitQuery()
                     .AsNoTracking()
-                    .Where(s => s.Date >= startDate && s.Date <= endDate);
+                    .Where(s => s.Date >= startDate && s.Date <= endDate && !s.IsDisabled);
 
-                query = query.Where(s => s.FundsSlipType == "FundsOpening" ||
-                                         s.FundsSlipType == "FundsRevisionExceed" ||
-                                         s.FundsSlipType == "FundsRevisionDeficit" ||
-                                         s.FundsSlipType == "Opening");
+                // Оставляем только внутренние кассовые операции (Opening, Revision)
+                query = query.Where(s => s.FundsSlipType != null &&
+                                        (s.FundsSlipType.ToLower().Contains("opening") ||
+                                         s.FundsSlipType.ToLower().Contains("revision")));
 
                 if (Guid.TryParse(depositoryId, out var depGuid))
                     query = query.Where(s => s.DepositoryId == depGuid);
@@ -1649,6 +1659,13 @@ public static class FinanceEndpoints
             }
         }
         return 0m;
+    }
+
+    private static DateTime EnsureUtc(DateTime dt)
+    {
+        if (dt == DateTime.MinValue) return DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+        if (dt == DateTime.MaxValue) return DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+        return dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
     }
 
     private static bool GetBoolProperty(JsonElement element, params string[] propNames)

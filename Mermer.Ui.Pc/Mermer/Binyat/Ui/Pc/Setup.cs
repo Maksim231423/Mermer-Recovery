@@ -128,31 +128,34 @@ public class Setup : MvxWpfSetup
         // ШАГ 3: ПОВЕРХ ЗАГЛУШЕК СТАВИМ НАШИ НАСТОЯЩИЕ REST API КЛАССЫ
         // =====================================================================
 
-        // =====================================================================
-        // ШАГ 3: ПОВЕРХ ЗАГЛУШЕК СТАВИМ НАШИ НАСТОЯЩИЕ REST API КЛАССЫ
-        // =====================================================================
-
         builder.Register(c =>
         {
             var configurator = c.Resolve<IConfigurator>();
             var connSettings = configurator.GetConfig<ConnectionSettings>();
 
-            // 1. Приоритет: адрес из окна настроек пользователя
-            string serviceUrl = connSettings?.ServiceAddress;
+            // Сначала смотрим appsettings.json, если не задан — берем из реестра, иначе localhost:5000
+            string serviceUrl = Configuration["ApiUrl"];
 
-            // 2. Если пусто — берем из appsettings.json или дефолтный порт Docker (5050)
             if (string.IsNullOrWhiteSpace(serviceUrl))
             {
-                serviceUrl = Configuration["ApiUrl"] ?? "http://localhost:5050";
+                serviceUrl = connSettings?.ServiceAddress;
+            }
+
+            if (string.IsNullOrWhiteSpace(serviceUrl))
+            {
+                serviceUrl = "http://localhost:5000";
             }
 
             // Убираем случайные слэши на конце для чистоты URI
             serviceUrl = serviceUrl.TrimEnd('/') + "/";
 
+            Console.WriteLine($"[CLIENT HTTP SETUP] Connecting to: {serviceUrl}");
+            System.Diagnostics.Debug.WriteLine($"[CLIENT HTTP SETUP] Connecting to: {serviceUrl}");
+
             var client = new System.Net.Http.HttpClient
             {
                 BaseAddress = new Uri(serviceUrl),
-                Timeout = TimeSpan.FromSeconds(15) // Запас времени для Docker
+                Timeout = TimeSpan.FromSeconds(15)
             };
 
             return client;

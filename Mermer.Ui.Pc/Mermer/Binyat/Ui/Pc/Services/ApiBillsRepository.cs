@@ -1,11 +1,12 @@
-﻿using System;
+﻿using Mermer.Commerce.Models;
+using Mermer.Data.Storage;
+using Mermer.Http;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
+using System.Threading;
 using System.Threading.Tasks;
-using Mermer.Commerce.Models;
-using Mermer.Data.Storage;
-using Mermer.Http;
 
 namespace Mermer.Ui.Pc.Services;
 
@@ -65,45 +66,67 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
         return query.ToList();
     }
 
+    private static List<Bill> _memoryCache;
+    private static DateTime _lastFetchTime = DateTime.MinValue;
+    private static readonly SemaphoreSlim _lock = new SemaphoreSlim(1, 1);
+
     private async Task<IEnumerable<Bill>> GetAllAsync()
     {
-        // 1. Досылаем на сервер всё, что висит со статусом isSynced == false
-        _ = Task.Run(async () =>
+        // Отдаем кэш из памяти, если прошло меньше 5 секунд (защита от 11 параллельных вызовов грида)
+        if (_memoryCache != null && (DateTime.UtcNow - _lastFetchTime).TotalSeconds < 5)
         {
+            return _memoryCache;
+        }
+
+        await _lock.WaitAsync();
+        try
+        {
+            if (_memoryCache != null && (DateTime.UtcNow - _lastFetchTime).TotalSeconds < 5)
+            {
+                return _memoryCache;
+            }
+
+            // 1. Быстро забираем с бэкенда
             try
             {
-                var unsynced = LocalSqliteCache.GetUnsyncedDocuments<Bill>(DocType);
-                if (unsynced != null)
+                var remote = await _restClient.GetAsync<IEnumerable<Bill>>("/api/bills");
+                if (remote != null && remote.Any())
                 {
-                    foreach (var item in unsynced)
+                    var list = remote.ToList();
+                    _memoryCache = list;
+                    _lastFetchTime = DateTime.UtcNow;
+
+                    // Сохраняем в локальный SQLite асинхронно одной пачкой в фоне, не блокируя UI
+                    _ = Task.Run(() =>
                     {
-                        await _restClient.PostAsync("/api/bills", item.entity);
-                        LocalSqliteCache.SaveDocument(DocType, item.id, item.entity, isSynced: true);
-                    }
+                        try
+                        {
+                            foreach (var bill in list)
+                            {
+                                LocalSqliteCache.SaveDocument(DocType, bill.Id, bill, isSynced: true);
+                            }
+                        }
+                        catch { }
+                    });
+
+                    return list;
                 }
             }
             catch { }
-        });
 
-        // 2. Отдаем локальный кэш
-        var localItems = LocalSqliteCache.GetAllDocuments<Bill>(DocType)?.ToList() ?? new List<Bill>();
-
-        // 3. Подтягиваем свежие данные с бэкенда
-        try
-        {
-            var remote = await _restClient.GetAsync<IEnumerable<Bill>>("/api/bills");
-            if (remote != null && remote.Any())
+            // 2. Фолбэк на локальный SQLite, если сервер недоступен
+            if (_memoryCache == null)
             {
-                foreach (var bill in remote)
-                {
-                    LocalSqliteCache.SaveDocument(DocType, bill.Id, bill, isSynced: true);
-                }
-                return remote.ToList();
+                _memoryCache = LocalSqliteCache.GetAllDocuments<Bill>(DocType)?.ToList() ?? new List<Bill>();
+                _lastFetchTime = DateTime.UtcNow;
             }
-        }
-        catch { }
 
-        return localItems;
+            return _memoryCache;
+        }
+        finally
+        {
+            _lock.Release();
+        }
     }
 
     public async Task<int> CountAsync(params Expression<Func<Bill, bool>>[] predicates)

@@ -20,6 +20,7 @@ public static class InvoicesEndpoints
     public static IEndpointRouteBuilder MapInvoicesEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/invoices").WithTags("Invoices");
+        var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
 
         // 1. СПИСОК НАКЛАДНЫХ
         group.MapGet("/", async (
@@ -29,8 +30,8 @@ public static class InvoicesEndpoints
              IInvoicesRepository repo,
              CancellationToken ct) =>
         {
-            var startDate = from ?? DateTime.MinValue;
-            var endDate = till ?? DateTime.MaxValue;
+            var startDate = EnsureUtc(from ?? DateTime.UtcNow.AddYears(-10));
+            var endDate = EnsureUtc(till ?? DateTime.UtcNow.AddYears(10));
 
             var info = await repo.GetInfoAsync(startDate, endDate, displayCurrencyId, ct);
 
@@ -38,7 +39,8 @@ public static class InvoicesEndpoints
             {
                 Id = i.Id,
                 Code = i.Code,
-                Type = i.InvoiceType.ToString(),
+                Type = (int)i.InvoiceType, // Числовой enum предотвращает сбой десериализации
+                InvoiceType = (int)i.InvoiceType,
                 Date = i.Date,
                 UserId = i.UserId,
                 UserName = i.UserName,
@@ -56,17 +58,17 @@ public static class InvoicesEndpoints
                 ActionGrandTotal = i.GrandTotal
             });
 
-            return Results.Ok(uiResponse);
+            return Results.Json(uiResponse, jsonOptions);
         })
         .WithName("InvoicesGetInfo");
 
         // 2. КОЛИЧЕСТВО НАКЛАДНЫХ
         group.MapGet("/count", async (DateTime? from, DateTime? till, IInvoicesRepository repo, CancellationToken ct) =>
         {
-            var startDate = from ?? DateTime.MinValue;
-            var endDate = till ?? DateTime.MaxValue;
+            var startDate = EnsureUtc(from ?? DateTime.UtcNow.AddYears(-10));
+            var endDate = EnsureUtc(till ?? DateTime.UtcNow.AddYears(10));
             var count = await repo.CountInfoAsync(startDate, endDate, ct);
-            return Results.Ok(new { count });
+            return Results.Json(new { count }, jsonOptions);
         })
         .WithName("InvoicesCountInfo");
 
@@ -112,7 +114,7 @@ public static class InvoicesEndpoints
                 }
             }
 
-            return Results.Ok(result);
+            return Results.Json(result, jsonOptions);
         })
         .WithName("InvoicesGetFacets");
 
@@ -120,7 +122,7 @@ public static class InvoicesEndpoints
         group.MapGet("/{id}", async (string id, IInvoicesRepository repo, CancellationToken ct) =>
         {
             var inv = await repo.GetAsync(id, ct);
-            return inv is null ? Results.NotFound() : Results.Ok(inv);
+            return inv is null ? Results.NotFound() : Results.Json(inv, jsonOptions);
         })
         .WithName("InvoicesGetById");
 
@@ -129,7 +131,7 @@ public static class InvoicesEndpoints
         {
             var count = await db.Invoices.CountAsync();
             var nextCode = $"INV-{(count + 1):D6}";
-            return Results.Ok(new { code = nextCode });
+            return Results.Json(new { code = nextCode }, jsonOptions);
         })
         .WithName("InvoicesGetNextCode");
 
@@ -144,7 +146,6 @@ public static class InvoicesEndpoints
             var pgInvoice = JsonSerializer.Deserialize<PgInvoice>(body, options);
             if (pgInvoice == null) return Results.BadRequest("Invalid JSON");
 
-            // Извлечение тегов напрямую из исходного JSON
             using var doc = JsonDocument.Parse(body);
             var extractedTags = ExtractTagsFromRawJson(doc.RootElement);
             if (extractedTags.Count > 0)
@@ -164,7 +165,7 @@ public static class InvoicesEndpoints
                 else
                 {
                     await repo.UpdateAsync(pgInvoice, ct);
-                    return Results.Ok(pgInvoice);
+                    return Results.Json(pgInvoice, jsonOptions);
                 }
             }
             catch (Exception ex)
@@ -185,7 +186,7 @@ public static class InvoicesEndpoints
         })
         .WithName("InvoicesDelete");
 
-        // --- 8. СПИСОК С ДЕТАЛИЗАЦИЕЙ ОПЛАТ (InvoicesWithPaymentInfo) ---
+        // 8. СПИСОК С ДЕТАЛИЗАЦИЕЙ ОПЛАТ
         group.MapGet("/payment-info", async (
             DateTime? from,
             DateTime? till,
@@ -195,11 +196,11 @@ public static class InvoicesEndpoints
             IInvoicesRepository repo,
             CancellationToken ct) =>
         {
-            var startDate = from ?? DateTime.MinValue;
-            var endDate = till ?? DateTime.MaxValue;
+            var startDate = EnsureUtc(from ?? DateTime.UtcNow.AddYears(-10));
+            var endDate = EnsureUtc(till ?? DateTime.UtcNow.AddYears(10));
 
             var result = await repo.GetPaymentInfoAsync(startDate, endDate, officeId, partnerId, displayCurrencyId, ct);
-            return Results.Ok(result);
+            return Results.Json(result, jsonOptions);
         })
         .WithName("InvoicesGetPaymentInfo");
 
@@ -211,16 +212,22 @@ public static class InvoicesEndpoints
             IInvoicesRepository repo,
             CancellationToken ct) =>
         {
-            var startDate = from ?? DateTime.MinValue;
-            var endDate = till ?? DateTime.MaxValue;
+            var startDate = EnsureUtc(from ?? DateTime.UtcNow.AddYears(-10));
+            var endDate = EnsureUtc(till ?? DateTime.UtcNow.AddYears(10));
 
             var count = await repo.CountPaymentInfoAsync(startDate, endDate, officeId, partnerId, ct);
-            return Results.Ok(new { count });
+            return Results.Json(new { count }, jsonOptions);
         })
         .WithName("InvoicesCountPaymentInfo");
 
-
         return app;
+    }
+
+    private static DateTime EnsureUtc(DateTime dt)
+    {
+        if (dt == DateTime.MinValue) return DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+        if (dt == DateTime.MaxValue) return DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+        return dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
     }
 
     private static List<string> ExtractTagsFromRawJson(JsonElement root)

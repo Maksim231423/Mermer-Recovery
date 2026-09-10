@@ -5,6 +5,8 @@ using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.WebHost.UseUrls("http://*:5050");
+
 var connectionString =
     builder.Configuration.GetConnectionString("Postgres")
     ?? builder.Configuration.GetConnectionString("DefaultConnection")
@@ -60,12 +62,34 @@ builder.Services.AddScoped<ISyncService, SyncService>();
 
 var app = builder.Build();
 
+// ЛОГИРОВАНИЕ ВСЕХ ВХОДЯЩИХ HTTP-ЗАПРОСОВ И ИХ СТАТУСОВ
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path + context.Request.QueryString;
+    var method = context.Request.Method;
+
+    await next();
+
+    var status = context.Response.StatusCode;
+    var color = status >= 400 ? ConsoleColor.Red : ConsoleColor.Green;
+    var prevColor = Console.ForegroundColor;
+    Console.ForegroundColor = color;
+    Console.WriteLine($"[API LOG] {method} {path} -> {status}");
+    Console.ForegroundColor = prevColor;
+});
+
 app.UseCors();
 
-app.UseSwagger();
+// Формируем спецификацию строго в формате Swagger 2.0 (понятно любому UI без сбоев версии 3.0.4)
+app.UseSwagger(c =>
+{
+    c.SerializeAsV2 = true;
+    c.RouteTemplate = "swagger/{documentName}/swagger.json";
+});
+
 app.UseSwaggerUI(o =>
 {
-    o.SwaggerEndpoint("/swagger/v1/swagger.json", "Mermer Binyat API v1");
+    o.SwaggerEndpoint("/swagger/v1/swagger.json", "Mermer ERP API v1");
     o.RoutePrefix = "swagger";
 });
 

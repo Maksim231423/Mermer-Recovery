@@ -69,8 +69,12 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var fromUtc = from.Kind == DateTimeKind.Utc ? from : from.ToUniversalTime();
+                var tillUtc = till.Kind == DateTimeKind.Utc ? till : till.ToUniversalTime();
+
+                var fromStr = fromUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var tillStr = tillUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
                 var res = await _restClient.GetAsync<CountResponse>($"/api/invoices/count?from={fromStr}&till={tillStr}");
                 return res?.Count ?? 0;
             }

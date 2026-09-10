@@ -21,20 +21,35 @@ public static class EnterpriseEndpoints
     {
         var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
 
-        routes.MapGet("/api/enterprise/offices", async (MermerDbContext db) =>
+        // Обработчик получения офисов
+        async Task<IResult> GetOffices(MermerDbContext db)
         {
             var offices = await db.Offices.AsNoTracking().Where(o => !o.IsDisabled).ToListAsync();
             var result = offices.Select(o => new { Id = o.Id.ToString(), Name = o.Name, IsDisabled = o.IsDisabled });
             return Results.Json(result, jsonOptions);
-        }).WithTags("Enterprise");
+        }
 
-        routes.MapGet("/api/enterprise/warehouses", async (MermerDbContext db) =>
+        routes.MapGet("/api/enterprise/offices", GetOffices).WithTags("Enterprise");
+        routes.MapGet("/api/offices", GetOffices).WithTags("Enterprise");
+
+        // Обработчик получения складов (поддерживаем оба маршрута)
+        async Task<IResult> GetWarehouses(MermerDbContext db)
         {
             var warehouses = await db.Warehouses.AsNoTracking().Where(w => !w.IsDisabled).ToListAsync();
-            var result = warehouses.Select(w => new { Id = w.Id.ToString(), Name = w.Name, OfficeId = w.OfficeId?.ToString(), IsDisabled = w.IsDisabled });
+            var result = warehouses.Select(w => new
+            {
+                Id = w.Id.ToString(),
+                Name = w.Name,
+                OfficeId = w.OfficeId.HasValue ? w.OfficeId.Value.ToString() : null,
+                IsDisabled = w.IsDisabled
+            });
             return Results.Json(result, jsonOptions);
-        }).WithTags("Enterprise");
+        }
 
+        routes.MapGet("/api/enterprise/warehouses", GetWarehouses).WithTags("Enterprise");
+        routes.MapGet("/api/warehouses", GetWarehouses).WithTags("Enterprise");
+
+        // Валюты: список
         routes.MapGet("/api/currencies", async (MermerDbContext db, CancellationToken ct) =>
         {
             var currencies = await db.Currencies.Include(c => c.Rates).AsNoTracking().ToListAsync(ct);
@@ -58,6 +73,7 @@ public static class EnterpriseEndpoints
             return Results.Json(result, jsonOptions);
         }).WithTags("Enterprise");
 
+        // Валюты: по ID
         routes.MapGet("/api/currencies/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
         {
             if (!Guid.TryParse(id, out var guid)) return Results.NotFound();
@@ -84,6 +100,7 @@ public static class EnterpriseEndpoints
             return Results.Json(result, jsonOptions);
         }).WithTags("Enterprise");
 
+        // Сохранение валюты
         Func<HttpRequest, MermerDbContext, Task<IResult>> saveCurrencyHandler = async (request, db) =>
         {
             using var reader = new StreamReader(request.Body);
@@ -164,7 +181,6 @@ public static class EnterpriseEndpoints
                 existing.Decimals = decimals;
                 existing.UpdatedAt = DateTime.UtcNow;
 
-                // БЕЗОПАСНОЕ УДАЛЕНИЕ И СОХРАНЕНИЕ В EF CORE
                 if (existing.Rates != null && existing.Rates.Any())
                 {
                     db.CurrencyRates.RemoveRange(existing.Rates);
@@ -173,7 +189,7 @@ public static class EnterpriseEndpoints
                 foreach (var inc in incomingRates)
                 {
                     inc.CurrencyId = existing.Id;
-                    db.CurrencyRates.Add(inc); // Явное добавление гарантирует запись в базу!
+                    db.CurrencyRates.Add(inc);
                 }
             }
 

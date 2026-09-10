@@ -218,7 +218,7 @@ CREATE TABLE stocks (
     barcodes        TEXT[],
     limit_min       NUMERIC(18,4),
     limit_max       NUMERIC(18,4),
-    search_vector tsvector,
+    search_vector   tsvector,
     description     TEXT,
     is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
