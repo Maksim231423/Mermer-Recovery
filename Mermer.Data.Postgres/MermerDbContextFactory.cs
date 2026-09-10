@@ -9,8 +9,7 @@ public class MermerDbContextFactory : IDesignTimeDbContextFactory<MermerDbContex
     {
         var optionsBuilder = new DbContextOptionsBuilder<MermerDbContext>();
 
-        // Укажи здесь свою локальную строку подключения к PostgreSQL
-        optionsBuilder.UseNpgsql("Host=localhost;Database=mermer_db;Username=postgres;Password=1234");
+        optionsBuilder.UseNpgsql("Host=localhost;Port=5433;Database=mermer_creation;Username=mermer_creation;Password=mermer_strong_password_123");
 
         return new MermerDbContext(optionsBuilder.Options);
     }
