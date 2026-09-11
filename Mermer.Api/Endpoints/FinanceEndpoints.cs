@@ -1438,7 +1438,7 @@ public static class FinanceEndpoints
                 ? await db.Depositories.Select(d => d.Id).ToListAsync(ct)
                 : new List<Guid> { Guid.Parse(depositoryId) };
 
-            var result = new List<object>();
+            var result = new List<FundsBalanceByTypeWithBalanceDto>();
 
             var allSlips = await db.FundsSlips.Include(s => s.Lines).Where(s => !s.IsDisabled && s.DepositoryId != null).ToListAsync(ct);
             var allExpenses = await db.ExpenseSlips.Include(s => s.Lines).Where(s => !s.IsDisabled && s.DepositoryId != null).ToListAsync(ct);
@@ -1448,7 +1448,7 @@ public static class FinanceEndpoints
             foreach (var dep in depositories)
             {
                 decimal startBal = 0m;
-                var current = new Mermer.FundsManagement.Models.FundsBalanceByTypeWithBalance
+                var current = new FundsBalanceByTypeWithBalanceDto
                 {
                     DepositoryId = dep.ToString()
                 };
@@ -1547,7 +1547,12 @@ public static class FinanceEndpoints
                 else expense += amt;
             }
 
-            return Results.Ok(new Mermer.FundsManagement.Models.FundsBalance { DepositoryId = depositoryId, Income = income, Expense = expense });
+            return Results.Ok(new FundsBalanceDto
+            {
+                DepositoryId = depositoryId,
+                Income = income,
+                Expense = expense
+            });
         });
     }
 
@@ -1681,4 +1686,35 @@ public static class FinanceEndpoints
         return false;
     }
     #endregion
+
+
+    public class FundsBalanceByTypeWithBalanceDto
+    {
+        public string DepositoryId { get; set; } = string.Empty;
+        public decimal StartingBalance { get; set; }
+        public decimal Income { get; set; }
+        public decimal Expense { get; set; }
+        public decimal Balance => StartingBalance + Income - Expense;
+
+        public decimal FundsOpening { get; set; }
+        public decimal FundsRevisionExceed { get; set; }
+        public decimal FundsRevisionDeficit { get; set; }
+        public decimal Collection { get; set; }
+        public decimal Payment { get; set; }
+        public decimal ExpenseSlip { get; set; }
+        public decimal FundsTransferSource { get; set; }
+        public decimal FundsTransferDestination { get; set; }
+        public decimal Sales { get; set; }
+        public decimal SalesReturn { get; set; }
+        public decimal Purchase { get; set; }
+        public decimal PurchaseReturn { get; set; }
+    }
+
+    public class FundsBalanceDto
+    {
+        public string DepositoryId { get; set; } = string.Empty;
+        public decimal Income { get; set; }
+        public decimal Expense { get; set; }
+        public decimal Balance => Income - Expense;
+    }
 }
