@@ -25,6 +25,11 @@ public class NomenclatureImportService
 
         var validCurrencyIds = (await _dbContext.Currencies.Select(c => c.Id).ToListAsync()).ToHashSet();
 
+        // Загружаем существующие ключи для предотвращения конфликтов дубликатов
+        var existingStockIds = (await _dbContext.Stocks.Select(s => s.Id).ToListAsync()).ToHashSet();
+        var existingUnitIds = (await _dbContext.StockUnits.Select(u => u.Id).ToListAsync()).ToHashSet();
+        var existingPriceIds = (await _dbContext.StockPrices.Select(p => p.Id).ToListAsync()).ToHashSet();
+
         using var stream = File.OpenRead(jsonFilePath);
         using var reader = new StreamReader(stream);
 
@@ -58,44 +63,49 @@ public class NomenclatureImportService
             if (!TryGetGuidAnywhere(root, docBody, "id", out var stockId))
                 continue;
 
-            if (!stockMap.TryGetValue(stockId, out var stock))
+            // Если товара ещё нет в PostgreSQL, формируем сущность для добавления
+            if (!existingStockIds.Contains(stockId))
             {
-                stock = new StockEntity
+                if (!stockMap.TryGetValue(stockId, out var stock))
                 {
-                    Id = stockId,
-                    Name = "Без названия",
-                    CreatedAt = DateTimeOffset.UtcNow,
-                    UpdatedAt = DateTimeOffset.UtcNow
-                };
-                stockMap[stockId] = stock;
+                    stock = new StockEntity
+                    {
+                        Id = stockId,
+                        Name = "Без названия",
+                        CreatedAt = DateTimeOffset.UtcNow,
+                        UpdatedAt = DateTimeOffset.UtcNow
+                    };
+                    stockMap[stockId] = stock;
+                }
+
+                if (TryGetDynamicString(docBody, "code", out var code) && !string.IsNullOrWhiteSpace(code)) stock.Code = code;
+                if (TryGetDynamicString(docBody, "name", out var name) && !string.IsNullOrWhiteSpace(name)) stock.Name = name;
+                if (TryGetDynamicString(docBody, "shortName", out var shortName)) stock.ShortName = shortName;
+                if (TryGetDynamicString(docBody, "type", out var type)) stock.Type = type;
+                if (TryGetDynamicString(docBody, "group", out var group)) stock.Group = group;
+                if (TryGetDynamicString(docBody, "description", out var desc)) stock.Description = desc;
+
+                if (TryGetDynamicBool(docBody, "isDisabled", out var isDisabled)) stock.IsDisabled = isDisabled;
+                if (TryGetDynamicDecimal(docBody, "limitMin", out var limitMin)) stock.LimitMin = limitMin;
+                if (TryGetDynamicDecimal(docBody, "limitMax", out var limitMax)) stock.LimitMax = limitMax;
+
+                if (TryGetDynamicArray(docBody, "tags", out var tags)) stock.Tags = tags;
+                if (TryGetDynamicArray(docBody, "barcodes", out var barcodes)) stock.Barcodes = barcodes;
             }
 
-            if (TryGetDynamicString(docBody, "code", out var code) && !string.IsNullOrWhiteSpace(code)) stock.Code = code;
-            if (TryGetDynamicString(docBody, "name", out var name) && !string.IsNullOrWhiteSpace(name)) stock.Name = name;
-            if (TryGetDynamicString(docBody, "shortName", out var shortName)) stock.ShortName = shortName;
-            if (TryGetDynamicString(docBody, "type", out var type)) stock.Type = type;
-            if (TryGetDynamicString(docBody, "group", out var group)) stock.Group = group;
-            if (TryGetDynamicString(docBody, "description", out var desc)) stock.Description = desc;
-
-            if (TryGetDynamicBool(docBody, "isDisabled", out var isDisabled)) stock.IsDisabled = isDisabled;
-            if (TryGetDynamicDecimal(docBody, "limitMin", out var limitMin)) stock.LimitMin = limitMin;
-            if (TryGetDynamicDecimal(docBody, "limitMax", out var limitMax)) stock.LimitMax = limitMax;
-
-            if (TryGetDynamicArray(docBody, "tags", out var tags)) stock.Tags = tags;
-            if (TryGetDynamicArray(docBody, "barcodes", out var barcodes)) stock.Barcodes = barcodes;
-
-            ExtractUnits(root, docBody, stockId, unitMap);
-            ExtractPrices(root, docBody, stockId, validCurrencyIds, priceMap);
+            // Фильтруем дочерние единицы и цены, чтобы не пытаться вставить уже существующие ID
+            ExtractUnits(root, docBody, stockId, unitMap, existingUnitIds);
+            ExtractPrices(root, docBody, stockId, validCurrencyIds, priceMap, existingPriceIds);
 
             if (linesRead % 10000 == 0)
             {
-                Console.WriteLine($"Прочитано {linesRead} строк... Собрано товаров: {stockMap.Count}");
+                Console.WriteLine($"Прочитано {linesRead} строк... Новых товаров к добавлению: {stockMap.Count}");
             }
         }
 
-        Console.WriteLine($"Агрегация завершена! Товаров: {stockMap.Count}, Единиц: {unitMap.Count}, Цен: {priceMap.Count}");
+        Console.WriteLine($"Агрегация завершена! Новых товаров: {stockMap.Count}, Единиц: {unitMap.Count}, Цен: {priceMap.Count}");
         await SaveAllInBatchesAsync(stockMap.Values.ToList(), unitMap.Values.ToList(), priceMap.Values.ToList());
-        Console.WriteLine("Импорт успешно завершен!");
+        Console.WriteLine("Импорт номенклатуры успешно завершен!");
     }
 
     private async Task SaveAllInBatchesAsync(List<StockEntity> stocks, List<StockUnitEntity> units, List<StockPriceEntity> prices)
@@ -218,7 +228,7 @@ public class NomenclatureImportService
         return false;
     }
 
-    private static void ExtractUnits(JsonElement root, JsonElement docBody, Guid stockId, Dictionary<Guid, StockUnitEntity> unitMap)
+    private static void ExtractUnits(JsonElement root, JsonElement docBody, Guid stockId, Dictionary<Guid, StockUnitEntity> unitMap, HashSet<Guid> existingUnitIds)
     {
         JsonElement unitsArray = default;
         if (!TryGetPropertyCaseInsensitive(docBody, "units", out unitsArray))
@@ -236,6 +246,8 @@ public class NomenclatureImportService
                 if (!TryGetPropAnywhere(elem, "id", out var idProp) || !Guid.TryParse(idProp.GetString(), out var unitId))
                     continue;
 
+                if (existingUnitIds.Contains(unitId)) continue;
+
                 if (!unitMap.TryGetValue(unitId, out var unit))
                 {
                     unit = new StockUnitEntity { Id = unitId, StockId = stockId, Name = "шт" };
@@ -250,7 +262,7 @@ public class NomenclatureImportService
         }
     }
 
-    private static void ExtractPrices(JsonElement root, JsonElement docBody, Guid stockId, HashSet<Guid> validCurrencyIds, Dictionary<Guid, StockPriceEntity> priceMap)
+    private static void ExtractPrices(JsonElement root, JsonElement docBody, Guid stockId, HashSet<Guid> validCurrencyIds, Dictionary<Guid, StockPriceEntity> priceMap, HashSet<Guid> existingPriceIds)
     {
         JsonElement pricesArray = default;
         if (!TryGetPropertyCaseInsensitive(docBody, "prices", out pricesArray))
@@ -267,6 +279,8 @@ public class NomenclatureImportService
             {
                 if (!TryGetPropAnywhere(elem, "id", out var idProp) || !Guid.TryParse(idProp.GetString(), out var priceId))
                     continue;
+
+                if (existingPriceIds.Contains(priceId)) continue;
 
                 if (!priceMap.TryGetValue(priceId, out var price))
                 {

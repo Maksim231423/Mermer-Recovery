@@ -32,6 +32,10 @@ public class CommerceImportService
         var validStocks = (await _dbContext.Stocks.Select(x => x.Id).ToListAsync()).ToHashSet();
         var validUnits = (await _dbContext.StockUnits.Select(x => x.Id).ToListAsync()).ToHashSet();
 
+        // Загружаем уже существующие ID из БД для предотвращения дубликатов при дополнении
+        var existingInvoiceIds = (await _dbContext.Invoices.Select(x => x.Id).ToListAsync()).ToHashSet();
+        var existingLineIds = (await _dbContext.InvoiceLines.Select(x => x.Id).ToListAsync()).ToHashSet();
+
         using var stream = File.OpenRead(jsonFilePath);
         using var reader = new StreamReader(stream);
 
@@ -49,6 +53,7 @@ public class CommerceImportService
 
         string? line;
         int totalInvoices = 0;
+        int skippedInvoices = 0;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
@@ -64,7 +69,13 @@ public class CommerceImportService
                 if (targetContainer.ValueKind != JsonValueKind.Object) continue;
 
                 if (!TryGetGuidProperty(root, targetContainer, "id", out var invoiceId)) continue;
-                if (!processedInvoiceIds.Add(invoiceId)) continue;
+
+                // Пропускаем, если документ уже есть в базе или уже обработан в рамках текущей сессии
+                if (existingInvoiceIds.Contains(invoiceId) || !processedInvoiceIds.Add(invoiceId))
+                {
+                    skippedInvoices++;
+                    continue;
+                }
 
                 var invoice = new InvoiceEntity
                 {
@@ -110,7 +121,7 @@ public class CommerceImportService
 
                 invoicesBatch.Add(invoice);
 
-                // Поиск строк с жесткой защитой от Null
+                // Строки накладной
                 JsonElement linesArray = default;
                 if (targetContainer.TryGetProperty("lines", out var lArr) && lArr.ValueKind == JsonValueKind.Array)
                 {
@@ -135,7 +146,7 @@ public class CommerceImportService
                             lineObj = pProps;
 
                         if (!TryGetGuidProperty(elem, lineObj, "id", out var lineId)) lineId = Guid.NewGuid();
-                        if (!processedLineIds.Add(lineId)) continue;
+                        if (existingLineIds.Contains(lineId) || !processedLineIds.Add(lineId)) continue;
 
                         linesBatch.Add(new InvoiceLineEntity
                         {
@@ -290,7 +301,7 @@ public class CommerceImportService
             totalInvoices += invoicesBatch.Count;
         }
 
-        Console.WriteLine($"Готово! Импортировано Invoice: {totalInvoices} и все связанные коллекции.");
+        Console.WriteLine($"Готово! Импортировано новых Invoice: {totalInvoices} (пропущено существующих: {skippedInvoices}).");
     }
 
     public async Task MigrateStockSlipsAsync(string jsonFilePath)
@@ -302,6 +313,9 @@ public class CommerceImportService
         var validStocks = (await _dbContext.Stocks.Select(x => x.Id).ToListAsync()).ToHashSet();
         var validUnits = (await _dbContext.StockUnits.Select(x => x.Id).ToListAsync()).ToHashSet();
 
+        var existingSlipIds = (await _dbContext.StockSlips.Select(x => x.Id).ToListAsync()).ToHashSet();
+        var existingLineIds = (await _dbContext.StockSlipLines.Select(x => x.Id).ToListAsync()).ToHashSet();
+
         using var stream = File.OpenRead(jsonFilePath);
         using var reader = new StreamReader(stream);
 
@@ -312,6 +326,7 @@ public class CommerceImportService
 
         string? line;
         int totalSlips = 0;
+        int skippedSlips = 0;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
@@ -327,7 +342,11 @@ public class CommerceImportService
                 if (targetContainer.ValueKind != JsonValueKind.Object) continue;
 
                 if (!TryGetGuidProperty(root, targetContainer, "id", out var slipId)) continue;
-                if (!processedSlipIds.Add(slipId)) continue;
+                if (existingSlipIds.Contains(slipId) || !processedSlipIds.Add(slipId))
+                {
+                    skippedSlips++;
+                    continue;
+                }
 
                 var slip = new StockSlipEntity
                 {
@@ -383,7 +402,7 @@ public class CommerceImportService
                             lineObj = pProps;
 
                         if (!TryGetGuidProperty(elem, lineObj, "id", out var lineId)) lineId = Guid.NewGuid();
-                        if (!processedLineIds.Add(lineId)) continue;
+                        if (existingLineIds.Contains(lineId) || !processedLineIds.Add(lineId)) continue;
 
                         linesBatch.Add(new StockSlipLineEntity
                         {
@@ -418,7 +437,7 @@ public class CommerceImportService
             totalSlips += stockSlipsBatch.Count;
         }
 
-        Console.WriteLine($"Готово! Импортировано StockSlip: {totalSlips} и их строк.");
+        Console.WriteLine($"Готово! Импортировано новых StockSlip: {totalSlips} (пропущено: {skippedSlips}).");
     }
 
     public async Task MigrateStockTransfersAsync(string jsonFilePath)
@@ -430,6 +449,9 @@ public class CommerceImportService
         var validUnits = (await _dbContext.StockUnits.Select(x => x.Id).ToListAsync()).ToHashSet();
         var validCurrencies = (await _dbContext.Currencies.Select(x => x.Id).ToListAsync()).ToHashSet();
 
+        var existingTransferIds = (await _dbContext.StockTransfers.Select(x => x.Id).ToListAsync()).ToHashSet();
+        var existingLineIds = (await _dbContext.StockTransferLines.Select(x => x.Id).ToListAsync()).ToHashSet();
+
         using var stream = File.OpenRead(jsonFilePath);
         using var reader = new StreamReader(stream);
 
@@ -440,6 +462,7 @@ public class CommerceImportService
         var processedLineIds = new HashSet<Guid>();
         string? line;
         int totalTransfers = 0;
+        int skippedTransfers = 0;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
@@ -454,7 +477,13 @@ public class CommerceImportService
                 var c = GetTargetContainer(root);
                 if (c.ValueKind != JsonValueKind.Object) continue;
 
-                if (!TryGetGuidProperty(root, c, "id", out var transferId) || !processedTransferIds.Add(transferId)) continue;
+                if (!TryGetGuidProperty(root, c, "id", out var transferId) ||
+                    existingTransferIds.Contains(transferId) ||
+                    !processedTransferIds.Add(transferId))
+                {
+                    skippedTransfers++;
+                    continue;
+                }
 
                 var transfer = new StockTransferEntity
                 {
@@ -512,7 +541,7 @@ public class CommerceImportService
                             lineObj = pProps;
 
                         if (!TryGetGuidProperty(elem, lineObj, "id", out var lineId)) lineId = Guid.NewGuid();
-                        if (!processedLineIds.Add(lineId)) continue;
+                        if (existingLineIds.Contains(lineId) || !processedLineIds.Add(lineId)) continue;
 
                         linesBatch.Add(new StockTransferLineEntity
                         {
@@ -554,7 +583,7 @@ public class CommerceImportService
             totalTransfers += transfersBatch.Count;
         }
 
-        Console.WriteLine($"Готово! Импортировано StockTransfer: {totalTransfers} и их строк.");
+        Console.WriteLine($"Готово! Импортировано новых StockTransfer: {totalTransfers} (пропущено: {skippedTransfers}).");
     }
 
     private async Task SaveStockSlipsBatchAsync(List<StockSlipEntity> slips, List<StockSlipLineEntity> lines)

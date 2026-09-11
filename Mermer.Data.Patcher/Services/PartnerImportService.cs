@@ -23,6 +23,8 @@ public class PartnerImportService
     {
         Console.WriteLine("Начинаем импорт справочника Partner...");
 
+        var existingPartnerIds = (await _dbContext.Partners.Select(p => p.Id).ToListAsync()).ToHashSet();
+
         using var stream = File.OpenRead(jsonFilePath);
         using var reader = new StreamReader(stream);
 
@@ -30,6 +32,7 @@ public class PartnerImportService
         var processedIds = new HashSet<Guid>();
         string? line;
         int totalImported = 0;
+        int skipped = 0;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
@@ -42,7 +45,12 @@ public class PartnerImportService
             {
                 var target = GetTargetContainer(root);
                 if (!TryGetGuid(root, target, "id", out var partnerId)) continue;
-                if (!processedIds.Add(partnerId)) continue;
+
+                if (existingPartnerIds.Contains(partnerId) || !processedIds.Add(partnerId))
+                {
+                    skipped++;
+                    continue;
+                }
 
                 var pgPartner = new PartnerEntity
                 {
@@ -77,7 +85,7 @@ public class PartnerImportService
             totalImported += partnersBatch.Count;
         }
 
-        Console.WriteLine($"Готово! Всего импортировано Partner: {totalImported}");
+        Console.WriteLine($"Готово! Всего импортировано Partner: {totalImported} (пропущено существующих: {skipped})");
     }
 
     #region Хелперы безопасного парсинга

@@ -23,6 +23,8 @@ public class EnterpriseImportService
     {
         Console.WriteLine("Начинаем импорт справочника Partner...");
 
+        var existingIds = (await _dbContext.Partners.Select(x => x.Id).ToListAsync()).ToHashSet();
+
         using var stream = File.OpenRead(jsonFilePath);
         using var reader = new StreamReader(stream);
 
@@ -30,6 +32,7 @@ public class EnterpriseImportService
         var processedIds = new HashSet<Guid>();
         string? line;
         int totalImported = 0;
+        int skipped = 0;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
@@ -42,7 +45,11 @@ public class EnterpriseImportService
             {
                 var targetContainer = GetTargetContainer(root);
                 if (!TryGetGuidProperty(root, targetContainer, "id", out var partnerId)) continue;
-                if (!processedIds.Add(partnerId)) continue;
+                if (existingIds.Contains(partnerId) || !processedIds.Add(partnerId))
+                {
+                    skipped++;
+                    continue;
+                }
 
                 var pgPartner = new PartnerEntity
                 {
@@ -77,12 +84,14 @@ public class EnterpriseImportService
             totalImported += batch.Count;
         }
 
-        Console.WriteLine($"Готово! Всего импортировано Partner: {totalImported}");
+        Console.WriteLine($"Готово! Всего импортировано Partner: {totalImported} (пропущено существующих: {skipped})");
     }
 
     public async Task MigrateOfficesAsync(string jsonFilePath)
     {
         Console.WriteLine("Начинаем импорт справочника Офисов (Office)...");
+
+        var existingIds = (await _dbContext.Offices.Select(x => x.Id).ToListAsync()).ToHashSet();
 
         using var stream = File.OpenRead(jsonFilePath);
         using var reader = new StreamReader(stream);
@@ -91,6 +100,7 @@ public class EnterpriseImportService
         var processedIds = new HashSet<Guid>();
         string? line;
         int totalImported = 0;
+        int skipped = 0;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
@@ -104,7 +114,11 @@ public class EnterpriseImportService
                 var entity = ExtractOfficeEntity(root);
                 if (entity != null)
                 {
-                    if (!processedIds.Add(entity.Id)) continue;
+                    if (existingIds.Contains(entity.Id) || !processedIds.Add(entity.Id))
+                    {
+                        skipped++;
+                        continue;
+                    }
 
                     batch.Add(entity);
 
@@ -130,15 +144,15 @@ public class EnterpriseImportService
             totalImported += batch.Count;
         }
 
-        Console.WriteLine($"Готово! Всего импортировано уникальных Офисов: {totalImported}");
+        Console.WriteLine($"Готово! Всего импортировано уникальных Офисов: {totalImported} (пропущено существующих: {skipped})");
     }
 
     public async Task MigrateWarehousesAsync(string jsonFilePath)
     {
         Console.WriteLine("Начинаем импорт справочника Складов (Warehouse)...");
 
-        var officeIdsList = await _dbContext.Offices.Select(o => o.Id).ToListAsync();
-        var existingOfficeIds = officeIdsList.ToHashSet();
+        var existingOfficeIds = (await _dbContext.Offices.Select(o => o.Id).ToListAsync()).ToHashSet();
+        var existingWarehouseIds = (await _dbContext.Warehouses.Select(w => w.Id).ToListAsync()).ToHashSet();
 
         using var stream = File.OpenRead(jsonFilePath);
         using var reader = new StreamReader(stream);
@@ -147,6 +161,7 @@ public class EnterpriseImportService
         var processedIds = new HashSet<Guid>();
         string? line;
         int totalImported = 0;
+        int skipped = 0;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
@@ -160,7 +175,11 @@ public class EnterpriseImportService
                 var entity = ExtractWarehouseEntity(root, existingOfficeIds);
                 if (entity != null)
                 {
-                    if (!processedIds.Add(entity.Id)) continue;
+                    if (existingWarehouseIds.Contains(entity.Id) || !processedIds.Add(entity.Id))
+                    {
+                        skipped++;
+                        continue;
+                    }
 
                     batch.Add(entity);
 
@@ -186,15 +205,15 @@ public class EnterpriseImportService
             totalImported += batch.Count;
         }
 
-        Console.WriteLine($"Готово! Всего импортировано уникальных Складов: {totalImported}");
+        Console.WriteLine($"Готово! Всего импортировано уникальных Складов: {totalImported} (пропущено существующих: {skipped})");
     }
 
     public async Task MigrateDepositoriesAsync(string jsonFilePath)
     {
         Console.WriteLine("Начинаем импорт справочника Касс (Depository)...");
 
-        var officeIdsList = await _dbContext.Offices.Select(o => o.Id).ToListAsync();
-        var existingOfficeIds = officeIdsList.ToHashSet();
+        var existingOfficeIds = (await _dbContext.Offices.Select(o => o.Id).ToListAsync()).ToHashSet();
+        var existingDepositoryIds = (await _dbContext.Depositories.Select(d => d.Id).ToListAsync()).ToHashSet();
 
         using var stream = File.OpenRead(jsonFilePath);
         using var reader = new StreamReader(stream);
@@ -203,6 +222,7 @@ public class EnterpriseImportService
         var processedIds = new HashSet<Guid>();
         string? line;
         int totalImported = 0;
+        int skipped = 0;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
@@ -216,7 +236,11 @@ public class EnterpriseImportService
                 var entity = ExtractDepositoryEntity(root, existingOfficeIds);
                 if (entity != null)
                 {
-                    if (!processedIds.Add(entity.Id)) continue;
+                    if (existingDepositoryIds.Contains(entity.Id) || !processedIds.Add(entity.Id))
+                    {
+                        skipped++;
+                        continue;
+                    }
 
                     batch.Add(entity);
 
@@ -242,12 +266,15 @@ public class EnterpriseImportService
             totalImported += batch.Count;
         }
 
-        Console.WriteLine($"Готово! Всего импортировано уникальных Касс: {totalImported}");
+        Console.WriteLine($"Готово! Всего импортировано уникальных Касс: {totalImported} (пропущено существующих: {skipped})");
     }
 
     public async Task MigrateCurrenciesAsync(string jsonFilePath)
     {
         Console.WriteLine("Начинаем импорт справочника Валют (Currency) и Курсов...");
+
+        var existingCurrencyIds = (await _dbContext.Currencies.Select(c => c.Id).ToListAsync()).ToHashSet();
+        var existingRateIds = (await _dbContext.CurrencyRates.Select(r => r.Id).ToListAsync()).ToHashSet();
 
         using var stream = File.OpenRead(jsonFilePath);
         using var reader = new StreamReader(stream);
@@ -273,7 +300,7 @@ public class EnterpriseImportService
                 var targetContainer = GetTargetContainer(root);
                 if (!TryGetGuidProperty(root, targetContainer, "id", out var currencyId)) continue;
 
-                if (processedCurrencyIds.Add(currencyId))
+                if (!existingCurrencyIds.Contains(currencyId) && processedCurrencyIds.Add(currencyId))
                 {
                     var currency = new CurrencyEntity
                     {
@@ -290,7 +317,7 @@ public class EnterpriseImportService
                     currencyBatch.Add(currency);
                 }
 
-                ExtractCurrencyRates(root, targetContainer, currencyId, ratesBatch, processedRateIds);
+                ExtractCurrencyRates(root, targetContainer, currencyId, ratesBatch, processedRateIds, existingRateIds);
 
                 if (currencyBatch.Count >= 100 || ratesBatch.Count >= 500)
                 {
@@ -329,12 +356,14 @@ public class EnterpriseImportService
         await _dbContext.SaveChangesAsync();
         _dbContext.ChangeTracker.Clear();
 
-        Console.WriteLine($"Готово! Валют: {totalImportedCurrencies}, Курсов: {totalImportedRates}");
+        Console.WriteLine($"Готово! Новых валют: {totalImportedCurrencies}, Новых курсов: {totalImportedRates}");
     }
 
     public async Task MigrateUsersAsync(string jsonFilePath)
     {
         Console.WriteLine("Начинаем импорт справочника Пользователей (User)...");
+
+        var existingUserIds = (await _dbContext.Users.Select(u => u.Id).ToListAsync()).ToHashSet();
 
         using var stream = File.OpenRead(jsonFilePath);
         using var reader = new StreamReader(stream);
@@ -343,6 +372,7 @@ public class EnterpriseImportService
         var processedIds = new HashSet<Guid>();
         string? line;
         int totalImported = 0;
+        int skipped = 0;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
@@ -356,7 +386,11 @@ public class EnterpriseImportService
                 var targetContainer = GetTargetContainer(root);
                 if (!TryGetGuidProperty(root, targetContainer, "id", out var id)) continue;
 
-                if (!processedIds.Add(id)) continue;
+                if (existingUserIds.Contains(id) || !processedIds.Add(id))
+                {
+                    skipped++;
+                    continue;
+                }
 
                 string username = GetStringProperty(targetContainer, "username") ?? string.Empty;
                 if (string.IsNullOrEmpty(username)) continue;
@@ -395,7 +429,7 @@ public class EnterpriseImportService
             totalImported += batch.Count;
         }
 
-        Console.WriteLine($"Готово! Всего импортировано Пользователей: {totalImported}");
+        Console.WriteLine($"Готово! Всего импортировано Пользователей: {totalImported} (пропущено: {skipped})");
     }
 
     #region Вспомогательные методы
@@ -477,7 +511,8 @@ public class EnterpriseImportService
         JsonElement targetContainer,
         Guid currencyId,
         List<CurrencyRateEntity> ratesBatch,
-        HashSet<Guid> processedRateIds)
+        HashSet<Guid> processedRateIds,
+        HashSet<Guid> existingRateIds)
     {
         JsonElement subList = default;
         if (targetContainer.TryGetProperty("subListPatches", out var slP)) subList = slP;
@@ -490,7 +525,7 @@ public class EnterpriseImportService
                 if (!rateItem.TryGetProperty("id", out var idProp) || !Guid.TryParse(idProp.GetString(), out var rateId))
                     continue;
 
-                if (!processedRateIds.Add(rateId)) continue;
+                if (existingRateIds.Contains(rateId) || !processedRateIds.Add(rateId)) continue;
 
                 JsonElement props = rateItem;
                 if (rateItem.TryGetProperty("propertyPatches", out var pProps) && pProps.ValueKind == JsonValueKind.Object)

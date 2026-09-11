@@ -22,12 +22,17 @@ public class FundsImportService
     public async Task MigrateExpensesAsync(string jsonPath)
     {
         Console.WriteLine("Импорт статей расходов (Expense)...");
+
+        var existingExpenseIds = (await _db.Expenses.Select(e => e.Id).ToListAsync()).ToHashSet();
+
         using var stream = File.OpenRead(jsonPath);
         using var reader = new StreamReader(stream);
 
         var batch = new List<ExpenseEntity>();
         var seen = new HashSet<Guid>();
         string? line;
+        int totalImported = 0;
+        int skipped = 0;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
@@ -39,7 +44,13 @@ public class FundsImportService
 
             var c = GetTargetContainer(root);
             if (c.ValueKind != JsonValueKind.Object) continue;
-            if (!TryGetGuid(root, c, "id", out var id) || !seen.Add(id)) continue;
+            if (!TryGetGuid(root, c, "id", out var id)) continue;
+
+            if (existingExpenseIds.Contains(id) || !seen.Add(id))
+            {
+                skipped++;
+                continue;
+            }
 
             batch.Add(new ExpenseEntity
             {
@@ -59,15 +70,20 @@ public class FundsImportService
                 await _db.Set<ExpenseEntity>().AddRangeAsync(batch);
                 await _db.SaveChangesAsync();
                 _db.ChangeTracker.Clear();
+                totalImported += batch.Count;
                 batch.Clear();
             }
         }
+
         if (batch.Any())
         {
             await _db.Set<ExpenseEntity>().AddRangeAsync(batch);
             await _db.SaveChangesAsync();
             _db.ChangeTracker.Clear();
+            totalImported += batch.Count;
         }
+
+        Console.WriteLine($"Готово! Всего импортировано Expense: {totalImported} (пропущено: {skipped})");
     }
 
     public async Task MigrateFundsSlipsAsync(string jsonPath)
@@ -79,6 +95,9 @@ public class FundsImportService
         var validPartners = (await _db.Partners.Select(x => x.Id).ToListAsync()).ToHashSet();
         var validCurrencies = (await _db.Currencies.Select(x => x.Id).ToListAsync()).ToHashSet();
 
+        var existingSlipIds = (await _db.FundsSlips.Select(s => s.Id).ToListAsync()).ToHashSet();
+        var existingLineIds = (await _db.FundsSlipLines.Select(l => l.Id).ToListAsync()).ToHashSet();
+
         using var stream = File.OpenRead(jsonPath);
         using var reader = new StreamReader(stream);
 
@@ -88,6 +107,7 @@ public class FundsImportService
         var seenLines = new HashSet<Guid>();
         string? line;
         int totalImported = 0;
+        int skipped = 0;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
@@ -100,7 +120,13 @@ public class FundsImportService
 
             var c = GetTargetContainer(root);
             if (c.ValueKind != JsonValueKind.Object) continue;
-            if (!TryGetGuid(root, c, "id", out var slipId) || !seenSlips.Add(slipId)) continue;
+            if (!TryGetGuid(root, c, "id", out var slipId)) continue;
+
+            if (existingSlipIds.Contains(slipId) || !seenSlips.Add(slipId))
+            {
+                skipped++;
+                continue;
+            }
 
             string slipType = "Collection";
             string? rawType = GetString(c, "type") ?? GetString(c, "fundsSlipType");
@@ -135,7 +161,6 @@ public class FundsImportService
             };
             slips.Add(slip);
 
-            // Безопасное извлечение коллекции строк
             JsonElement linesElement = default;
             if (c.TryGetProperty("lines", out var lProp) && lProp.ValueKind == JsonValueKind.Array)
             {
@@ -160,7 +185,7 @@ public class FundsImportService
                         lineObj = pPatches;
 
                     if (!TryGetGuid(el, lineObj, "id", out var lineId)) lineId = Guid.NewGuid();
-                    if (!seenLines.Add(lineId)) continue;
+                    if (existingLineIds.Contains(lineId) || !seenLines.Add(lineId)) continue;
 
                     lines.Add(new FundsSlipLineEntity
                     {
@@ -210,7 +235,7 @@ public class FundsImportService
             totalImported += slips.Count;
         }
 
-        Console.WriteLine($"Готово! Всего импортировано FundsSlip: {totalImported}");
+        Console.WriteLine($"Готово! Всего импортировано FundsSlip: {totalImported} (пропущено: {skipped})");
     }
 
     public async Task MigrateExpenseSlipsAsync(string jsonPath)
@@ -220,7 +245,10 @@ public class FundsImportService
         var validOffices = (await _db.Offices.Select(x => x.Id).ToListAsync()).ToHashSet();
         var validDepositories = (await _db.Depositories.Select(x => x.Id).ToListAsync()).ToHashSet();
         var validCurrencies = (await _db.Currencies.Select(x => x.Id).ToListAsync()).ToHashSet();
-        var validExpenses = (await _db.Set<ExpenseEntity>().Select(x => x.Id).ToListAsync()).ToHashSet();
+        var validExpenses = (await _db.Expenses.Select(x => x.Id).ToListAsync()).ToHashSet();
+
+        var existingSlipIds = (await _db.ExpenseSlips.Select(s => s.Id).ToListAsync()).ToHashSet();
+        var existingLineIds = (await _db.ExpenseSlipLines.Select(l => l.Id).ToListAsync()).ToHashSet();
 
         using var stream = File.OpenRead(jsonPath);
         using var reader = new StreamReader(stream);
@@ -231,6 +259,7 @@ public class FundsImportService
         var seenLines = new HashSet<Guid>();
         string? line;
         int totalImported = 0;
+        int skipped = 0;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
@@ -242,7 +271,13 @@ public class FundsImportService
 
             var c = GetTargetContainer(root);
             if (c.ValueKind != JsonValueKind.Object) continue;
-            if (!TryGetGuid(root, c, "id", out var slipId) || !seenSlips.Add(slipId)) continue;
+            if (!TryGetGuid(root, c, "id", out var slipId)) continue;
+
+            if (existingSlipIds.Contains(slipId) || !seenSlips.Add(slipId))
+            {
+                skipped++;
+                continue;
+            }
 
             slips.Add(new ExpenseSlipEntity
             {
@@ -287,7 +322,7 @@ public class FundsImportService
                         lineObj = pPatches;
 
                     if (!TryGetGuid(el, lineObj, "id", out var lineId)) lineId = Guid.NewGuid();
-                    if (!seenLines.Add(lineId)) continue;
+                    if (existingLineIds.Contains(lineId) || !seenLines.Add(lineId)) continue;
 
                     lines.Add(new ExpenseSlipLineEntity
                     {
@@ -323,7 +358,7 @@ public class FundsImportService
             totalImported += slips.Count;
         }
 
-        Console.WriteLine($"Готово! Всего импортировано ExpenseSlip: {totalImported}");
+        Console.WriteLine($"Готово! Всего импортировано ExpenseSlip: {totalImported} (пропущено: {skipped})");
     }
 
     public async Task MigrateFundsTransfersAsync(string jsonPath)
@@ -332,6 +367,9 @@ public class FundsImportService
         var validUsers = (await _db.Users.Select(x => x.Id).ToListAsync()).ToHashSet();
         var validDepositories = (await _db.Depositories.Select(x => x.Id).ToListAsync()).ToHashSet();
         var validCurrencies = (await _db.Currencies.Select(x => x.Id).ToListAsync()).ToHashSet();
+
+        var existingTransferIds = (await _db.FundsTransfers.Select(t => t.Id).ToListAsync()).ToHashSet();
+        var existingLineIds = (await _db.FundsTransferLines.Select(l => l.Id).ToListAsync()).ToHashSet();
 
         using var stream = File.OpenRead(jsonPath);
         using var reader = new StreamReader(stream);
@@ -342,6 +380,7 @@ public class FundsImportService
         var seenLines = new HashSet<Guid>();
         string? line;
         int totalImported = 0;
+        int skipped = 0;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
@@ -353,7 +392,13 @@ public class FundsImportService
 
             var c = GetTargetContainer(root);
             if (c.ValueKind != JsonValueKind.Object) continue;
-            if (!TryGetGuid(root, c, "id", out var transferId) || !seenTransfers.Add(transferId)) continue;
+            if (!TryGetGuid(root, c, "id", out var transferId)) continue;
+
+            if (existingTransferIds.Contains(transferId) || !seenTransfers.Add(transferId))
+            {
+                skipped++;
+                continue;
+            }
 
             transfers.Add(new FundsTransferEntity
             {
@@ -397,7 +442,7 @@ public class FundsImportService
                         lineObj = pPatches;
 
                     if (!TryGetGuid(el, lineObj, "id", out var lineId)) lineId = Guid.NewGuid();
-                    if (!seenLines.Add(lineId)) continue;
+                    if (existingLineIds.Contains(lineId) || !seenLines.Add(lineId)) continue;
 
                     decimal amt = GetDecimal(lineObj, "amount") ?? 0m;
                     decimal recAmt = GetDecimal(lineObj, "receivedAmount") ?? amt;
@@ -436,7 +481,7 @@ public class FundsImportService
             totalImported += transfers.Count;
         }
 
-        Console.WriteLine($"Готово! Всего импортировано FundsTransfer: {totalImported}");
+        Console.WriteLine($"Готово! Всего импортировано FundsTransfer: {totalImported} (пропущено: {skipped})");
     }
 
     #region Хелперы
