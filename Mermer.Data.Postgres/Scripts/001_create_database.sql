@@ -8,6 +8,30 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 
+
+-- ============================================================================
+-- LICENSING & ACTIVATION (Priority 0 — Security)
+-- Aligned strictly with LicenseEntity.cs
+-- ============================================================================
+
+DROP TABLE IF EXISTS licenses CASCADE;
+
+CREATE TABLE licenses (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    key             VARCHAR(255) NOT NULL UNIQUE,
+    application_id  VARCHAR(100) NOT NULL DEFAULT '55ddc105-8f48-4f78-b214-aea448d2a370',
+    module_id       VARCHAR(100) NOT NULL,
+    machine_id      VARCHAR(255),
+    note            TEXT,
+    valid_from      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    valid_till      TIMESTAMPTZ,
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_licenses_key ON licenses(key);
+CREATE INDEX idx_licenses_app_mod ON licenses(application_id, module_id);
+
 -- ============================================================================
 -- REFERENCE TABLES (Priority 1 — Core)
 -- ============================================================================

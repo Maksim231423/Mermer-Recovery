@@ -2,6 +2,7 @@
 using Mermer.Api.Services;
 using Mermer.Data.Postgres;
 using Microsoft.OpenApi.Models;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -77,6 +78,17 @@ app.Use(async (context, next) =>
     Console.WriteLine($"[API LOG] {method} {path} -> {status}");
     Console.ForegroundColor = prevColor;
 });
+
+using (var scope = app.Services.CreateScope())
+{
+    var dbContext = scope.ServiceProvider.GetRequiredService<MermerDbContext>();
+    Console.ForegroundColor = ConsoleColor.Yellow;
+    Console.WriteLine("[DB] Применение миграций / создание схемы...");
+    dbContext.Database.Migrate();
+    Console.ForegroundColor = ConsoleColor.Green;
+    Console.WriteLine("[DB] База данных успешно инициализирована!");
+    Console.ResetColor();
+}
 
 app.UseCors();
 

@@ -18,4 +18,16 @@
     <ProjectReference Include="..\Mermer.Data.Postgres\Mermer.Data.Postgres.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="RUN_SERVER.bat">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Scripts\backup_routine.ps1">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Scripts\INSTALL_AUTO_BACKUP.bat">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>
