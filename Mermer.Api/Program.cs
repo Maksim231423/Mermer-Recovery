@@ -3,6 +3,7 @@ using Mermer.Api.Services;
 using Mermer.Data.Postgres;
 using Microsoft.OpenApi.Models;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -57,7 +58,7 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(o =>
         System.Text.Json.JsonNamingPolicy.CamelCase;
 });
 
-//  РЕГИСТРАЦИЯ СЕРВИСОВ СИНХРОНИЗАЦИИ 
+// РЕГИСТРАЦИЯ СЕРВИСОВ СИНХРОНИЗАЦИИ
 builder.Services.AddScoped<IStockBalanceCalculator, StockBalanceCalculator>();
 builder.Services.AddScoped<ISyncService, SyncService>();
 
@@ -79,20 +80,38 @@ app.Use(async (context, next) =>
     Console.ForegroundColor = prevColor;
 });
 
+// БЕЗОПАСНАЯ ИНИЦИАЛИЗАЦИЯ БД
 using (var scope = app.Services.CreateScope())
 {
     var dbContext = scope.ServiceProvider.GetRequiredService<MermerDbContext>();
     Console.ForegroundColor = ConsoleColor.Yellow;
-    Console.WriteLine("[DB] Применение миграций / создание схемы...");
-    dbContext.Database.Migrate();
-    Console.ForegroundColor = ConsoleColor.Green;
-    Console.WriteLine("[DB] База данных успешно инициализирована!");
-    Console.ResetColor();
+    Console.WriteLine("[DB] Проверка схемы базы данных...");
+
+    try
+    {
+        dbContext.Database.Migrate();
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine("[DB] Миграции успешно применены!");
+    }
+    catch (PostgresException ex) when (ex.SqlState == "42P07")
+    {
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine("[DB] Схема базы уже существует (таблицы созданы скриптом инициализации). Продолжаем запуск...");
+    }
+    catch (Exception ex)
+    {
+        Console.ForegroundColor = ConsoleColor.DarkYellow;
+        Console.WriteLine($"[DB] Предупреждение при миграции: {ex.Message}. Продолжаем запуск...");
+    }
+    finally
+    {
+        Console.ResetColor();
+    }
 }
 
 app.UseCors();
 
-// Формируем спецификацию строго в формате Swagger 2.0 (понятно любому UI без сбоев версии 3.0.4)
+// Формируем спецификацию строго в формате Swagger 2.0
 app.UseSwagger(c =>
 {
     c.SerializeAsV2 = true;
@@ -110,7 +129,7 @@ app.MapGet("/", () => Results.Redirect("/swagger"))
 
 // РЕГИСТРАЦИЯ ЭНДПОИНТОВ
 app.MapHealthEndpoints();
-app.MapAuthEndpoints(); // ДОБАВЛЕНО: Регистрация эндпоинтов авторизации (/api/auth/login)
+app.MapAuthEndpoints();
 app.MapEnterpriseEndpoints();
 app.MapFinanceEndpoints();
 app.MapExpensesEndpoints();
@@ -137,6 +156,6 @@ app.MapUsersEndpoints();
 app.MapRolesEndpoints();
 app.MapStockOrderTemplatesEndpoints();
 app.MapLicensingEndpoints();
-
+app.MapReportEndpoints();
 
 app.Run();

@@ -33,6 +33,25 @@ CREATE INDEX idx_licenses_key ON licenses(key);
 CREATE INDEX idx_licenses_app_mod ON licenses(application_id, module_id);
 
 -- ============================================================================
+-- 5. ТАБЛИЦА МАКЕТОВ ДИЗАЙНЕРА ОТЧЕТОВ И ПЕЧАТНЫХ ФОРМ (DevExpress)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS report_layouts (
+    id          VARCHAR(150) PRIMARY KEY, -- Пример: 'Report-BillStandard', 'Report-StockSlipStandard'
+    name        VARCHAR(150) NOT NULL,
+    layout      TEXT NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Индекс для быстрого поиска по базовому имени отчета
+CREATE INDEX IF NOT EXISTS idx_report_layouts_name ON report_layouts(name);
+
+-- Комментарии к структуре (для читаемости схемы в pgAdmin)
+COMMENT ON TABLE report_layouts IS 'Пользовательские XML-макеты печатных форм DevExpress';
+COMMENT ON COLUMN report_layouts.id IS 'Уникальный строковый ключ формы вида Report-{ClassName}';
+COMMENT ON COLUMN report_layouts.layout IS 'XML-разметка сериализованного отчета XtraReport';
+
+-- ============================================================================
 -- REFERENCE TABLES (Priority 1 — Core)
 -- ============================================================================
 

@@ -46,7 +46,6 @@ public partial class ReportDesigner : ThemedWindow
             {
                 using (MemoryStream memoryStream = new MemoryStream())
                 {
-                    // leaveOpen: true, чтобы MemoryStream не закрылся раньше времени
                     using (StreamWriter streamWriter = new StreamWriter(memoryStream, Encoding.UTF8, 1024, true))
                     {
                         await streamWriter.WriteAsync(asyncText);
@@ -58,11 +57,33 @@ public partial class ReportDesigner : ThemedWindow
             }
             else
             {
-                Type reportType = GetType().Assembly.GetTypes()
-                    .Single(t => typeof(XtraReport).IsAssignableFrom(t) && t.Name == _reportName);
+                XtraReport reportInstance = null;
 
-                XtraReport instance = Activator.CreateInstance(reportType) as XtraReport;
-                Designer.OpenDocument(instance);
+                try
+                {
+                    Type reportType = GetType().Assembly.GetTypes()
+                        .FirstOrDefault(t => typeof(XtraReport).IsAssignableFrom(t) && t.Name == _reportName);
+
+                    if (reportType != null)
+                    {
+                        reportInstance = Activator.CreateInstance(reportType) as XtraReport;
+                    }
+                }
+                catch (Exception initEx)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[ReportDesigner] Ошибка инициализации типа {_reportName}: {initEx.Message}");
+                }
+
+                // Если ресурса нет или тип не создался — открываем чистый базовый отчет, чтобы не крашить окно
+                if (reportInstance == null)
+                {
+                    reportInstance = new XtraReport
+                    {
+                        DisplayName = _reportName
+                    };
+                }
+
+                Designer.OpenDocument(reportInstance);
             }
         }
         catch (Exception ex)

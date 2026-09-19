@@ -155,6 +155,41 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Базовые товарные и складские отчеты -->
+    <EmbeddedResource Update="Mermer\Binyat\Ui\Pc\Reports\StockSlipStandard.resx">
+      <LogicalName>Mermer.Ui.Pc.Reports.StockSlipStandard.resources</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Update="Mermer\Binyat\Ui\Pc\Reports\StockOrderStandard.resx">
+      <LogicalName>Mermer.Ui.Pc.Reports.StockOrderStandard.resources</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Update="Mermer\Binyat\Ui\Pc\Reports\StockTransferStandard.resx">
+      <LogicalName>Mermer.Ui.Pc.Reports.StockTransferStandard.resources</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Update="Mermer\Binyat\Ui\Pc\Reports\StockTransferStandardSent.resx">
+      <LogicalName>Mermer.Ui.Pc.Reports.StockTransferStandardSent.resources</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Update="Mermer\Binyat\Ui\Pc\Reports\StockTransferStandardReceived.resx">
+      <LogicalName>Mermer.Ui.Pc.Reports.StockTransferStandardReceived.resources</LogicalName>
+    </EmbeddedResource>
+
+    <!-- Счета, накладные и чеки -->
+    <EmbeddedResource Update="Mermer\Binyat\Ui\Pc\Reports\BillStandard.resx">
+      <LogicalName>Mermer.Ui.Pc.Reports.BillStandard.resources</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Update="Mermer\Binyat\Ui\Pc\Reports\BillCheque.resx">
+      <LogicalName>Mermer.Ui.Pc.Reports.BillCheque.resources</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Update="Mermer\Binyat\Ui\Pc\Reports\InvoiceStandard.resx">
+      <LogicalName>Mermer.Ui.Pc.Reports.InvoiceStandard.resources</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Update="Mermer\Binyat\Ui\Pc\Reports\InvoiceCheque.resx">
+      <LogicalName>Mermer.Ui.Pc.Reports.InvoiceCheque.resources</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Update="Mermer\Binyat\Ui\Pc\Reports\ExpenseSlipStandard.resx">
+      <LogicalName>Mermer.Ui.Pc.Reports.ExpenseSlipStandard.resources</LogicalName>
+    </EmbeddedResource>
+
+    <!-- Сводные агрегированные отчеты -->
     <EmbeddedResource Update="Mermer\Binyat\Ui\Pc\Reports\AggregatedReportAll.resx">
       <LogicalName>Mermer.Ui.Pc.Reports.AggregatedReportAll.resources</LogicalName>
     </EmbeddedResource>
@@ -166,9 +201,6 @@
     </EmbeddedResource>
     <EmbeddedResource Update="Mermer\Binyat\Ui\Pc\Reports\AggregatedReportStocks.resx">
       <LogicalName>Mermer.Ui.Pc.Reports.AggregatedReportStocks.resources</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Update="Mermer\Binyat\Ui\Pc\Reports\InvoiceStandard.resx">
-      <LogicalName>Mermer.Ui.Pc.Reports.InvoiceStandard.resources</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 

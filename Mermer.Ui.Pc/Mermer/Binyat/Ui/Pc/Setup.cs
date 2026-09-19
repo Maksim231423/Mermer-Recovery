@@ -176,6 +176,10 @@ public class Setup : MvxWpfSetup
                .As<Mermer.Authorization.Services.ILoginService>()
                .SingleInstance();
 
+        // --- ХРАНИЛИЩЕ МАКЕТОВ ПЕЧАТНЫХ ФОРМ (ВМЕСТО COUCHBASE) ---
+        builder.RegisterType<Mermer.Ui.Pc.Services.ReportLayoutStorageService>()
+               .As<Mermer.Ui.Pc.Services.IReportLayoutStorageService>()
+               .SingleInstance();
 
         // --- ЛОКАЛЬНЫЙ ГЕНЕРАТОР КОДОВ (ОТКЛЮЧАЕТ COUCHBASE ДЛЯ ВСЕХ ФОРМ) ---
         builder.RegisterType<Mermer.Ui.Pc.Services.LocalTransactionCodeGenerationService>()

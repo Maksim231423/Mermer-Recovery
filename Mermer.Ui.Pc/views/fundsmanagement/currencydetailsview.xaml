@@ -62,12 +62,12 @@
                                     </dxg:GridColumn>
                                     <dxg:GridColumn FieldName="Multiplier" Header="{Localize Multiplier}">
                                         <dxg:ColumnBase.EditSettings>
-                                            <dxe:SpinEditSettings MinValue="0" IsFloatValue="True" Mask="n8" MaskUseAsDisplayFormat="True"/>
+                                            <dxe:SpinEditSettings MinValue="0" IsFloatValue="True" Mask="n2" MaskUseAsDisplayFormat="True"/>
                                         </dxg:ColumnBase.EditSettings>
                                     </dxg:GridColumn>
                                     <dxg:GridColumn FieldName="Divider" Header="{Localize Divider}">
                                         <dxg:ColumnBase.EditSettings>
-                                            <dxe:SpinEditSettings MinValue="0" IsFloatValue="True" Mask="n8" MaskUseAsDisplayFormat="True"/>
+                                            <dxe:SpinEditSettings MinValue="0" IsFloatValue="True" Mask="n2" MaskUseAsDisplayFormat="True"/>
                                         </dxg:ColumnBase.EditSettings>
                                     </dxg:GridColumn>
                                 </dxg:GridControl.Columns>

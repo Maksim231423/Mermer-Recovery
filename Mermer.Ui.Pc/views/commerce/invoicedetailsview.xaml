@@ -681,11 +681,11 @@
                                     </dxe:BaseEdit.StyleSettings>
                                 </dxe:ComboBoxEdit>
                             </dxlc:LayoutItem>
-                            <dxlc:LayoutItem Label="{Localize Tags}">
+                            <dxlc:LayoutItem Label="{Localize Tags}" Visibility="Collapsed">
                                 <dxe:ComboBoxEdit NullValueButtonPlacement="EditBox" IncrementalFiltering="True" ImmediatePopup="True"
-                                  IsTextEditable="True" EditValue="{Binding Details.Tags, Converter={cnv:TokenConverter}}"
-                                  IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"
-                                  ItemsSource="{Binding TagNames}">
+                      IsTextEditable="True" EditValue="{Binding Details.Tags, Converter={cnv:TokenConverter}}"
+                      IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"
+                      ItemsSource="{Binding TagNames}">
                                     <dxe:BaseEdit.StyleSettings>
                                         <dxe:TokenComboBoxStyleSettings NewTokenPosition="Far"/>
                                     </dxe:BaseEdit.StyleSettings>

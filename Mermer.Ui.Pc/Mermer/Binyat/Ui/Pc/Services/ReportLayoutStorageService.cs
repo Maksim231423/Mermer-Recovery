@@ -1,77 +1,101 @@
-﻿using Couchbase;
-using Couchbase.Core;
-using Mermer.Authorization.Services;
-using Mermer.Data.Patcher;
-using Newtonsoft.Json;
-using Mermer.Core.Couch.Changes;
-using Mermer.Core.Couch.Changes.Services;
-using Mermer.Core.Couch.Common;
-using System.Collections.Generic;
+﻿using System;
+using System.IO;
+using System.Net.Http;
+using System.Text;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
 
 namespace Mermer.Ui.Pc.Services;
 
 public class ReportLayoutStorageService : IReportLayoutStorageService
 {
-    private readonly IPatcher _patcher;
-    private readonly ICouchCluster _cluster;
-    private readonly ILoginService _loginService;
-    private readonly ICouchLocalChangesRepositoryService<CouchPatch> _localChangesRepositoryService;
+    private readonly HttpClient _httpClient;
+    private readonly string _localReportsFolder;
 
-    public ReportLayoutStorageService(
-        IPatcher patcher,
-        ICouchCluster cluster,
-        ILoginService loginService,
-        ICouchLocalChangesRepositoryService<CouchPatch> localChangesRepositoryService)
+    public ReportLayoutStorageService()
     {
-        _patcher = patcher;
-        _cluster = cluster;
-        _loginService = loginService;
-        _localChangesRepositoryService = localChangesRepositoryService;
+        _httpClient = new HttpClient
+        {
+            BaseAddress = new Uri("http://127.0.0.1:5050/"),
+            Timeout = TimeSpan.FromSeconds(10)
+        };
+
+        _localReportsFolder = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Mermer",
+            "Reports"
+        );
+
+        if (!Directory.Exists(_localReportsFolder))
+        {
+            Directory.CreateDirectory(_localReportsFolder);
+        }
     }
 
     public async Task<string> GetAsync(string reportName)
     {
-        using (IBucket bucket = _cluster.OpenDefaultBucket())
+        string localFile = Path.Combine(_localReportsFolder, string.Format("{0}.xml", reportName));
+
+        try
         {
-            var doc = await bucket.GetDocumentAsync<ReportLayout>(GetReportName(reportName));
-            return doc.Content?.Layout;
+            var response = await _httpClient.GetAsync(string.Format("api/reports/layout/{0}", reportName));
+            if (response.IsSuccessStatusCode)
+            {
+                string json = await response.Content.ReadAsStringAsync();
+                var result = JsonConvert.DeserializeAnonymousType(json, new { Layout = "" });
+                if (result != null && !string.IsNullOrEmpty(result.Layout))
+                {
+                    await WriteTextToFileAsync(localFile, result.Layout);
+                    return result.Layout;
+                }
+            }
         }
+        catch
+        {
+            // Фоллбэк на локальный кэш
+        }
+
+        if (File.Exists(localFile))
+        {
+            return await ReadTextFromFileAsync(localFile);
+        }
+
+        return null;
     }
 
     public async Task StoreAsync(string reportName, string reportLayout)
     {
-        using (IBucket bucket = _cluster.OpenDefaultBucket())
+        string localFile = Path.Combine(_localReportsFolder, string.Format("{0}.xml", reportName));
+
+        await WriteTextToFileAsync(localFile, reportLayout);
+
+        try
         {
-            string id = GetReportName(reportName);
-            ReportLayout model = new ReportLayout
-            {
-                Name = reportName,
-                Layout = reportLayout
-            };
-
-            var documentAsync = await bucket.GetDocumentAsync<ReportLayout>(id);
-
-            // Создаем новый объект Mermer.Data.Patcher
-            Patch mermerPatch = _patcher.CreatePatch(model, documentAsync.Content, id);
-
-            // Конвертируем его в старый Payhas.CouchPatch через JSON
-            string patchJson = JsonConvert.SerializeObject(mermerPatch);
-            CouchPatch couchPatch = JsonConvert.DeserializeObject<CouchPatch>(patchJson);
-
-            // Дозаполняем необходимые поля
-            couchPatch.DocType = typeof(ReportLayout).Name;
-            couchPatch.Author = _loginService.Session.Username;
-
-            await _localChangesRepositoryService.StorePatchesAsync(new[] { couchPatch }, bucket);
-
-            await bucket.UpsertAsync(new Document<ReportLayout>
-            {
-                Id = id,
-                Content = model
-            });
+            var payload = new { Name = reportName, Layout = reportLayout };
+            var content = new StringContent(JsonConvert.SerializeObject(payload), Encoding.UTF8, "application/json");
+            await _httpClient.PostAsync("api/reports/layout", content);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(string.Format("[ReportStorage] Ошибка отправки отчета на сервер: {0}", ex.Message));
         }
     }
 
-    private static string GetReportName(string reportName) => "Report-" + reportName;
+    private static async Task WriteTextToFileAsync(string filePath, string content)
+    {
+        using (var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, true))
+        using (var writer = new StreamWriter(stream, Encoding.UTF8))
+        {
+            await writer.WriteAsync(content);
+        }
+    }
+
+    private static async Task<string> ReadTextFromFileAsync(string filePath)
+    {
+        using (var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
+        using (var reader = new StreamReader(stream, Encoding.UTF8))
+        {
+            return await reader.ReadToEndAsync();
+        }
+    }
 }

@@ -292,7 +292,7 @@ public class InvoiceDetailsViewModel :
             // Если есть неоплаченный остаток (Left) и не стоит галочка "На запись"
             if (Details.DisplayLeftTotal > 0 && !Details.DebitCreditLeftAmount)
             {
-                throw new Exception("Оплата не прийнята повністю! Внесіть суму оплати або поставте галочку 'На запис' (Debit/Credit Left Amount).");
+                throw new Exception("Оплата не принята полностью! Внесите сумму оплаты или поставьте галочку 'На запись' (Debit/Credit Left Amount).");
             }
 
             if (!string.IsNullOrEmpty(Details.PartnerId))

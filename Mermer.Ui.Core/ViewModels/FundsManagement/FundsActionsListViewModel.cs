@@ -99,6 +99,13 @@ public class FundsActionsListViewModel :
         }
     }
 
+    // Если IsDirty не виртуальное, переопределяем метод закрытия
+    public override Task<bool> OnCloseAsync()
+    {
+        // Молча закрываем вкладку без всяких проверок
+        return this.NavigationService.Close(this).ContinueWith(_ => true);
+    }
+
     public Reference<Partner> Partners { get; }
     public Reference<Depository> Depositories { get; }
     public LocalizedTransactionTypes Types { get; }
@@ -247,11 +254,19 @@ public class FundsActionsListViewModel :
 
     protected override Task OnLoad()
     {
-        if (this._parameter == null)
-            return base.OnLoad();
+        if (this._parameter != null)
+        {
+            this._parameter = null;
+            return this.LoadByDateAsync(false);
+        }
 
-        this._parameter = null;
-        return this.LoadByDateAsync(false);
+        // Если список уже загружен (например, были выбраны #All Records), не сбрасывать его в base.OnLoad() (на #Today)
+        if (this.List != null && this.List.Any())
+        {
+            return Task.CompletedTask;
+        }
+
+        return base.OnLoad();
     }
 
     protected override Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)

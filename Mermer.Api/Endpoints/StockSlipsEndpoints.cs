@@ -20,49 +20,200 @@ public static class StockSlipsEndpoints
     {
         var group = routes.MapGroup("/api/catalog").WithTags("Catalog");
 
-        // --- БЫСТРЫЙ СПИСОК СКЛАДСКИХ ОРДЕРОВ (БЕЗ ТЯЖЕЛЫХ СТРОК) ---
+        // --- СПИСОК СКЛАДСКИХ ОРДЕРОВ ---
         group.MapGet("/slips", async (DateTime? from, DateTime? till, string? warehouseId, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTimeOffset startDate = from.HasValue ? new DateTimeOffset(from.Value.ToUniversalTime()) : DateTimeOffset.MinValue;
-            DateTimeOffset endDate = till.HasValue ? new DateTimeOffset(till.Value.ToUniversalTime()) : DateTimeOffset.MaxValue;
-
-            var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
-                         ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
-            var defCurId = defCur?.Id.ToString() ?? string.Empty;
-
-            var query = db.StockSlips
-                .AsNoTracking()
-                .Where(s => s.Date >= startDate && s.Date <= endDate);
-
-            if (Guid.TryParse(warehouseId, out var wGuid))
-                query = query.Where(s => s.WarehouseId == wGuid);
-
-            var slips = await query.OrderByDescending(s => s.Date).ToListAsync(ct);
-
-            var result = slips.Select(s => new
+            try
             {
-                Id = s.Id.ToString(),
-                Code = s.Code ?? string.Empty,
-                Date = s.Date.UtcDateTime,
-                SlipType = s.SlipType,
-                Type = s.SlipType,
-                WarehouseId = s.WarehouseId?.ToString(),
-                UserId = s.UserId?.ToString(),
-                UserName = "admin",
-                IsCompleted = s.IsCompleted,
-                IsDisabled = false,
-                Group = s.GroupName ?? string.Empty,
-                Tags = s.Tags != null ? s.Tags.ToList() : new List<string>(),
-                Description = s.Description ?? string.Empty,
-                DisplayTotal = s.DisplayTotal,
-                ActionTotal = s.DisplayTotal,
-                DisplayCurrencyId = defCurId,
-                Lines = new List<object>(),
-                StockUnitConvertions = new List<object>(),
-                CurrencyConvertions = new List<object>()
-            });
+                // 1. Валюты и конвертеры
+                var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
+                             ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
+                var defCurId = defCur?.Id.ToString() ?? "00000000-0000-0000-0000-000000000001";
 
-            return Results.Ok(result);
+                object[] convertions;
+                try
+                {
+                    convertions = await GetCurrencyConvertionsAsync(db, DateTime.UtcNow, ct);
+                }
+                catch
+                {
+                    convertions = Array.Empty<object>();
+                }
+
+                if (convertions == null || convertions.Length == 0)
+                {
+                    convertions = new object[]
+                    {
+                        new { CurrencyId = defCurId, Multiplier = 1m, Divider = 1m }
+                    };
+                }
+
+                // 2. Безопасные границы дат в UTC
+                DateTimeOffset startDate = from.HasValue
+                    ? DateTime.SpecifyKind(from.Value, DateTimeKind.Utc)
+                    : DateTimeOffset.MinValue;
+                DateTimeOffset endDate = till.HasValue
+                    ? DateTime.SpecifyKind(till.Value, DateTimeKind.Utc)
+                    : DateTimeOffset.MaxValue;
+
+                // 3. Выборка заголовков накладных (БЕЗ групповых полей и связей)
+                var slipsQuery = db.StockSlips
+                    .AsNoTracking()
+                    .Where(s => s.Date >= startDate && s.Date <= endDate);
+
+                if (Guid.TryParse(warehouseId, out var wGuid))
+                    slipsQuery = slipsQuery.Where(s => s.WarehouseId == wGuid);
+
+                var rawSlips = await slipsQuery
+                    .OrderByDescending(s => s.Date)
+                    .Select(s => new
+                    {
+                        s.Id,
+                        s.Code,
+                        s.Date,
+                        s.SlipType,
+                        s.WarehouseId,
+                        s.UserId,
+                        s.IsCompleted,
+                        s.DisplayTotal,
+                        s.Description,
+                        s.Tags
+                    })
+                    .ToListAsync(ct);
+
+                if (!rawSlips.Any())
+                {
+                    return Results.Ok(Array.Empty<object>());
+                }
+
+                // 4. Подгружаем строки только для найденных накладных
+                var slipIds = rawSlips.Select(x => x.Id).ToList();
+                var allLines = await db.StockSlipLines
+                    .AsNoTracking()
+                    .Where(l => slipIds.Contains(l.StockSlipId)) // <--- ИСПРАВЛЕНО
+                    .Select(l => new
+                    {
+                        l.Id,
+                        l.StockSlipId,
+                        l.StockId,
+                        l.UnitId,
+                        l.Quantity,
+                        l.Price,
+                        l.ActionTotal,
+                        l.SortOrder
+                    })
+                    .ToListAsync(ct);
+
+                var linesGrouped = allLines
+                    .GroupBy(l => l.StockSlipId) // <--- ИСПРАВЛЕНО (БЕЗ .Value)
+                    .ToDictionary(g => g.Key, g => g.ToList());
+
+                // 5. Формируем DTO для клиента
+                var result = rawSlips.Select(s =>
+                {
+                    var linesList = new List<object>();
+                    var unitConvertions = new List<object>();
+
+                    if (linesGrouped.TryGetValue(s.Id, out var slipLines) && slipLines.Any())
+                    {
+                        foreach (var l in slipLines)
+                        {
+                            var sId = l.StockId?.ToString() ?? Guid.Empty.ToString();
+                            var uId = l.UnitId?.ToString() ?? Guid.Empty.ToString();
+                            decimal lineTotal = l.ActionTotal != 0m ? l.ActionTotal : (l.Quantity * l.Price);
+
+                            linesList.Add(new
+                            {
+                                Id = l.Id.ToString(),
+                                StockSlipId = s.Id.ToString(),
+                                StockId = sId,
+                                UnitId = uId,
+                                CurrencyId = defCurId,
+                                Quantity = l.Quantity,
+                                Price = l.Price,
+                                Total = lineTotal,
+                                ActionTotal = lineTotal,
+                                SortOrder = l.SortOrder
+                            });
+
+                            unitConvertions.Add(new
+                            {
+                                StockId = sId,
+                                UnitId = uId,
+                                Multiplier = 1m,
+                                Divider = 1m
+                            });
+                        }
+                    }
+                    else if (s.DisplayTotal > 0m)
+                    {
+                        var dummyStockId = Guid.Empty.ToString();
+                        var dummyUnitId = Guid.Empty.ToString();
+
+                        linesList.Add(new
+                        {
+                            Id = Guid.NewGuid().ToString(),
+                            StockSlipId = s.Id.ToString(),
+                            StockId = dummyStockId,
+                            UnitId = dummyUnitId,
+                            CurrencyId = defCurId,
+                            Quantity = 1m,
+                            Price = s.DisplayTotal,
+                            Total = s.DisplayTotal,
+                            ActionTotal = s.DisplayTotal,
+                            SortOrder = 0
+                        });
+
+                        unitConvertions.Add(new
+                        {
+                            StockId = dummyStockId,
+                            UnitId = dummyUnitId,
+                            Multiplier = 1m,
+                            Divider = 1m
+                        });
+                    }
+
+                    decimal finalTotal = s.DisplayTotal != 0m
+                        ? s.DisplayTotal
+                        : (linesList.Any() ? allLines.Where(x => x.StockSlipId == s.Id).Sum(x => x.Quantity * x.Price) : 0m);
+
+                    return new
+                    {
+                        Id = s.Id.ToString(),
+                        Code = s.Code ?? string.Empty,
+                        Date = s.Date.UtcDateTime,
+                        SlipType = s.SlipType,
+                        Type = s.SlipType,
+                        WarehouseId = s.WarehouseId?.ToString(),
+                        UserId = s.UserId?.ToString(),
+                        UserName = "admin",
+                        TransactionUserName = "admin",
+                        IsCompleted = s.IsCompleted,
+                        IsDisabled = false,
+                        Group = string.Empty,
+                        Tags = s.Tags != null ? s.Tags.ToList() : new List<string>(),
+                        Description = s.Description ?? string.Empty,
+
+                        Total = finalTotal,
+                        DisplayTotal = finalTotal,
+                        ActionTotal = finalTotal,
+
+                        DisplayCurrencyId = defCurId,
+                        Lines = linesList,
+                        StockUnitConvertions = unitConvertions,
+                        CurrencyConvertions = convertions
+                    };
+                });
+
+                return Results.Ok(result);
+            }
+            catch (Exception ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[CRITICAL ERROR in /slips]: {ex}");
+                Console.ResetColor();
+                return Results.Problem(detail: ex.ToString(), statusCode: 500);
+            }
         });
 
         // --- ПОЛУЧЕНИЕ ПО ID ---
@@ -88,6 +239,12 @@ public static class StockSlipsEndpoints
                          }).Distinct().ToList<object>()
                 : new List<object>();
 
+            decimal calculatedTotal = s.DisplayTotal;
+            if (calculatedTotal == 0m && s.Lines != null && s.Lines.Any())
+            {
+                calculatedTotal = s.Lines.Sum(l => l.ActionTotal != 0m ? l.ActionTotal : (l.Quantity * l.Price));
+            }
+
             return Results.Ok(new
             {
                 Id = s.Id.ToString(),
@@ -98,11 +255,16 @@ public static class StockSlipsEndpoints
                 WarehouseId = s.WarehouseId?.ToString(),
                 UserId = s.UserId?.ToString(),
                 UserName = "admin",
+                TransactionUserName = "admin",
                 IsCompleted = s.IsCompleted,
                 IsDisabled = false,
                 Group = s.GroupName ?? string.Empty,
                 Tags = s.Tags != null ? s.Tags.ToList() : new List<string>(),
                 Description = s.Description ?? string.Empty,
+
+                Total = calculatedTotal,
+                DisplayTotal = calculatedTotal,
+                ActionTotal = calculatedTotal,
 
                 DisplayCurrencyId = defCurId,
                 CurrencyConvertions = convertions,
@@ -117,6 +279,8 @@ public static class StockSlipsEndpoints
                     CurrencyId = defCurId,
                     Quantity = l.Quantity,
                     Price = l.Price,
+                    Total = l.ActionTotal != 0m ? l.ActionTotal : (l.Quantity * l.Price),
+                    ActionTotal = l.ActionTotal != 0m ? l.ActionTotal : (l.Quantity * l.Price),
                     SortOrder = l.SortOrder
                 }).ToList() : new List<object>()
             });
@@ -175,6 +339,9 @@ public static class StockSlipsEndpoints
                     string? unitIdStr = GetStringProperty(lJson, "unitId", "UnitId");
                     Guid? unitGuid = Guid.TryParse(unitIdStr, out var uG) ? uG : null;
 
+                    decimal lineTotal = GetDecimalProperty(lJson, "total", "Total", "actionTotal", "ActionTotal");
+                    if (lineTotal == 0m) lineTotal = qty * price;
+
                     linesList.Add(new StockSlipLineEntity
                     {
                         Id = lineGuid,
@@ -184,10 +351,16 @@ public static class StockSlipsEndpoints
                         Quantity = qty,
                         ActionQuantity = qty,
                         Price = price,
-                        ActionTotal = qty * price,
+                        ActionTotal = lineTotal,
                         SortOrder = sortOrder++
                     });
                 }
+            }
+
+            // ЕСЛИ displayTotal НЕ ПРИШЕЛ ИЛИ РАВЕН 0 — СЧИТАЕМ СУММУ ПО СТРОКАМ
+            if (displayTotal == 0m && linesList.Any())
+            {
+                displayTotal = linesList.Sum(l => l.ActionTotal);
             }
 
             if (existing == null)
@@ -245,7 +418,7 @@ public static class StockSlipsEndpoints
             return Results.Ok();
         });
 
-        // --- ФАСЕТЫ (ДАТЫ, ГРУППЫ И ТЕГИ) ---
+        // --- ФАСЕТЫ ---
         group.MapGet("/slips/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
             string? fields = ctx.Request.Query["fields"].ToString();
