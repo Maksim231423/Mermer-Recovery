@@ -10,10 +10,10 @@ CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 
 
 -- ============================================================================
--- LICENSING & ACTIVATION (Priority 0 — Security)
--- Aligned strictly with LicenseEntity.cs
+-- LICENSING & ACTIVATION (Priority 0 — Security & Audit)
 -- ============================================================================
 
+DROP TABLE IF EXISTS license_logs CASCADE;
 DROP TABLE IF EXISTS licenses CASCADE;
 
 CREATE TABLE licenses (
@@ -31,6 +31,22 @@ CREATE TABLE licenses (
 
 CREATE INDEX idx_licenses_key ON licenses(key);
 CREATE INDEX idx_licenses_app_mod ON licenses(application_id, module_id);
+
+-- Таблица аудита и истории активаций/проверок
+CREATE TABLE license_logs (
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    license_key VARCHAR(255),
+    machine_id  VARCHAR(255),
+    action      VARCHAR(50),
+    status      VARCHAR(50),
+    details     TEXT,
+    ip_address  VARCHAR(100),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_license_logs_key ON license_logs(license_key);
+CREATE INDEX idx_license_logs_action ON license_logs(action);
+CREATE INDEX idx_license_logs_created_at ON license_logs(created_at DESC);
 
 -- ============================================================================
 -- 5. ТАБЛИЦА МАКЕТОВ ДИЗАЙНЕРА ОТЧЕТОВ И ПЕЧАТНЫХ ФОРМ (DevExpress)
@@ -244,6 +260,7 @@ CREATE TABLE partner_transfer_lines (
 
 CREATE INDEX idx_partner_transfer_lines_transfer_id ON partner_transfer_lines(partner_transfer_id);
 CREATE INDEX idx_partner_transfer_lines_partner_id ON partner_transfer_lines(partner_id);
+CREATE INDEX IF NOT EXISTS idx_partner_actions_partner_date ON partner_actions(partner_id, created_at DESC);
 
 -- ============================================================================
 -- STOCK MANAGEMENT — Products, Composers & Alternatives
@@ -587,6 +604,9 @@ CREATE TABLE aggregated_stock_order_lines (
 
 CREATE INDEX idx_agg_order_lines_order_id ON aggregated_stock_order_lines(aggregated_stock_order_id);
 CREATE INDEX idx_agg_order_lines_stock_id ON aggregated_stock_order_lines(stock_id);
+CREATE INDEX IF NOT EXISTS idx_stock_slips_wh_date ON stock_slips(warehouse_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_stock_transfers_wh_date ON stock_transfers(warehouse_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_stock_orders_wh_date ON stock_orders(warehouse_id, date DESC);
 
 -- ============================================================================
 -- COMMERCE — Invoices (Sales, Purchases, Returns)
@@ -703,7 +723,12 @@ CREATE TABLE invoice_overheads (
 );
 
 CREATE INDEX idx_invoice_overheads_invoice_id ON invoice_overheads(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_invoices_partner_date ON invoices(partner_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_invoices_type_date ON invoices(invoice_type, date DESC);
+CREATE INDEX IF NOT EXISTS idx_invoices_wh_date ON invoices(warehouse_id, date DESC);
 
+-- Частичный индекс для ускорения загрузки "Активных" документов (отсекаем удаленные)
+CREATE INDEX IF NOT EXISTS idx_invoices_active_date ON invoices(date DESC) WHERE is_disabled = FALSE;
 -- ============================================================================
 -- STOCK BALANCES
 -- ============================================================================
@@ -787,6 +812,13 @@ CREATE TABLE funds_transfer_lines (
 );
 
 CREATE INDEX idx_funds_transfer_lines_transfer_id ON funds_transfer_lines(funds_transfer_id);
+CREATE INDEX IF NOT EXISTS idx_funds_slips_date ON funds_slips(date DESC);
+CREATE INDEX IF NOT EXISTS idx_funds_slips_partner ON funds_slips(partner_id);
+CREATE INDEX IF NOT EXISTS idx_funds_slips_dep_date ON funds_slips(depository_id, date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_funds_transfers_date ON funds_transfers(date DESC);
+CREATE INDEX IF NOT EXISTS idx_funds_transfers_from_dep ON funds_transfers(from_depository_id);
+CREATE INDEX IF NOT EXISTS idx_funds_transfers_to_dep ON funds_transfers(to_depository_id);
 
 -- ============================================================================
 -- EXPENSES & REGISTRIES
