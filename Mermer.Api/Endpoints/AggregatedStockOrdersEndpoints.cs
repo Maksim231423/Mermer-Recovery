@@ -20,21 +20,29 @@ public static class AggregatedStockOrdersEndpoints
     {
         var group = app.MapGroup("/api/warehousing/aggregated-orders").WithTags("AggregatedStockOrders");
 
-        // 1. СПИСОК СВОДНЫХ ЗАКАЗОВ
-        group.MapGet("/", async (DateTime? from, DateTime? till, string? warehouseId, MermerDbContext db, CancellationToken ct) =>
+        // 1. СПИСОК СВОДНЫХ ЗАКАЗОВ (С ПАГИНАЦИЕЙ)
+        group.MapGet("/", async (DateTime? from, DateTime? till, string? warehouseId, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTimeOffset startDate = from.HasValue ? new DateTimeOffset(from.Value.ToUniversalTime()) : DateTimeOffset.MinValue;
-            DateTimeOffset endDate = till.HasValue ? new DateTimeOffset(till.Value.ToUniversalTime()) : DateTimeOffset.MaxValue;
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
+            int skip = offset.GetValueOrDefault(0);
+
+            DateTimeOffset startDate = from.HasValue ? new DateTimeOffset(from.Value.ToUniversalTime()) : DateTimeOffset.UtcNow.AddMonths(-1);
+            DateTimeOffset endDate = till.HasValue ? new DateTimeOffset(till.Value.ToUniversalTime()) : DateTimeOffset.UtcNow;
 
             var query = db.AggregatedStockOrders
-                .Include(o => o.Lines)
                 .AsNoTracking()
-                .Where(o => o.Date >= startDate && o.Date <= endDate);
+                .Where(o => o.Date >= startDate && o.Date <= endDate && !o.IsDisabled);
 
             if (Guid.TryParse(warehouseId, out var wG))
                 query = query.Where(o => o.WarehouseId == wG);
 
-            var list = await query.OrderByDescending(o => o.Date).ToListAsync(ct);
+            var list = await query
+                .OrderByDescending(o => o.Date)
+                .Skip(skip)
+                .Take(take)
+                .Include(o => o.Lines)
+                .AsSplitQuery()
+                .ToListAsync(ct);
 
             return Results.Ok(list.Select(o => new
             {
@@ -70,6 +78,7 @@ public static class AggregatedStockOrdersEndpoints
 
             var o = await db.AggregatedStockOrders
                 .Include(x => x.Lines)
+                .AsNoTracking()
                 .FirstOrDefaultAsync(x => x.Id == orderId, ct);
 
             if (o == null) return Results.NotFound();
@@ -101,7 +110,7 @@ public static class AggregatedStockOrdersEndpoints
             });
         });
 
-        // 3. ФАСЕТЫ
+        // 3. ФАСЕТЫ (БЕЗ ВЫГРУЗКИ ВСЕЙ ТАБЛИЦЫ)
         group.MapGet("/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
             string? fields = ctx.Request.Query["fields"].ToString();
@@ -117,7 +126,7 @@ public static class AggregatedStockOrdersEndpoints
                 {
                     var groups = await db.AggregatedStockOrders
                         .AsNoTracking()
-                        .Where(x => !string.IsNullOrEmpty(x.GroupName))
+                        .Where(x => !string.IsNullOrEmpty(x.GroupName) && !x.IsDisabled)
                         .GroupBy(x => x.GroupName!)
                         .Select(g => new { Key = g.Key, Count = g.Count() })
                         .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
@@ -128,7 +137,7 @@ public static class AggregatedStockOrdersEndpoints
                 {
                     var allTags = await db.AggregatedStockOrders
                         .AsNoTracking()
-                        .Where(x => x.Tags != null && x.Tags.Length > 0)
+                        .Where(x => x.Tags != null && x.Tags.Length > 0 && !x.IsDisabled)
                         .Select(x => x.Tags)
                         .ToListAsync(ct);
 
@@ -141,18 +150,22 @@ public static class AggregatedStockOrdersEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var now = DateTime.Now.Date;
-                    var orders = await db.AggregatedStockOrders.AsNoTracking().Where(r => !r.IsDisabled).Select(r => r.Date).ToListAsync(ct);
-                    var localDates = orders.Select(d => d.ToLocalTime().Date).ToList();
+                    var todayUtc = DateTime.UtcNow.Date;
+                    var weekStart = todayUtc.AddDays(-7);
+                    var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
 
-                    var dateFacets = new Dictionary<string, int>
+                    var countToday = await db.AggregatedStockOrders.CountAsync(r => !r.IsDisabled && r.Date >= todayUtc, ct);
+                    var countWeek = await db.AggregatedStockOrders.CountAsync(r => !r.IsDisabled && r.Date >= weekStart, ct);
+                    var countMonth = await db.AggregatedStockOrders.CountAsync(r => !r.IsDisabled && r.Date >= monthStart, ct);
+                    var countAll = await db.AggregatedStockOrders.CountAsync(r => !r.IsDisabled, ct);
+
+                    result[field] = new Dictionary<string, int>
                     {
-                        { "#Today", localDates.Count(d => d == now) },
-                        { "#This Week", localDates.Count(d => d >= now.AddDays(-7)) },
-                        { "#This Month", localDates.Count(d => d.Month == now.Month && d.Year == now.Year) },
-                        { "#All Records", localDates.Count }
+                        { "#Today", countToday },
+                        { "#This Week", countWeek },
+                        { "#This Month", countMonth },
+                        { "#All Records", countAll }
                     };
-                    result[field] = dateFacets;
                 }
                 else
                 {
@@ -163,7 +176,7 @@ public static class AggregatedStockOrdersEndpoints
             return Results.Ok(result);
         });
 
-        // 4. СОХРАНЕНИЕ (POST / PUT)
+        // 4. СОХРАНЕНИЕ
         Func<HttpRequest, MermerDbContext, Task<IResult>> saveAggregatedOrderHandler = async (req, db) =>
         {
             using var reader = new StreamReader(req.Body);

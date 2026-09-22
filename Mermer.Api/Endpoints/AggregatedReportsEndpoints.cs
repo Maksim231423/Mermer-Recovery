@@ -3,10 +3,12 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Dapper;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Mermer.Data.Postgres;
 
 namespace Mermer.Api.Endpoints;
@@ -19,151 +21,259 @@ public static class AggregatedReportsEndpoints
 
         group.MapGet("/", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTimeOffset dateFrom = DateTimeOffset.MinValue;
-            DateTimeOffset dateTill = DateTimeOffset.MaxValue;
+            DateTime dateFrom = DateTime.UtcNow.AddMonths(-1);
+            DateTime dateTill = DateTime.UtcNow;
 
             string? fromStr = req.Query["dateFrom"].FirstOrDefault();
-            if (!string.IsNullOrEmpty(fromStr) && DateTimeOffset.TryParse(fromStr.Replace(" ", "+"), out var pf))
+            if (!string.IsNullOrEmpty(fromStr) && DateTime.TryParse(fromStr.Replace(" ", "+"), out var pf))
                 dateFrom = pf.ToUniversalTime();
 
             string? tillStr = req.Query["dateTill"].FirstOrDefault();
-            if (!string.IsNullOrEmpty(tillStr) && DateTimeOffset.TryParse(tillStr.Replace(" ", "+"), out var pt))
+            if (!string.IsNullOrEmpty(tillStr) && DateTime.TryParse(tillStr.Replace(" ", "+"), out var pt))
                 dateTill = pt.ToUniversalTime();
 
             var officeIds = req.Query["officeId"]
                 .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
                 .Where(x => x.HasValue)
                 .Select(x => x!.Value)
-                .ToList();
+                .ToArray();
 
-            if (!officeIds.Any())
+            if (officeIds.Length == 0)
             {
                 return Results.Ok(new
                 {
-                    StocksReport = new { StartingBalance = 0m, Income = 0m, Expense = 0m, Lines = new List<object>() },
-                    FundsReport = new { StartingBalance = 0m, Income = 0m, Expense = 0m, Lines = new List<object>() },
-                    PartnersReport = new { StartingBalance = 0m, Debit = 0m, Credit = 0m, Lines = new List<object>() }
+                    StocksReport = new { StartingBalance = 0m, Income = 0m, Expense = 0m, Lines = Array.Empty<object>() },
+                    FundsReport = new { StartingBalance = 0m, Income = 0m, Expense = 0m, Lines = Array.Empty<object>() },
+                    PartnersReport = new { StartingBalance = 0m, Debit = 0m, Credit = 0m, Lines = Array.Empty<object>() }
                 });
             }
 
-            // --- 1. Сбор идентификаторов связанных складов и касс ---
-            var whIds = await db.Warehouses.Where(w => w.OfficeId.HasValue && officeIds.Contains(w.OfficeId.Value)).Select(w => w.Id).ToListAsync(ct);
-            var depIds = await db.Depositories.Where(d => d.OfficeId.HasValue && officeIds.Contains(d.OfficeId.Value)).Select(d => d.Id).ToListAsync(ct);
+            var connStr = db.Database.GetConnectionString();
+            await using var conn = new NpgsqlConnection(connStr);
 
-            // --- 2. Склады (Stocks) ---
-            var allStocks = new List<StockItem>();
+            // 1. Склады и Номенклатура (Stocks) - SQL Агрегация
+            const string stocksSql = """
+                WITH target_wh AS (
+                    SELECT id FROM warehouses WHERE office_id = ANY(@offices) AND is_disabled = false
+                ),
+                raw_moves AS (
+                    -- Накладные
+                    SELECT i.date, i.invoice_type AS type, il.quantity AS qty,
+                           (i.invoice_type IN ('Purchase', 'SalesReturn')) AS is_inc
+                    FROM invoice_lines il
+                    JOIN invoices i ON i.id = il.invoice_id
+                    WHERE i.warehouse_id IN (SELECT id FROM target_wh)
+                      AND i.is_completed = true AND i.is_disabled = false
 
-            var stockInvs = await db.InvoiceLines
-                .Where(l => l.Invoice.WarehouseId.HasValue && whIds.Contains(l.Invoice.WarehouseId.Value) && l.Invoice.IsCompleted && !l.Invoice.IsDisabled)
-                .Select(l => new StockItem(l.Invoice.Date, l.Invoice.InvoiceType, l.Quantity, l.Invoice.InvoiceType == "Purchase" || l.Invoice.InvoiceType == "SalesReturn"))
-                .ToListAsync(ct);
-            allStocks.AddRange(stockInvs);
+                    UNION ALL
 
-            var stockSlips = await db.StockSlipLines
-                .Where(l => l.StockSlip.WarehouseId.HasValue && whIds.Contains(l.StockSlip.WarehouseId.Value) && l.StockSlip.IsCompleted)
-                .Select(l => new StockItem(l.StockSlip.Date, l.StockSlip.SlipType, l.Quantity, l.StockSlip.SlipType == "StockOpening" || l.StockSlip.SlipType == "RevisionExceed"))
-                .ToListAsync(ct);
-            allStocks.AddRange(stockSlips);
+                    -- Ордера
+                    SELECT s.date, s.slip_type AS type, sl.quantity AS qty,
+                           (s.slip_type IN ('StockOpening', 'RevisionExceed')) AS is_inc
+                    FROM stock_slip_lines sl
+                    JOIN stock_slips s ON s.id = sl.stock_slip_id
+                    WHERE s.warehouse_id IN (SELECT id FROM target_wh)
+                      AND s.is_completed = true
 
-            var stockTrOut = await db.StockTransferLines
-                .Where(l => l.StockTransfer.WarehouseId.HasValue && whIds.Contains(l.StockTransfer.WarehouseId.Value) && l.StockTransfer.IsCompleted && !l.StockTransfer.IsDisabled)
-                .Select(l => new StockItem(l.StockTransfer.Date, "StockTransferSource", l.Quantity, false))
-                .ToListAsync(ct);
-            allStocks.AddRange(stockTrOut);
+                    UNION ALL
 
-            var stockTrIn = await db.StockTransferLines
-                .Where(l => l.StockTransfer.DestinationWarehouseId.HasValue && whIds.Contains(l.StockTransfer.DestinationWarehouseId.Value) && l.StockTransfer.IsCompleted && !l.StockTransfer.IsDisabled)
-                .Select(l => new StockItem(l.StockTransfer.Date, "StockTransferDestination", l.ReceivedQuantity, true))
-                .ToListAsync(ct);
-            allStocks.AddRange(stockTrIn);
+                    -- Перемещения расход
+                    SELECT t.date, 'StockTransferSource' AS type, tl.quantity AS qty, false AS is_inc
+                    FROM stock_transfer_lines tl
+                    JOIN stock_transfers t ON t.id = tl.stock_transfer_id
+                    WHERE t.warehouse_id IN (SELECT id FROM target_wh)
+                      AND t.is_completed = true AND t.is_disabled = false
 
-            var stocksStart = allStocks.Where(x => x.Dt < dateFrom).Sum(x => x.IsInc ? x.Qty : -x.Qty);
-            var stocksPeriod = allStocks.Where(x => x.Dt >= dateFrom && x.Dt <= dateTill).ToList();
-            var stocksLines = stocksPeriod.GroupBy(x => x.Type).Select(g => new
+                    UNION ALL
+
+                    -- Перемещения приход
+                    SELECT t.date, 'StockTransferDestination' AS type, tl.received_quantity AS qty, true AS is_inc
+                    FROM stock_transfer_lines tl
+                    JOIN stock_transfers t ON t.id = tl.stock_transfer_id
+                    WHERE t.destination_warehouse_id IN (SELECT id FROM target_wh)
+                      AND t.is_completed = true AND t.is_disabled = false
+                )
+                SELECT 
+                    type,
+                    SUM(CASE WHEN is_inc THEN qty ELSE 0 END)::numeric(18,4) AS income,
+                    SUM(CASE WHEN NOT is_inc THEN qty ELSE 0 END)::numeric(18,4) AS expense,
+                    SUM(CASE WHEN is_inc THEN qty ELSE -qty END)::numeric(18,4) AS effect,
+                    false AS is_starting
+                FROM raw_moves
+                WHERE date >= @from AND date <= @till
+                GROUP BY type
+
+                UNION ALL
+
+                SELECT 
+                    '__START__' AS type,
+                    0 AS income,
+                    0 AS expense,
+                    COALESCE(SUM(CASE WHEN is_inc THEN qty ELSE -qty END), 0)::numeric(18,4) AS effect,
+                    true AS is_starting
+                FROM raw_moves
+                WHERE date < @from;
+                """;
+
+            // 2. Кассы и Фонды (Funds) - SQL Агрегация
+            const string fundsSql = """
+                WITH target_dep AS (
+                    SELECT id FROM depositories WHERE office_id = ANY(@offices) AND is_disabled = false
+                ),
+                raw_funds AS (
+                    -- Кассовые ордера
+                    SELECT f.date, f.funds_slip_type AS type, fl.amount AS amt,
+                           (f.funds_slip_type = 'Income') AS is_inc
+                    FROM funds_slip_lines fl
+                    JOIN funds_slips f ON f.id = fl.funds_slip_id
+                    WHERE f.depository_id IN (SELECT id FROM target_dep)
+                      AND f.is_completed = true AND f.is_disabled = false
+
+                    UNION ALL
+
+                    -- Переводы касс расход
+                    SELECT t.date, 'FundsTransferOut' AS type, tl.amount AS amt, false AS is_inc
+                    FROM funds_transfer_lines tl
+                    JOIN funds_transfers t ON t.id = tl.funds_transfer_id
+                    WHERE t.from_depository_id IN (SELECT id FROM target_dep)
+                      AND t.is_completed = true AND t.is_disabled = false
+
+                    UNION ALL
+
+                    -- Переводы касс приход
+                    SELECT t.date, 'FundsTransferIn' AS type, tl.received_amount AS amt, true AS is_inc
+                    FROM funds_transfer_lines tl
+                    JOIN funds_transfers t ON t.id = tl.funds_transfer_id
+                    WHERE t.to_depository_id IN (SELECT id FROM target_dep)
+                      AND t.is_completed = true AND t.is_disabled = false
+
+                    UNION ALL
+
+                    -- Оплаты счетов
+                    SELECT i.date, (i.invoice_type || 'Payment') AS type, ip.amount AS amt,
+                           (i.invoice_type IN ('Sales', 'PurchaseReturn')) AS is_inc
+                    FROM invoice_payments ip
+                    JOIN invoices i ON i.id = ip.invoice_id
+                    WHERE i.depository_id IN (SELECT id FROM target_dep)
+                      AND i.is_completed = true AND i.is_disabled = false
+                )
+                SELECT 
+                    type,
+                    SUM(CASE WHEN is_inc THEN amt ELSE 0 END)::numeric(18,4) AS income,
+                    SUM(CASE WHEN NOT is_inc THEN amt ELSE 0 END)::numeric(18,4) AS expense,
+                    SUM(CASE WHEN is_inc THEN amt ELSE -amt END)::numeric(18,4) AS effect,
+                    false AS is_starting
+                FROM raw_funds
+                WHERE date >= @from AND date <= @till
+                GROUP BY type
+
+                UNION ALL
+
+                SELECT 
+                    '__START__' AS type,
+                    0 AS income,
+                    0 AS expense,
+                    COALESCE(SUM(CASE WHEN is_inc THEN amt ELSE -amt END), 0)::numeric(18,4) AS effect,
+                    true AS is_starting
+                FROM raw_funds
+                WHERE date < @from;
+                """;
+
+            // 3. Контрагенты (Partners) - SQL Агрегация
+            const string partnersSql = """
+                WITH raw_partners AS (
+                    -- Акты сверки/ордера
+                    SELECT ps.date, ps.slip_type AS type, psl.debit_amount AS deb, psl.credit_amount AS cre
+                    FROM partner_slip_lines psl
+                    JOIN partner_slips ps ON ps.id = psl.partner_slip_id
+                    WHERE ps.office_id = ANY(@offices) AND ps.is_disabled = false
+
+                    UNION ALL
+
+                    -- Переводы контрагентов
+                    SELECT pt.date, 'PartnerTransfer' AS type, ptl.debit_amount AS deb, ptl.credit_amount AS cre
+                    FROM partner_transfer_lines ptl
+                    JOIN partner_transfers pt ON pt.id = ptl.partner_transfer_id
+                    WHERE ptl.office_id = ANY(@offices) AND pt.is_disabled = false
+
+                    UNION ALL
+
+                    -- Накладные (Покупки / Продажи)
+                    SELECT i.date, i.invoice_type AS type,
+                           CASE WHEN i.invoice_type IN ('Sales', 'PurchaseReturn') THEN (il.quantity * il.price) ELSE 0 END AS deb,
+                           CASE WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN (il.quantity * il.price) ELSE 0 END AS cre
+                    FROM invoice_lines il
+                    JOIN invoices i ON i.id = il.invoice_id
+                    WHERE i.office_id = ANY(@offices) AND i.is_completed = true AND i.is_disabled = false AND i.partner_id IS NOT NULL
+
+                    UNION ALL
+
+                    -- Оплаты накладных
+                    SELECT i.date, (i.invoice_type || 'Payment') AS type,
+                           CASE WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN ip.amount ELSE 0 END AS deb,
+                           CASE WHEN i.invoice_type IN ('Sales', 'PurchaseReturn') THEN ip.amount ELSE 0 END AS cre
+                    FROM invoice_payments ip
+                    JOIN invoices i ON i.id = ip.invoice_id
+                    WHERE i.office_id = ANY(@offices) AND i.is_completed = true AND i.is_disabled = false AND i.partner_id IS NOT NULL
+                )
+                SELECT 
+                    type,
+                    SUM(deb)::numeric(18,4) AS debit,
+                    SUM(cre)::numeric(18,4) AS credit,
+                    SUM(deb - cre)::numeric(18,4) AS effect,
+                    false AS is_starting
+                FROM raw_partners
+                WHERE date >= @from AND date <= @till
+                GROUP BY type
+
+                UNION ALL
+
+                SELECT 
+                    '__START__' AS type,
+                    0 AS debit,
+                    0 AS credit,
+                    COALESCE(SUM(deb - cre), 0)::numeric(18,4) AS effect,
+                    true AS is_starting
+                FROM raw_partners
+                WHERE date < @from;
+                """;
+
+            var p = new { offices = officeIds, from = dateFrom, till = dateTill };
+
+            var stocksRows = (await conn.QueryAsync(new CommandDefinition(stocksSql, p, cancellationToken: ct))).ToList();
+            var fundsRows = (await conn.QueryAsync(new CommandDefinition(fundsSql, p, cancellationToken: ct))).ToList();
+            var partnersRows = (await conn.QueryAsync(new CommandDefinition(partnersSql, p, cancellationToken: ct))).ToList();
+
+            // Парсинг результата складов
+            decimal stocksStart = stocksRows.FirstOrDefault(r => (bool)r.is_starting)?.effect ?? 0m;
+            var stocksLines = stocksRows.Where(r => !(bool)r.is_starting).Select(r => new
             {
-                Type = g.Key,
-                Income = g.Sum(x => x.IsInc ? x.Qty : 0m),
-                Expense = g.Sum(x => !x.IsInc ? x.Qty : 0m),
-                Effect = g.Sum(x => x.IsInc ? x.Qty : -x.Qty)
+                Type = (string)r.type,
+                Income = (decimal)r.income,
+                Expense = (decimal)r.expense,
+                Effect = (decimal)r.effect
             }).ToList();
 
-            // --- 3. Касса и Фонды (Funds) ---
-            var allFunds = new List<FundItem>();
-
-            var fundsSlips = await db.FundsSlipLines
-                .Where(l => l.FundsSlip.DepositoryId.HasValue && depIds.Contains(l.FundsSlip.DepositoryId.Value) && l.FundsSlip.IsCompleted && !l.FundsSlip.IsDisabled)
-                .Select(l => new FundItem(l.FundsSlip.Date, l.FundsSlip.FundsSlipType, l.Amount, l.FundsSlip.FundsSlipType == "Income"))
-                .ToListAsync(ct);
-            allFunds.AddRange(fundsSlips);
-
-            var fundsTrOut = await db.FundsTransferLines
-                .Where(l => l.FundsTransfer.FromDepositoryId.HasValue && depIds.Contains(l.FundsTransfer.FromDepositoryId.Value) && l.FundsTransfer.IsCompleted && !l.FundsTransfer.IsDisabled)
-                .Select(l => new FundItem(l.FundsTransfer.Date, "FundsTransferOut", l.Amount, false))
-                .ToListAsync(ct);
-            allFunds.AddRange(fundsTrOut);
-
-            var fundsTrIn = await db.FundsTransferLines
-                .Where(l => l.FundsTransfer.ToDepositoryId.HasValue && depIds.Contains(l.FundsTransfer.ToDepositoryId.Value) && l.FundsTransfer.IsCompleted && !l.FundsTransfer.IsDisabled)
-                .Select(l => new FundItem(l.FundsTransfer.Date, "FundsTransferIn", l.ReceivedAmount, true))
-                .ToListAsync(ct);
-            allFunds.AddRange(fundsTrIn);
-
-            var invoicePayments = await db.InvoicePayments
-                .Where(p => p.Invoice.DepositoryId.HasValue && depIds.Contains(p.Invoice.DepositoryId.Value) && p.Invoice.IsCompleted && !p.Invoice.IsDisabled)
-                .Select(p => new FundItem(p.Invoice.Date, p.Invoice.InvoiceType + "Payment", p.Amount, p.Invoice.InvoiceType == "Sales" || p.Invoice.InvoiceType == "PurchaseReturn"))
-                .ToListAsync(ct);
-            allFunds.AddRange(invoicePayments);
-
-            var fundsStart = allFunds.Where(x => x.Dt < dateFrom).Sum(x => x.IsInc ? x.Amt : -x.Amt);
-            var fundsPeriod = allFunds.Where(x => x.Dt >= dateFrom && x.Dt <= dateTill).ToList();
-            var fundsLines = fundsPeriod.GroupBy(x => x.Type).Select(g => new
+            // Парсинг результата кассы
+            decimal fundsStart = fundsRows.FirstOrDefault(r => (bool)r.is_starting)?.effect ?? 0m;
+            var fundsLines = fundsRows.Where(r => !(bool)r.is_starting).Select(r => new
             {
-                Type = g.Key,
-                Income = g.Sum(x => x.IsInc ? x.Amt : 0m),
-                Expense = g.Sum(x => !x.IsInc ? x.Amt : 0m),
-                Effect = g.Sum(x => x.IsInc ? x.Amt : -x.Amt)
+                Type = (string)r.type,
+                Income = (decimal)r.income,
+                Expense = (decimal)r.expense,
+                Effect = (decimal)r.effect
             }).ToList();
 
-            // --- 4. Контрагенты (Partners) ---
-            var allPartners = new List<PartnerItem>();
-
-            var partSlips = await db.PartnerSlipLines
-                .Where(l => l.PartnerSlip.OfficeId.HasValue && officeIds.Contains(l.PartnerSlip.OfficeId.Value) && !l.PartnerSlip.IsDisabled)
-                .Select(l => new PartnerItem(l.PartnerSlip.Date, l.PartnerSlip.SlipType, l.DebitAmount, l.CreditAmount))
-                .ToListAsync(ct);
-            allPartners.AddRange(partSlips);
-
-            var partTrs = await db.PartnerTransferLines
-                .Where(l => l.OfficeId.HasValue && officeIds.Contains(l.OfficeId.Value) && !l.PartnerTransfer.IsDisabled)
-                .Select(l => new PartnerItem(l.PartnerTransfer.Date, "PartnerTransfer", l.DebitAmount, l.CreditAmount))
-                .ToListAsync(ct);
-            allPartners.AddRange(partTrs);
-
-            var rawInvs = await db.InvoiceLines
-                .Where(l => l.Invoice.OfficeId.HasValue && officeIds.Contains(l.Invoice.OfficeId.Value) && l.Invoice.IsCompleted && !l.Invoice.IsDisabled && l.Invoice.PartnerId.HasValue)
-                .Select(l => new { l.Invoice.Date, l.Invoice.InvoiceType, Total = l.Quantity * l.Price, IsDebit = l.Invoice.InvoiceType == "Sales" || l.Invoice.InvoiceType == "PurchaseReturn" })
-                .ToListAsync(ct);
-
-            allPartners.AddRange(rawInvs.Select(l => new PartnerItem(l.Date, l.InvoiceType, l.IsDebit ? l.Total : 0m, !l.IsDebit ? l.Total : 0m)));
-
-            var rawInvPaymentsForPartner = await db.InvoicePayments
-                .Where(p => p.Invoice.OfficeId.HasValue && officeIds.Contains(p.Invoice.OfficeId.Value) && p.Invoice.IsCompleted && !p.Invoice.IsDisabled && p.Invoice.PartnerId.HasValue)
-                .Select(p => new { p.Invoice.Date, Type = p.Invoice.InvoiceType + "Payment", Total = p.Amount, IsDebit = p.Invoice.InvoiceType == "Purchase" || p.Invoice.InvoiceType == "SalesReturn" })
-                .ToListAsync(ct);
-
-            allPartners.AddRange(rawInvPaymentsForPartner.Select(p => new PartnerItem(p.Date, p.Type, p.IsDebit ? p.Total : 0m, !p.IsDebit ? p.Total : 0m)));
-
-            var partnersStart = allPartners.Where(x => x.Dt < dateFrom).Sum(x => x.Deb - x.Cre);
-            var partnersPeriod = allPartners.Where(x => x.Dt >= dateFrom && x.Dt <= dateTill).ToList();
-            var partnersLines = partnersPeriod.GroupBy(x => x.Type).Select(g => new
+            // Парсинг результата контрагентов
+            decimal partnersStart = partnersRows.FirstOrDefault(r => (bool)r.is_starting)?.effect ?? 0m;
+            var partnersLines = partnersRows.Where(r => !(bool)r.is_starting).Select(r => new
             {
-                Type = g.Key,
-                Debit = g.Sum(x => x.Deb),
-                Credit = g.Sum(x => x.Cre),
-                Effect = g.Sum(x => x.Deb - x.Cre)
+                Type = (string)r.type,
+                Debit = (decimal)r.debit,
+                Credit = (decimal)r.credit,
+                Effect = (decimal)r.effect
             }).ToList();
 
-            // --- 5. Формирование ответа ---
             return Results.Ok(new
             {
                 StocksReport = new
@@ -192,8 +302,4 @@ public static class AggregatedReportsEndpoints
 
         return app;
     }
-
-    private sealed record StockItem(DateTimeOffset Dt, string Type, decimal Qty, bool IsInc);
-    private sealed record FundItem(DateTimeOffset Dt, string Type, decimal Amt, bool IsInc);
-    private sealed record PartnerItem(DateTimeOffset Dt, string Type, decimal Deb, decimal Cre);
 }

@@ -3,10 +3,12 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Dapper;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Mermer.Data.Postgres;
 
 namespace Mermer.Api.Endpoints;
@@ -21,80 +23,103 @@ public static class StockTurnoversEndpoints
         {
             string? warehouseIdStr = req.Query["warehouseId"].FirstOrDefault();
             Guid? warehouseId = Guid.TryParse(warehouseIdStr, out var w) && w != Guid.Empty ? w : null;
+            int limit = int.TryParse(req.Query["limit"], out var l) ? Math.Clamp(l, 1, 1000) : 250;
+            int offset = int.TryParse(req.Query["offset"], out var o) ? Math.Max(0, o) : 0;
 
-            // 1. Приход
-            var incQuery = db.InvoiceLines.Where(l => l.Invoice.IsCompleted && !l.Invoice.IsDisabled && (l.Invoice.InvoiceType == "Purchase" || l.Invoice.InvoiceType == "SalesReturn"))
-                .Select(l => new { Wh = l.Invoice.WarehouseId, St = l.StockId, Qty = l.Quantity });
+            const string sql = """
+                WITH raw_moves AS (
+                    -- 1. Накладные (Покупки / Продажи / Возвраты)
+                    SELECT 
+                        i.warehouse_id, 
+                        il.stock_id,
+                        CASE WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN il.quantity ELSE 0 END AS income,
+                        CASE WHEN i.invoice_type IN ('Sales', 'PurchaseReturn') THEN il.quantity ELSE 0 END AS expense,
+                        CASE WHEN i.invoice_type = 'Sales' THEN il.quantity ELSE 0 END AS sold
+                    FROM invoice_lines il
+                    JOIN invoices i ON i.id = il.invoice_id
+                    WHERE i.is_completed = true 
+                      AND i.is_disabled = false
+                      AND (@wh IS NULL OR i.warehouse_id = @wh)
 
-            var incSlip = db.StockSlipLines.Where(l => l.StockSlip.IsCompleted && (l.StockSlip.SlipType == "StockOpening" || l.StockSlip.SlipType == "RevisionExceed"))
-                .Select(l => new { Wh = l.StockSlip.WarehouseId, St = l.StockId, Qty = l.Quantity });
+                    UNION ALL
 
-            var incTrIn = db.StockTransferLines.Where(l => l.StockTransfer.IsCompleted && !l.StockTransfer.IsDisabled)
-                .Select(l => new { Wh = l.StockTransfer.DestinationWarehouseId, St = l.StockId, Qty = l.ReceivedQuantity });
+                    -- 2. Складские ордера
+                    SELECT 
+                        ss.warehouse_id, 
+                        sl.stock_id,
+                        CASE WHEN ss.slip_type IN ('StockOpening', 'RevisionExceed') THEN sl.quantity ELSE 0 END AS income,
+                        CASE WHEN ss.slip_type NOT IN ('StockOpening', 'RevisionExceed') THEN sl.quantity ELSE 0 END AS expense,
+                        0 AS sold
+                    FROM stock_slip_lines sl
+                    JOIN stock_slips ss ON ss.id = sl.stock_slip_id
+                    WHERE ss.is_completed = true
+                      AND (@wh IS NULL OR ss.warehouse_id = @wh)
 
-            var allInc = incQuery.Concat(incSlip).Concat(incTrIn).Where(x => x.Wh.HasValue && x.St.HasValue);
-            if (warehouseId.HasValue) allInc = allInc.Where(x => x.Wh == warehouseId.Value);
+                    UNION ALL
 
-            var incomeSums = await allInc.GroupBy(x => new { Wh = x.Wh!.Value, St = x.St!.Value })
-                .Select(g => new { WarehouseId = g.Key.Wh, StockId = g.Key.St, Income = g.Sum(x => x.Qty) }).ToListAsync(ct);
+                    -- 3. Перемещения (Расход с источника)
+                    SELECT 
+                        st.warehouse_id, 
+                        stl.stock_id,
+                        0 AS income,
+                        stl.quantity AS expense,
+                        0 AS sold
+                    FROM stock_transfer_lines stl
+                    JOIN stock_transfers st ON st.id = stl.stock_transfer_id
+                    WHERE st.is_completed = true 
+                      AND st.is_disabled = false
+                      AND (@wh IS NULL OR st.warehouse_id = @wh)
 
-            // 2. Расход
-            var expQuery = db.InvoiceLines.Where(l => l.Invoice.IsCompleted && !l.Invoice.IsDisabled && (l.Invoice.InvoiceType == "Sales" || l.Invoice.InvoiceType == "PurchaseReturn"))
-                .Select(l => new { Wh = l.Invoice.WarehouseId, St = l.StockId, Qty = l.Quantity });
+                    UNION ALL
 
-            var expSlip = db.StockSlipLines.Where(l => l.StockSlip.IsCompleted && (l.StockSlip.SlipType != "StockOpening" && l.StockSlip.SlipType != "RevisionExceed"))
-                .Select(l => new { Wh = l.StockSlip.WarehouseId, St = l.StockId, Qty = l.Quantity });
+                    -- 4. Перемещения (Приход на получателя)
+                    SELECT 
+                        st.destination_warehouse_id AS warehouse_id, 
+                        stl.stock_id,
+                        stl.received_quantity AS income,
+                        0 AS expense,
+                        0 AS sold
+                    FROM stock_transfer_lines stl
+                    JOIN stock_transfers st ON st.id = stl.stock_transfer_id
+                    WHERE st.is_completed = true 
+                      AND st.is_disabled = false
+                      AND (@wh IS NULL OR st.destination_warehouse_id = @wh)
+                ),
+                aggregated AS (
+                    SELECT 
+                        warehouse_id, 
+                        stock_id,
+                        SUM(income)::numeric(18,4) AS income,
+                        SUM(expense)::numeric(18,4) AS expense,
+                        SUM(sold)::numeric(18,4) AS sold
+                    FROM raw_moves
+                    WHERE warehouse_id IS NOT NULL AND stock_id IS NOT NULL
+                    GROUP BY warehouse_id, stock_id
+                    HAVING SUM(income) > 0 OR SUM(expense) > 0 OR SUM(sold) > 0
+                )
+                SELECT 
+                    a.warehouse_id::text AS "WarehouseId",
+                    a.stock_id::text     AS "StockId",
+                    COALESCE(s.code, 'N/A') AS "StockCode",
+                    COALESCE(s.name, 'N/A') AS "StockName",
+                    COALESCE(s.type, '')    AS "StockType",
+                    COALESCE(s.group_name, '') AS "StockGroup",
+                    s.tags                  AS "StockTags",
+                    a.income                AS "Income",
+                    a.expense               AS "Expense",
+                    a.sold                  AS "Sold"
+                FROM aggregated a
+                LEFT JOIN stocks s ON s.id = a.stock_id
+                ORDER BY s.name
+                LIMIT @limit OFFSET @offset;
+                """;
 
-            var expTrOut = db.StockTransferLines.Where(l => l.StockTransfer.IsCompleted && !l.StockTransfer.IsDisabled)
-                .Select(l => new { Wh = l.StockTransfer.WarehouseId, St = l.StockId, Qty = l.Quantity });
-
-            var allExp = expQuery.Concat(expSlip).Concat(expTrOut).Where(x => x.Wh.HasValue && x.St.HasValue);
-            if (warehouseId.HasValue) allExp = allExp.Where(x => x.Wh == warehouseId.Value);
-
-            var expSums = await allExp.GroupBy(x => new { Wh = x.Wh!.Value, St = x.St!.Value })
-                .Select(g => new { WarehouseId = g.Key.Wh, StockId = g.Key.St, Expense = g.Sum(x => x.Qty) }).ToListAsync(ct);
-
-            // 3. Продажи
-            var salesQuery = db.InvoiceLines.Where(l => l.Invoice.IsCompleted && !l.Invoice.IsDisabled && l.Invoice.InvoiceType == "Sales")
-                .Select(l => new { Wh = l.Invoice.WarehouseId, St = l.StockId, Qty = l.Quantity });
-            if (warehouseId.HasValue) salesQuery = salesQuery.Where(x => x.Wh == warehouseId.Value);
-
-            var salesSums = await salesQuery.Where(x => x.Wh.HasValue && x.St.HasValue)
-                .GroupBy(x => new { Wh = x.Wh!.Value, St = x.St!.Value })
-                .Select(g => new { WarehouseId = g.Key.Wh, StockId = g.Key.St, Sold = g.Sum(x => x.Qty) }).ToListAsync(ct);
-
-            // 4. Сбор ключей и получение номенклатуры
-            var keys = incomeSums.Select(x => new { x.WarehouseId, x.StockId })
-                .Union(expSums.Select(x => new { x.WarehouseId, x.StockId }))
-                .Distinct().ToList();
-
-            var nonNullStockIds = keys.Select(x => x.StockId).Distinct().ToList();
-
-            var stocks = await db.Stocks
-                .Where(s => nonNullStockIds.Contains(s.Id))
-                .AsNoTracking()
-                .ToDictionaryAsync(s => s.Id, s => s, ct);
-
-            var result = keys.Select(k => {
-                stocks.TryGetValue(k.StockId, out var stock);
-                decimal inc = incomeSums.FirstOrDefault(x => x.WarehouseId == k.WarehouseId && x.StockId == k.StockId)?.Income ?? 0m;
-                decimal exp = expSums.FirstOrDefault(x => x.WarehouseId == k.WarehouseId && x.StockId == k.StockId)?.Expense ?? 0m;
-                decimal sold = salesSums.FirstOrDefault(x => x.WarehouseId == k.WarehouseId && x.StockId == k.StockId)?.Sold ?? 0m;
-
-                return new StockTurnoverDataDto
-                {
-                    WarehouseId = k.WarehouseId.ToString(),
-                    StockId = k.StockId.ToString(),
-                    StockCode = stock?.Code ?? "N/A",
-                    StockName = stock?.Name ?? "N/A",
-                    StockType = stock?.Type ?? "",
-                    StockGroup = stock?.Group ?? "",
-                    StockTags = stock?.Tags ?? Array.Empty<string>(),
-                    Income = inc,
-                    Expense = exp,
-                    Sold = sold
-                };
-            }).ToList();
+            var connStr = db.Database.GetConnectionString();
+            await using var conn = new NpgsqlConnection(connStr);
+            var result = await conn.QueryAsync<StockTurnoverDataDto>(new CommandDefinition(
+                sql,
+                new { wh = warehouseId, limit, offset },
+                cancellationToken: ct));
 
             return Results.Ok(result);
         });

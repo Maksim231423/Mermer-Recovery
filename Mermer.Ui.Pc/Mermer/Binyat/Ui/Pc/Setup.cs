@@ -6,7 +6,6 @@ using Autofac.Extras.MvvmCross;
 using Castle.DynamicProxy;
 using Mermer.Authorization.Services;
 using Mermer.Common.Settings;
-using Mermer.Core.Couch;
 using Mermer.Finance.Models;
 using Mermer.Licensing.Client;
 using Mermer.Licensing.Client.Models;
@@ -24,10 +23,12 @@ using MvvmCross.Wpf.Platform;
 using MvvmCross.Wpf.Views;
 using MvvmCross.Wpf.Views.Presenters;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -69,11 +70,12 @@ public class Setup : MvxWpfSetup
         }));
 
         // =====================================================================
-        // ШАГ 1: ЗАГРУЖАЕМ СТАРУЮ ЛОГИКУ ПЕРВОЙ
+        // ШАГ 1: ЗАГРУЖАЕМ СБОРКИ, НО БЛОКИРУЕМ РЕГИСТРАЦИЮ СТАРЫХ ВОРКЕРОВ
         // =====================================================================
         builder.RegisterModule<Mermer.BinyatModule>();
 
         var mermerAssemblies = Directory.GetFiles(AppDomain.CurrentDomain.BaseDirectory, "Mermer*.dll")
+            .Where(f => f.IndexOf("Synchronizer", StringComparison.OrdinalIgnoreCase) < 0)
             .Select(Assembly.LoadFrom)
             .ToArray();
 
@@ -86,18 +88,22 @@ public class Setup : MvxWpfSetup
                         && !t.Name.EndsWith("View")
                         && !t.Name.EndsWith("Setup")
                         && !IsMvxSingletonDeep(t)
-                        && !(t.Name.Contains("Couch") && t.Name.EndsWith("Repository")))
+                        // БЛОКИРУЕМ СТАРЫЕ COUCHBASE РЕПОЗИТОРИИ И СЛУШАТЕЛИ:
+                        && !t.Name.Contains("Couch")
+                        && !t.Name.Contains("Cluster")
+                        && !t.Name.Contains("DocumentChangeListener"))
             .AsImplementedInterfaces()
             .InstancePerDependency();
 
         // =====================================================================
-        // ШАГ 2: "КОВРОВАЯ БОМБАРДИРОВКА" COUCHBASE ЧЕРЕЗ РЕФЛЕКСИЮ
+        // ШАГ 2: СОЗДАНИЕ ЗАГЛУШЕК ДЛЯ ОСТАВШИХСЯ СТАРЫХ ИНТЕРФЕЙСОВ
         // =====================================================================
-        var proxy = new Castle.DynamicProxy.ProxyGenerator();
-        var interceptor = new DummyInterceptor();
+        var proxy = DummyInterfaceSource.ProxyGenInstance;
+        var interceptor = DummyInterfaceSource.SharedInterceptorInstance;
 
         var allModels = mermerAssemblies
-            .SelectMany(a => {
+            .SelectMany(a =>
+            {
                 try { return a.GetTypes(); }
                 catch (ReflectionTypeLoadException ex) { return ex.Types.Where(t => t != null); }
             })
@@ -123,17 +129,14 @@ public class Setup : MvxWpfSetup
         builder.Register(c => proxy.CreateInterfaceProxyWithoutTarget(typeof(Mermer.Data.Authorizers.IAuthorizer), interceptor))
                .As(typeof(Mermer.Data.Authorizers.IAuthorizer)).SingleInstance();
 
-
         // =====================================================================
-        // ШАГ 3: ПОВЕРХ ЗАГЛУШЕК СТАВИМ НАШИ НАСТОЯЩИЕ REST API КЛАССЫ
+        // ШАГ 3: HTTPCLIENT И REST API (ПОДКЛЮЧАЕМ НАШ НОВЫЙ БЭКЕНД)
         // =====================================================================
-
         builder.Register(c =>
         {
             var configurator = c.Resolve<IConfigurator>();
             var connSettings = configurator.GetConfig<ConnectionSettings>();
 
-            // Сначала смотрим appsettings.json, если не задан — берем из реестра, иначе localhost:5000
             string serviceUrl = Configuration["ApiUrl"];
 
             if (string.IsNullOrWhiteSpace(serviceUrl))
@@ -146,13 +149,18 @@ public class Setup : MvxWpfSetup
                 serviceUrl = "http://localhost:5000";
             }
 
-            // Убираем случайные слэши на конце для чистоты URI
             serviceUrl = serviceUrl.TrimEnd('/') + "/";
 
             Console.WriteLine($"[CLIENT HTTP SETUP] Connecting to: {serviceUrl}");
             System.Diagnostics.Debug.WriteLine($"[CLIENT HTTP SETUP] Connecting to: {serviceUrl}");
 
-            var client = new System.Net.Http.HttpClient
+            var handler = new HttpClientHandler
+            {
+                UseProxy = false,
+                Proxy = null
+            };
+
+            var client = new HttpClient(handler)
             {
                 BaseAddress = new Uri(serviceUrl),
                 Timeout = TimeSpan.FromSeconds(15)
@@ -162,7 +170,11 @@ public class Setup : MvxWpfSetup
         }).AsSelf().SingleInstance();
 
         builder.RegisterType<Mermer.Http.RestClient>().AsSelf().SingleInstance();
-        builder.RegisterType<Mermer.Ui.Pc.Services.ApiLoginService>().As<ILoginService>().SingleInstance();
+
+        // Заглушка для слушателя изменений Couchbase (требуется конструктором MainViewModel)
+        builder.RegisterType<DummyDocumentChangeListener>()
+               .As<Mermer.Common.Services.IDocumentChangeListener>()
+               .SingleInstance();
 
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiUsersRepository>()
                .As<Mermer.Data.Storage.IRepository<Mermer.Authorization.Models.User>>()
@@ -174,14 +186,14 @@ public class Setup : MvxWpfSetup
 
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiLoginService>()
                .As<Mermer.Authorization.Services.ILoginService>()
+               .As<ILoginService>()
+               .AsSelf()
                .SingleInstance();
 
-        // --- ХРАНИЛИЩЕ МАКЕТОВ ПЕЧАТНЫХ ФОРМ (ВМЕСТО COUCHBASE) ---
         builder.RegisterType<Mermer.Ui.Pc.Services.ReportLayoutStorageService>()
                .As<Mermer.Ui.Pc.Services.IReportLayoutStorageService>()
                .SingleInstance();
 
-        // --- ЛОКАЛЬНЫЙ ГЕНЕРАТОР КОДОВ (ОТКЛЮЧАЕТ COUCHBASE ДЛЯ ВСЕХ ФОРМ) ---
         builder.RegisterType<Mermer.Ui.Pc.Services.LocalTransactionCodeGenerationService>()
                .As<Mermer.Transactions.Services.ITransactionCodeGenerationService>()
                .SingleInstance();
@@ -194,7 +206,6 @@ public class Setup : MvxWpfSetup
                .As<Mermer.StockManagement.Services.IStockCodeGenerationService>()
                .SingleInstance();
 
-        // --- СПРАВОЧНИКИ ---
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiWarehousesRepository>()
                .As<Mermer.Data.Storage.IRepository<Mermer.Enterprise.Models.Warehouse>>()
                .As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Enterprise.Models.Warehouse>>().SingleInstance();
@@ -205,7 +216,8 @@ public class Setup : MvxWpfSetup
 
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiCurrenciesRepository>()
                .As<Mermer.Data.Storage.IRepository<Mermer.FundsManagement.Models.Currency>>()
-               .As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.FundsManagement.Models.Currency>>().SingleInstance();
+               .As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.FundsManagement.Models.Currency>>()
+               .SingleInstance();
 
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiStocksRepository>()
                .As<Mermer.Data.Storage.IRepository<Mermer.StockManagement.Models.Stock>>()
@@ -223,7 +235,7 @@ public class Setup : MvxWpfSetup
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiDepositoriesRepository>()
                 .As<Mermer.Data.Storage.IRepository<Mermer.Enterprise.Models.Depository>>()
                 .As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Enterprise.Models.Depository>>()
-                .As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Enterprise.Models.Depository>>() // <-- ДОБАВЛЕНО!
+                .As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Enterprise.Models.Depository>>()
                 .SingleInstance();
 
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiStockSlipsRepository>()
@@ -232,12 +244,10 @@ public class Setup : MvxWpfSetup
                 .As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Warehousing.Models.StockSlip>>()
                 .SingleInstance();
 
-        // --- ФИНАНСЫ И ДОКУМЕНТЫ ---
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiFundsActionRepository>()
                .As<Mermer.FundsManagement.Services.IFundsActionsRepository>()
                .SingleInstance();
 
-        // Репозиторий кассовых ордеров (FundsSlip)
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiFundsSlipsRepository>()
                .As<Mermer.Data.Storage.IRepository<Mermer.Finance.Models.FundsSlip>>()
                .As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Finance.Models.FundsSlip>>()
@@ -287,17 +297,14 @@ public class Setup : MvxWpfSetup
                .As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>()
                .SingleInstance();
 
-        // Репозиторий Балансов касс (Сводка)
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiFundsBalancesRepository>()
                .As<Mermer.FundsManagement.Services.IFundsBalancesRepository>()
                .SingleInstance();
 
-        // Журнал детализации расходов (Expense Actions)
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiExpenseActionsRepository>()
                .As<Mermer.Finance.Spending.Services.IExpenseActionsRepository>()
                .SingleInstance();
 
-        // ДОБАВЛЯЕМ НОВЫЙ РЕПОЗИТОРИЙ ДЛЯ ПЕРЕВОДОВ ПАРТНЕРОВ!
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiPartnerTransfersRepository>()
                .As<Mermer.Data.Storage.IRepository<Mermer.CRM.Models.PartnerTransfer>>()
                .As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.CRM.Models.PartnerTransfer>>()
@@ -308,16 +315,6 @@ public class Setup : MvxWpfSetup
                .As<Mermer.CRM.Services.IPartnerActionsRepository>()
                .SingleInstance();
 
-        builder.RegisterType<Mermer.Ui.Pc.Services.ApiFundsSlipsRepository>()
-               .As<Mermer.Data.Storage.IRepository<Mermer.Finance.Models.FundsSlip>>()
-               .As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Finance.Models.FundsSlip>>()
-               .As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Finance.Models.FundsSlip>>()
-               .SingleInstance();
-
-        // =====================================================================
-        // ШАГ 4: ФИНАЛЬНЫЕ УТИЛИТЫ И ПЕРЕХВАТЧИК ИНТЕРФЕЙСОВ
-        // =====================================================================
-
         builder.RegisterType<FluentValidation.Resources.LanguageManager>().As<FluentValidation.Resources.ILanguageManager>().SingleInstance();
         builder.RegisterAssemblyTypes(GetType().Assembly).Where(t => t.Name.EndsWith("Service")).AsImplementedInterfaces();
         builder.RegisterType<NameHelper>().AsSelf().InstancePerDependency();
@@ -326,17 +323,15 @@ public class Setup : MvxWpfSetup
         builder.RegisterSource(new DummyInterfaceSource());
         Mermer.Ui.Pc.Services.LocalSqliteCache.InitializeDatabase();
 
-
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiPartnerBalancesRepository>()
-       .AsImplementedInterfaces()
-       .SingleInstance();
+               .AsImplementedInterfaces()
+               .SingleInstance();
 
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiStockTransfersRepository>()
-       .As<Mermer.Data.Storage.IRepository<Mermer.Warehousing.Models.StockTransfer>>()
-       .As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Warehousing.Models.StockTransfer>>()
-       .SingleInstance();
+               .As<Mermer.Data.Storage.IRepository<Mermer.Warehousing.Models.StockTransfer>>()
+               .As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Warehousing.Models.StockTransfer>>()
+               .SingleInstance();
 
-        // Журнал движения товаров (Stock Actions)
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiStockActionsRepository>()
                .As<Mermer.StockManagement.Services.IStockActionsRepository>()
                .SingleInstance();
@@ -349,7 +344,6 @@ public class Setup : MvxWpfSetup
                .As<Mermer.StockManagement.Services.IStockBalancesAggregatedRepository>()
                .SingleInstance();
 
-        // Инвентаризация (Stock Revisions)
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiStockRevisionsRepository>()
                .As<Mermer.Warehousing.Revisioning.Services.IStockRevisionsRepository>()
                .As<Mermer.Data.Storage.IRepository<Mermer.Warehousing.Revisioning.Models.StockRevision>>()
@@ -357,7 +351,6 @@ public class Setup : MvxWpfSetup
                .As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Warehousing.Revisioning.Models.StockRevision>>()
                .SingleInstance();
 
-        // Заказы складов (Stock Orders)
         builder.RegisterType<Mermer.Ui.Pc.Services.ApiStockOrdersRepository>()
                .As<Mermer.Data.Storage.IRepository<Mermer.Warehousing.Ordering.Models.StockOrder>>()
                .As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Warehousing.Ordering.Models.StockOrder>>()
@@ -494,11 +487,33 @@ public class Setup : MvxWpfSetup
     protected override IMvxTrace CreateDebugTrace() => new DebugTrace();
 }
 
-// --- КЛАССЫ ДЛЯ ФЕЙКОВОГО СЕРВИСА (ДИНАМИЧЕСКИЕ ЗАГЛУШКИ) ---
+// =====================================================================
+// ЗАГЛУШКА ДЛЯ СЛУШАТЕЛЯ ИЗМЕНЕНИЙ COUCHBASE (ДЛЯ MAINVIEWMODEL)
+// =====================================================================
+public class DummyDocumentChangeListener : Mermer.Common.Services.IDocumentChangeListener
+{
+    public event EventHandler DocumentChanged
+    {
+        add { }
+        remove { }
+    }
 
+    public bool Started => false;
+
+    public void Start() { }
+    public void Stop() { }
+    public void Touch() { }
+}
+
+// =====================================================================
+// ОПТИМИЗИРОВАННЫЕ ДИНАМИЧЕСКИЕ ЗАГЛУШКИ (БЕЗ РЕФЛЕКСИВНЫХ ТОРМОЗОВ)
+// =====================================================================
 public class DummyInterfaceSource : IRegistrationSource
 {
     public bool IsAdapterForIndividualComponents => false;
+
+    public static readonly Castle.DynamicProxy.ProxyGenerator ProxyGenInstance = new Castle.DynamicProxy.ProxyGenerator();
+    public static readonly DummyInterceptor SharedInterceptorInstance = new DummyInterceptor();
 
     public IEnumerable<IComponentRegistration> RegistrationsFor(Service service, Func<Service, IEnumerable<IComponentRegistration>> registrationAccessor)
     {
@@ -507,7 +522,6 @@ public class DummyInterfaceSource : IRegistrationSource
             var ns = typedService.ServiceType.Namespace ?? "";
             var name = typedService.ServiceType.Name;
 
-            // Перехватываем все Couchbase-зависимости, из-за которых падали формы
             if (name == "ILocalizationService" ||
                 name == "IInvoicesRepository" ||
                 name == "ITransactionCodeGenerationService" ||
@@ -517,9 +531,11 @@ public class DummyInterfaceSource : IRegistrationSource
             {
                 yield return RegistrationBuilder.ForDelegate((c, p) =>
                 {
-                    var proxyGen = new Castle.DynamicProxy.ProxyGenerator();
-                    return proxyGen.CreateInterfaceProxyWithoutTarget(typedService.ServiceType, new DummyInterceptor());
-                }).As(typedService.ServiceType).CreateRegistration();
+                    return ProxyGenInstance.CreateInterfaceProxyWithoutTarget(typedService.ServiceType, SharedInterceptorInstance);
+                })
+                .As(typedService.ServiceType)
+                .SingleInstance()
+                .CreateRegistration();
             }
         }
     }
@@ -527,12 +543,14 @@ public class DummyInterfaceSource : IRegistrationSource
 
 public class DummyInterceptor : Castle.DynamicProxy.IInterceptor
 {
+    private static readonly ConcurrentDictionary<Type, object> _defaultTaskCache = new();
+
     public void Intercept(Castle.DynamicProxy.IInvocation invocation)
     {
         var methodName = invocation.Method.Name;
         var returnType = invocation.Method.ReturnType;
 
-        // --- 1. ПЕРЕХВАТ МЕТОДОВ ПРОВЕРКИ ПРАВ И АВТОРИЗАЦИИ ---
+        // 1. Проверка прав (возврат без аллокаций)
         if (methodName.StartsWith("Can") || methodName.StartsWith("Check") || methodName.StartsWith("Has") || methodName.StartsWith("Is"))
         {
             if (returnType == typeof(bool))
@@ -547,21 +565,21 @@ public class DummyInterceptor : Castle.DynamicProxy.IInterceptor
             }
         }
 
-        // --- 2. ГЕНЕРАЦИЯ КОДОВ ИСПРАВЛЕНА ---
+        // 2. Генерация кодов
         if (methodName == "GenerateCodeAsync" || methodName == "GetNextCode")
         {
             invocation.ReturnValue = Task.FromResult($"DOC-{DateTime.Now:yyMMddHHmmss}");
             return;
         }
 
-        // --- 3. БАЛАНСЫ ПАРТНЕРОВ ---
+        // 3. Балансы партнеров
         if (methodName == "GetBalanceToDateAsync")
         {
             invocation.ReturnValue = Task.FromResult(new Mermer.CRM.Models.PartnerBalanceResult { Balance = 0 });
             return;
         }
 
-        // --- 4. ФАСЕТЫ ФИЛЬТРОВ ---
+        // 4. Фасеты фильтров
         if (methodName == "GetFacets" || methodName == "GetFacetsAsync")
         {
             var dict = new Dictionary<string, IEnumerable<KeyValuePair<string, int>>>();
@@ -576,64 +594,70 @@ public class DummyInterceptor : Castle.DynamicProxy.IInterceptor
             return;
         }
 
-        // --- 5. ОБРАБОТКА ВСЕХ ОСТАЛЬНЫХ ТИПОВ ВОЗВРАТА ---
+        // 5. Обработка возвращаемых типов без Reflection.GetMethod в рантайме
         if (returnType == typeof(void))
         {
-            return; // Просто выходим, если метод ничего не возвращает (void)
+            return;
         }
-        else if (returnType == typeof(Task))
-        {
-            invocation.ReturnValue = Task.CompletedTask;
-        }
+
         if (returnType == typeof(Task))
         {
             invocation.ReturnValue = Task.CompletedTask;
+            return;
         }
-        else if (returnType.IsGenericType && returnType.GetGenericTypeDefinition() == typeof(Task<>))
+
+        if (returnType.IsGenericType && returnType.GetGenericTypeDefinition() == typeof(Task<>))
         {
-            var taskResultType = returnType.GetGenericArguments()[0];
-            object defaultResult = null;
+            invocation.ReturnValue = _defaultTaskCache.GetOrAdd(returnType, t =>
+            {
+                var itemType = t.GetGenericArguments()[0];
+                object defaultResult = null;
 
-            if (taskResultType == typeof(bool))
-            {
-                defaultResult = true;
-            }
-            else if (taskResultType == typeof(string))
-            {
-                defaultResult = "";
-            }
-            else if (taskResultType.IsGenericType && taskResultType.GetGenericTypeDefinition() == typeof(IEnumerable<>))
-            {
-                var itemType = taskResultType.GetGenericArguments()[0];
-                defaultResult = typeof(System.Linq.Enumerable).GetMethod("Empty").MakeGenericMethod(itemType).Invoke(null, null);
-            }
-            else if (taskResultType.IsValueType)
-            {
-                defaultResult = Activator.CreateInstance(taskResultType);
-            }
-            else if (taskResultType.IsClass)
-            {
-                try { defaultResult = Activator.CreateInstance(taskResultType); } catch { }
-            }
+                if (itemType == typeof(bool))
+                {
+                    defaultResult = true;
+                }
+                else if (itemType == typeof(string))
+                {
+                    defaultResult = string.Empty;
+                }
+                else if (itemType.IsGenericType && itemType.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+                {
+                    var innerType = itemType.GetGenericArguments()[0];
+                    defaultResult = typeof(Enumerable).GetMethod("Empty")!.MakeGenericMethod(innerType).Invoke(null, null);
+                }
+                else if (itemType.IsValueType)
+                {
+                    defaultResult = Activator.CreateInstance(itemType);
+                }
+                else if (itemType.IsClass)
+                {
+                    try { defaultResult = Activator.CreateInstance(itemType); } catch { }
+                }
 
-            var fromResultMethod = typeof(Task).GetMethod("FromResult").MakeGenericMethod(taskResultType);
-            invocation.ReturnValue = fromResultMethod.Invoke(null, new[] { defaultResult });
+                return typeof(Task).GetMethod(nameof(Task.FromResult))!.MakeGenericMethod(itemType).Invoke(null, new[] { defaultResult });
+            });
+            return;
         }
-        else if (returnType == typeof(bool))
+
+        if (returnType == typeof(bool))
         {
             invocation.ReturnValue = true;
+            return;
         }
-        else if (returnType == typeof(string))
+
+        if (returnType == typeof(string))
         {
-            invocation.ReturnValue = "";
+            invocation.ReturnValue = string.Empty;
+            return;
         }
-        else if (returnType.IsValueType)
+
+        if (returnType.IsValueType)
         {
             invocation.ReturnValue = Activator.CreateInstance(returnType);
+            return;
         }
-        else
-        {
-            invocation.ReturnValue = null;
-        }
+
+        invocation.ReturnValue = null;
     }
 }

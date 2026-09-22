@@ -15,6 +15,9 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Input;
+using MvvmCross.Platform;
+using Mermer.CRM.Models;
+using Mermer.Ui.Core.Helpers;
 
 #nullable disable
 namespace Mermer.Ui.Core.ViewModels;
@@ -116,12 +119,37 @@ public class LoginViewModel : BaseViewModel
                 return;
             }
 
+            // 1. Авторизуемся на сервере
             await _loginService.LoginAsync(Username, Password);
+
+            // =====================================================================
+            // 2. ПРОГРЕВ СПРАВОЧНИКОВ ПРЯМО НА ЭКРАНЕ ВХОДА
+            // =====================================================================
+            try
+            {
+                var offices = Mvx.Resolve<Reference<Office>>();
+                var warehouses = Mvx.Resolve<Reference<Warehouse>>();
+                var depositories = Mvx.Resolve<Reference<Depository>>();
+                var partners = Mvx.Resolve<Reference<Partner>>();
+
+                // Скачиваем их параллельно, пока пользователь видит "Вход..."
+                await Task.WhenAll(
+                    offices.Initialize(),
+                    warehouses.Initialize(),
+                    depositories.Initialize(),
+                    partners.Initialize()
+                );
+            }
+            catch (Exception warmEx)
+            {
+                System.Diagnostics.Debug.WriteLine($"[Warmup Error]: {warmEx.Message}");
+            }
+
+            // 3. Переходим на главное окно — справочники уже в памяти!
             await NavigationService.Navigate<MainViewModel>();
         }
         catch (InvalidOperationException ex)
         {
-            // Выводим РЕАЛЬНОЕ сообщение об ошибке и внутреннее исключение (InnerException)
             string details = ex.InnerException != null
                 ? $"{ex.Message}\n\nДетали: {ex.InnerException.Message}"
                 : ex.Message;

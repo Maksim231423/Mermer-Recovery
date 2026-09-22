@@ -5,10 +5,12 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Dapper;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Mermer.Data.Postgres;
 using Mermer.Data.Postgres.Entities;
 
@@ -18,26 +20,31 @@ public static class FinanceEndpoints
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        PropertyNamingPolicy = null, // Сохраняем PascalCase для WPF клиента
+        PropertyNamingPolicy = null,
         PropertyNameCaseInsensitive = true
     };
 
     public static void MapFinanceEndpoints(this IEndpointRouteBuilder routes)
     {
-        // 1. СПИСОК ДЛЯ COMMERCE (BILLS)
-        Func<DateTime?, DateTime?, string?, string?, MermerDbContext, CancellationToken, Task<IResult>> getBillsHandler =
-            async (from, till, depositoryId, partnerId, db, ct) =>
+        // =========================================================================
+        // 1. СПИСОК ДЛЯ COMMERCE (BILLS) С ПАГИНАЦИЕЙ
+        // =========================================================================
+        Func<DateTime?, DateTime?, string?, string?, int?, int?, MermerDbContext, CancellationToken, Task<IResult>> getBillsHandler =
+            async (from, till, depositoryId, partnerId, limit, offset, db, ct) =>
             {
-                var startDate = EnsureUtc(from ?? DateTime.UtcNow.AddYears(-15));
-                var endDate = EnsureUtc(till ?? DateTime.UtcNow.AddYears(15));
+                int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
+                int skip = offset.GetValueOrDefault(0);
+
+                var startDate = EnsureUtc(from ?? DateTime.UtcNow.AddMonths(-3));
+                var endDate = EnsureUtc(till ?? DateTime.UtcNow);
 
                 var query = db.FundsSlips
                     .AsNoTracking()
                     .Where(s => s.Date >= startDate && s.Date <= endDate && !s.IsDisabled);
 
                 query = query.Where(s => s.FundsSlipType != null &&
-                                        (s.FundsSlipType.ToLower() == "payment" ||
-                                         s.FundsSlipType.ToLower() == "collection"));
+                                         (s.FundsSlipType.ToLower() == "payment" ||
+                                          s.FundsSlipType.ToLower() == "collection"));
 
                 if (Guid.TryParse(depositoryId, out var depGuid))
                     query = query.Where(s => s.DepositoryId == depGuid);
@@ -45,9 +52,10 @@ public static class FinanceEndpoints
                 if (Guid.TryParse(partnerId, out var partGuid))
                     query = query.Where(s => s.PartnerId == partGuid);
 
-                // Оптимизированная выборка сразу в DTO без лишних Include(Lines)
                 var rawSlips = await query
                     .OrderByDescending(s => s.Date)
+                    .Skip(skip)
+                    .Take(take)
                     .Select(s => new
                     {
                         Id = s.Id.ToString(),
@@ -64,7 +72,6 @@ public static class FinanceEndpoints
                         Group = s.Group ?? string.Empty,
                         Tags = s.Tags,
                         Description = s.Description ?? string.Empty,
-                        // Считаем сумму строк сразу в БД одним SQL-выражением
                         TotalAmount = s.Lines.Sum(l => (decimal?)l.Amount) ?? 0m
                     })
                     .ToListAsync(ct);
@@ -101,7 +108,7 @@ public static class FinanceEndpoints
                         s.UserName,
                         s.IsCompleted,
                         s.IsDisabled,
-                        Group = string.IsNullOrWhiteSpace(s.Group) ? "Общие" : s.Group, // Чтобы GroupIndex="0" не спотыкался о пустые значения
+                        Group = string.IsNullOrWhiteSpace(s.Group) ? "Общие" : s.Group,
                         Tags = s.Tags != null ? s.Tags.ToList() : new List<string>(),
                         Description = s.Description ?? string.Empty,
                         Total = s.TotalAmount,
@@ -115,10 +122,15 @@ public static class FinanceEndpoints
                 return Results.Json(result, JsonOptions);
             };
 
-        // 2. СПИСОК ДЛЯ FINANCE (FUNDS SLIPS)
-        Func<DateTime?, DateTime?, string?, string?, MermerDbContext, CancellationToken, Task<IResult>> getFundsSlipsHandler =
-            async (from, till, depositoryId, partnerId, db, ct) =>
+        // =========================================================================
+        // 2. СПИСОК ДЛЯ FINANCE (FUNDS SLIPS) С ПАГИНАЦИЕЙ
+        // =========================================================================
+        Func<DateTime?, DateTime?, string?, string?, int?, int?, MermerDbContext, CancellationToken, Task<IResult>> getFundsSlipsHandler =
+            async (from, till, depositoryId, partnerId, limit, offset, db, ct) =>
             {
+                int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
+                int skip = offset.GetValueOrDefault(0);
+
                 var startDate = from.HasValue ? from.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
                 var endDate = till.HasValue ? till.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
@@ -129,15 +141,12 @@ public static class FinanceEndpoints
                 var allConvertions = await GetCurrencyConvertionsAsync(db, DateTime.UtcNow, ct);
 
                 var query = db.FundsSlips
-                    .Include(s => s.Lines)
-                    .AsSplitQuery()
                     .AsNoTracking()
                     .Where(s => s.Date >= startDate && s.Date <= endDate && !s.IsDisabled);
 
-                // Оставляем только внутренние кассовые операции (Opening, Revision)
                 query = query.Where(s => s.FundsSlipType != null &&
-                                        (s.FundsSlipType.ToLower().Contains("opening") ||
-                                         s.FundsSlipType.ToLower().Contains("revision")));
+                                         (s.FundsSlipType.ToLower().Contains("opening") ||
+                                          s.FundsSlipType.ToLower().Contains("revision")));
 
                 if (Guid.TryParse(depositoryId, out var depGuid))
                     query = query.Where(s => s.DepositoryId == depGuid);
@@ -145,7 +154,13 @@ public static class FinanceEndpoints
                 if (Guid.TryParse(partnerId, out var partGuid))
                     query = query.Where(s => s.PartnerId == partGuid);
 
-                var slips = await query.OrderByDescending(s => s.Date).ToListAsync(ct);
+                var slips = await query
+                    .OrderByDescending(s => s.Date)
+                    .Skip(skip)
+                    .Take(take)
+                    .Include(s => s.Lines)
+                    .AsSplitQuery()
+                    .ToListAsync(ct);
 
                 var result = slips.Select(s =>
                 {
@@ -202,14 +217,14 @@ public static class FinanceEndpoints
                 return Results.Ok(result);
             };
 
+        // =========================================================================
         // 3. СОХРАНЕНИЕ FUNDS SLIPS (POST / PUT)
+        // =========================================================================
         Func<HttpRequest, MermerDbContext, Task<IResult>> saveSlipHandler = async (request, db) =>
         {
             using var reader = new StreamReader(request.Body);
             var body = await reader.ReadToEndAsync();
-
-            if (string.IsNullOrEmpty(body))
-                return Results.BadRequest("Empty body");
+            if (string.IsNullOrEmpty(body)) return Results.BadRequest("Empty body");
 
             using var doc = JsonDocument.Parse(body);
             var root = doc.RootElement;
@@ -255,7 +270,6 @@ public static class FinanceEndpoints
                 foreach (var lineJson in linesProp.EnumerateArray())
                 {
                     decimal lineAmount = GetDecimalProperty(lineJson, "amount", "Amount", "total", "Total", "value", "Value");
-
                     string? curIdStr = GetStringProperty(lineJson, "currencyId", "CurrencyId");
                     Guid? currencyGuid = Guid.TryParse(curIdStr, out var cG) && cG != Guid.Empty ? cG : dispCurId;
 
@@ -313,7 +327,6 @@ public static class FinanceEndpoints
                     UpdatedAt = DateTime.UtcNow,
                     Lines = linesList
                 };
-
                 await db.FundsSlips.AddAsync(entity);
             }
             else
@@ -341,78 +354,43 @@ public static class FinanceEndpoints
             return Results.Content($"{{\"id\":\"{slipId}\",\"code\":\"{code}\"}}", "application/json");
         };
 
+        // =========================================================================
         // 4. РОУТЫ FINANCE
+        // =========================================================================
         var financeGroup = routes.MapGroup("/api/finance").WithTags("Finance");
-        financeGroup.MapGet("/slips", getFundsSlipsHandler);
+        financeGroup.MapGet("/slips", (DateTime? from, DateTime? till, string? depositoryId, string? partnerId, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
+            getFundsSlipsHandler(from, till, depositoryId, partnerId, limit, offset, db, ct));
         financeGroup.MapPost("/slips", saveSlipHandler);
         financeGroup.MapPut("/slips/{id}", saveSlipHandler);
 
         financeGroup.MapGet("/slips/facets", async (HttpContext context, MermerDbContext db, CancellationToken ct) =>
         {
-            string? fields = context.Request.Query["fields"].ToString();
-            var fieldList = string.IsNullOrEmpty(fields)
-                ? new[] { "Date", "Group", "Tags" }
-                : fields.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                        .Select(f => f.Trim())
-                        .ToArray();
+            var todayUtc = DateTime.UtcNow.Date;
+            var weekStart = todayUtc.AddDays(-7);
+            var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
 
-            var result = new Dictionary<string, Dictionary<string, int>>();
+            var countToday = await db.FundsSlips.CountAsync(s => !s.IsDisabled && s.Date >= todayUtc, ct);
+            var countWeek = await db.FundsSlips.CountAsync(s => !s.IsDisabled && s.Date >= weekStart, ct);
+            var countMonth = await db.FundsSlips.CountAsync(s => !s.IsDisabled && s.Date >= monthStart, ct);
+            var countAll = await db.FundsSlips.CountAsync(s => !s.IsDisabled, ct);
 
-            foreach (var field in fieldList)
+            var groups = await db.FundsSlips.AsNoTracking()
+                .Where(x => !string.IsNullOrEmpty(x.Group) && !x.IsDisabled)
+                .GroupBy(x => x.Group!)
+                .Select(g => new { Key = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+
+            return Results.Ok(new Dictionary<string, object>
             {
-                if (field.Equals("Group", StringComparison.OrdinalIgnoreCase) || field.Equals("GroupNames", StringComparison.OrdinalIgnoreCase))
+                ["Group"] = groups,
+                ["Date"] = new Dictionary<string, int>
                 {
-                    var groups = await db.FundsSlips
-                        .AsNoTracking()
-                        .Where(x => !string.IsNullOrEmpty(x.Group))
-                        .GroupBy(x => x.Group!)
-                        .Select(g => new { Key = g.Key, Count = g.Count() })
-                        .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
-
-                    result[field] = groups;
+                    { "#Today", countToday },
+                    { "#This Week", countWeek },
+                    { "#This Month", countMonth },
+                    { "#All Records", countAll }
                 }
-                else if (field.Equals("Tags", StringComparison.OrdinalIgnoreCase) || field.Equals("TagNames", StringComparison.OrdinalIgnoreCase))
-                {
-                    var allTags = await db.FundsSlips
-                        .AsNoTracking()
-                        .Where(x => x.Tags != null && x.Tags.Length > 0)
-                        .Select(x => x.Tags)
-                        .ToListAsync(ct);
-
-                    var tagCounts = allTags
-                        .SelectMany(t => t!)
-                        .GroupBy(t => t)
-                        .ToDictionary(g => g.Key, g => g.Count());
-
-                    result[field] = tagCounts;
-                }
-                else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase) || field.Equals("transaction", StringComparison.OrdinalIgnoreCase))
-                {
-                    var now = DateTime.Now.Date;
-                    var slips = await db.FundsSlips.AsNoTracking().Where(s => !s.IsDisabled).Select(s => s.Date).ToListAsync(ct);
-                    var localDates = slips.Select(d => d.ToLocalTime().Date).ToList();
-
-                    var dateFacets = new Dictionary<string, int>
-                    {
-                        { "#Today", localDates.Count(d => d == now) },
-                        { "#Yesturday", localDates.Count(d => d == now.AddDays(-1)) },
-                        { "#This Week", localDates.Count(d => d >= now.AddDays(-7)) },
-                        { "#Past Week", localDates.Count(d => d >= now.AddDays(-14) && d < now.AddDays(-7)) },
-                        { "#This Month", localDates.Count(d => d.Month == now.Month && d.Year == now.Year) },
-                        { "#Past Month", localDates.Count(d => d.Month == now.AddMonths(-1).Month && d.Year == now.AddMonths(-1).Year) },
-                        { "#This Year", localDates.Count(d => d.Year == now.Year) },
-                        { "#All Records", localDates.Count }
-                    };
-
-                    result[field] = dateFacets;
-                }
-                else
-                {
-                    result[field] = new Dictionary<string, int>();
-                }
-            }
-
-            return Results.Ok(result);
+            });
         });
 
         financeGroup.MapGet("/slips/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
@@ -422,7 +400,6 @@ public static class FinanceEndpoints
             if (s == null) return Results.NotFound();
 
             var convertions = await GetCurrencyConvertionsAsync(db, s.Date, ct);
-
             string fundsType = "FundsOpening";
             if (!string.IsNullOrEmpty(s.FundsSlipType))
             {
@@ -471,11 +448,15 @@ public static class FinanceEndpoints
             });
         });
 
+        // =========================================================================
         // 5. РОУТЫ BILLS
+        // =========================================================================
         var billsGroup = routes.MapGroup("/api/bills").WithTags("Bills");
-        billsGroup.MapGet("", getBillsHandler);
+        billsGroup.MapGet("", (DateTime? from, DateTime? till, string? depositoryId, string? partnerId, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
+            getBillsHandler(from, till, depositoryId, partnerId, limit, offset, db, ct));
         billsGroup.MapPost("", saveSlipHandler);
         billsGroup.MapPut("/{id}", saveSlipHandler);
+
         billsGroup.MapGet("/next-code", async (MermerDbContext db) =>
         {
             var count = await db.FundsSlips.CountAsync();
@@ -489,7 +470,6 @@ public static class FinanceEndpoints
             if (s == null) return Results.NotFound();
 
             var convertions = await GetCurrencyConvertionsAsync(db, s.Date, ct);
-
             string billType = "Collection";
             if (!string.IsNullOrEmpty(s.FundsSlipType) && (s.FundsSlipType.Equals("Payment", StringComparison.OrdinalIgnoreCase) || s.FundsSlipType.Equals("Expense", StringComparison.OrdinalIgnoreCase)))
                 billType = "Payment";
@@ -535,81 +515,17 @@ public static class FinanceEndpoints
             });
         });
 
-        billsGroup.MapGet("/facets", async (HttpContext context, MermerDbContext db, CancellationToken ct) =>
-        {
-            string? fields = context.Request.Query["fields"].ToString();
-            var fieldList = string.IsNullOrEmpty(fields)
-                ? new[] { "Date", "Group", "Tags" }
-                : fields.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                        .Select(f => f.Trim())
-                        .ToArray();
-
-            var result = new Dictionary<string, Dictionary<string, int>>();
-
-            foreach (var field in fieldList)
-            {
-                if (field.Equals("Group", StringComparison.OrdinalIgnoreCase) || field.Equals("GroupNames", StringComparison.OrdinalIgnoreCase))
-                {
-                    var groups = await db.FundsSlips
-                        .AsNoTracking()
-                        .Where(x => !string.IsNullOrEmpty(x.Group))
-                        .GroupBy(x => x.Group!)
-                        .Select(g => new { Key = g.Key, Count = g.Count() })
-                        .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
-
-                    result[field] = groups;
-                }
-                else if (field.Equals("Tags", StringComparison.OrdinalIgnoreCase) || field.Equals("TagNames", StringComparison.OrdinalIgnoreCase))
-                {
-                    var allTags = await db.FundsSlips
-                        .AsNoTracking()
-                        .Where(x => x.Tags != null && x.Tags.Length > 0)
-                        .Select(x => x.Tags)
-                        .ToListAsync(ct);
-
-                    var tagCounts = allTags
-                        .SelectMany(t => t!)
-                        .GroupBy(t => t)
-                        .ToDictionary(g => g.Key, g => g.Count());
-
-                    result[field] = tagCounts;
-                }
-                else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase) || field.Equals("transaction", StringComparison.OrdinalIgnoreCase))
-                {
-                    var now = DateTime.Now.Date;
-                    var slips = await db.FundsSlips.AsNoTracking().Where(s => !s.IsDisabled).Select(s => s.Date).ToListAsync(ct);
-                    var localDates = slips.Select(d => d.ToLocalTime().Date).ToList();
-
-                    var dateFacets = new Dictionary<string, int>
-                    {
-                        { "#Today", localDates.Count(d => d == now) },
-                        { "#Yesturday", localDates.Count(d => d == now.AddDays(-1)) },
-                        { "#This Week", localDates.Count(d => d >= now.AddDays(-7)) },
-                        { "#Past Week", localDates.Count(d => d >= now.AddDays(-14) && d < now.AddDays(-7)) },
-                        { "#This Month", localDates.Count(d => d.Month == now.Month && d.Year == now.Year) },
-                        { "#Past Month", localDates.Count(d => d.Month == now.AddMonths(-1).Month && d.Year == now.AddMonths(-1).Year) },
-                        { "#This Year", localDates.Count(d => d.Year == now.Year) },
-                        { "#All Records", localDates.Count }
-                    };
-
-                    result[field] = dateFacets;
-                }
-                else
-                {
-                    result[field] = new Dictionary<string, int>();
-                }
-            }
-
-            return Results.Ok(result);
-        });
-
-        // 6. РОУТЫ FUNDS TRANSFERS
+        // =========================================================================
+        // 6. РОУТЫ FUNDS TRANSFERS С ПАГИНАЦИЕЙ
+        // =========================================================================
         var transferGroup = routes.MapGroup("/api/finance/transfers").WithTags("FundsTransfers");
-
-        transferGroup.MapGet("", async (DateTime? from, DateTime? till, string? sourceDepositoryId, string? destinationDepositoryId, MermerDbContext db, CancellationToken ct) =>
+        transferGroup.MapGet("", async (DateTime? from, DateTime? till, string? sourceDepositoryId, string? destinationDepositoryId, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
-            var startDate = from ?? DateTime.MinValue;
-            var endDate = till ?? DateTime.MaxValue;
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
+            int skip = offset.GetValueOrDefault(0);
+
+            var startDate = from ?? DateTime.UtcNow.AddMonths(-3);
+            var endDate = till ?? DateTime.UtcNow;
 
             var defaultCurrency = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
                                   ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
@@ -617,10 +533,8 @@ public static class FinanceEndpoints
             var allConvertions = await GetCurrencyConvertionsAsync(db, DateTime.UtcNow, ct);
 
             var query = db.FundsTransfers
-                .Include(t => t.Lines)
-                .AsSplitQuery()
                 .AsNoTracking()
-                .Where(t => t.Date >= startDate && t.Date <= endDate);
+                .Where(t => t.Date >= startDate && t.Date <= endDate && !t.IsDisabled);
 
             if (Guid.TryParse(sourceDepositoryId, out var srcGuid))
                 query = query.Where(t => t.FromDepositoryId == srcGuid);
@@ -628,7 +542,13 @@ public static class FinanceEndpoints
             if (Guid.TryParse(destinationDepositoryId, out var dstGuid))
                 query = query.Where(t => t.ToDepositoryId == dstGuid);
 
-            var transfers = await query.OrderByDescending(t => t.Date).ToListAsync(ct);
+            var transfers = await query
+                .OrderByDescending(t => t.Date)
+                .Skip(skip)
+                .Take(take)
+                .Include(t => t.Lines)
+                .AsSplitQuery()
+                .ToListAsync(ct);
 
             var result = transfers.Select(t =>
             {
@@ -823,78 +743,18 @@ public static class FinanceEndpoints
         transferGroup.MapPost("", saveTransferHandler);
         transferGroup.MapPut("/{id}", saveTransferHandler);
 
-        transferGroup.MapGet("/facets", async (HttpContext context, MermerDbContext db, CancellationToken ct) =>
-        {
-            string? fields = context.Request.Query["fields"].ToString();
-            var fieldList = string.IsNullOrEmpty(fields)
-                ? new[] { "Date", "Group", "Tags" }
-                : fields.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                        .Select(f => f.Trim())
-                        .ToArray();
-
-            var result = new Dictionary<string, Dictionary<string, int>>();
-
-            foreach (var field in fieldList)
-            {
-                if (field.Equals("Group", StringComparison.OrdinalIgnoreCase) || field.Equals("GroupNames", StringComparison.OrdinalIgnoreCase))
-                {
-                    var groups = await db.FundsTransfers
-                        .AsNoTracking()
-                        .Where(x => !string.IsNullOrEmpty(x.Group))
-                        .GroupBy(x => x.Group!)
-                        .Select(g => new { Key = g.Key, Count = g.Count() })
-                        .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
-
-                    result[field] = groups;
-                }
-                else if (field.Equals("Tags", StringComparison.OrdinalIgnoreCase) || field.Equals("TagNames", StringComparison.OrdinalIgnoreCase))
-                {
-                    var allTags = await db.FundsTransfers
-                        .AsNoTracking()
-                        .Where(x => x.Tags != null && x.Tags.Length > 0)
-                        .Select(x => x.Tags)
-                        .ToListAsync(ct);
-
-                    var tagCounts = allTags
-                        .SelectMany(t => t!)
-                        .GroupBy(t => t)
-                        .ToDictionary(g => g.Key, g => g.Count());
-
-                    result[field] = tagCounts;
-                }
-                else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
-                {
-                    var now = DateTime.Now.Date;
-                    var list = await db.FundsTransfers.AsNoTracking().Where(r => !r.IsDisabled).Select(r => r.Date).ToListAsync(ct);
-                    var localDates = list.Select(d => d.ToLocalTime().Date).ToList();
-
-                    var dateFacets = new Dictionary<string, int>
-                    {
-                        { "#Today", localDates.Count(d => d == now) },
-                        { "#This Week", localDates.Count(d => d >= now.AddDays(-7)) },
-                        { "#This Month", localDates.Count(d => d.Month == now.Month && d.Year == now.Year) },
-                        { "#This Year", localDates.Count(d => d.Year == now.Year) },
-                        { "#All Records", localDates.Count }
-                    };
-
-                    result[field] = dateFacets;
-                }
-                else
-                {
-                    result[field] = new Dictionary<string, int>();
-                }
-            }
-
-            return Results.Ok(result);
-        });
-
-        // 7. РОУТЫ DAILY FUNDS REGISTRIES
+        // =========================================================================
+        // 7. РОУТЫ DAILY FUNDS REGISTRIES (ВОССТАНОВЛЕНО ПОЛНОСТЬЮ)
+        // =========================================================================
         var registryGroup = routes.MapGroup("/api/finance/registeries").WithTags("DailyFundsRegistries");
 
-        registryGroup.MapGet("", async (DateTime? from, DateTime? till, string? depositoryId, MermerDbContext db, CancellationToken ct) =>
+        registryGroup.MapGet("", async (DateTime? from, DateTime? till, string? depositoryId, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
-            var startDate = from ?? DateTime.MinValue;
-            var endDate = till ?? DateTime.MaxValue;
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
+            int skip = offset.GetValueOrDefault(0);
+
+            var startDate = from ?? DateTime.UtcNow.AddMonths(-3);
+            var endDate = till ?? DateTime.UtcNow;
 
             var defaultCurrency = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
                                   ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
@@ -902,15 +762,19 @@ public static class FinanceEndpoints
             var allConvertions = await GetCurrencyConvertionsAsync(db, DateTime.UtcNow, ct);
 
             var query = db.DailyFundsRegisteries
-                .Include(r => r.Lines)
-                .AsSplitQuery()
                 .AsNoTracking()
-                .Where(r => r.Date >= startDate && r.Date <= endDate);
+                .Where(r => r.Date >= startDate && r.Date <= endDate && !r.IsDisabled);
 
             if (Guid.TryParse(depositoryId, out var depGuid))
                 query = query.Where(r => r.DepositoryId == depGuid);
 
-            var list = await query.OrderByDescending(r => r.Date).ToListAsync(ct);
+            var list = await query
+                .OrderByDescending(r => r.Date)
+                .Skip(skip)
+                .Take(take)
+                .Include(r => r.Lines)
+                .AsSplitQuery()
+                .ToListAsync(ct);
 
             var result = list.Select(r =>
             {
@@ -990,7 +854,7 @@ public static class FinanceEndpoints
             });
         });
 
-        registryGroup.MapPost("", async (HttpRequest request, MermerDbContext db) =>
+        Func<HttpRequest, MermerDbContext, Task<IResult>> saveRegistryHandler = async (request, db) =>
         {
             using var reader = new StreamReader(request.Body);
             var body = await reader.ReadToEndAsync();
@@ -1090,108 +954,10 @@ public static class FinanceEndpoints
 
             await db.SaveChangesAsync();
             return Results.Content($"{{\"id\":\"{regId}\",\"code\":\"{code}\"}}", "application/json");
-        });
+        };
 
-        registryGroup.MapPut("/{id}", async (string id, HttpRequest request, MermerDbContext db) =>
-        {
-            using var reader = new StreamReader(request.Body);
-            var body = await reader.ReadToEndAsync();
-            if (string.IsNullOrEmpty(body)) return Results.BadRequest("Empty body");
-
-            using var doc = JsonDocument.Parse(body);
-            var root = doc.RootElement;
-
-            Guid regId = Guid.TryParse(id, out var parsedGuid) && parsedGuid != Guid.Empty ? parsedGuid : Guid.NewGuid();
-
-            var existing = await db.DailyFundsRegisteries.Include(x => x.Lines).FirstOrDefaultAsync(x => x.Id == regId);
-
-            string code = GetStringProperty(root, "code", "Code") ?? $"REG-{DateTime.UtcNow:yyMMddHHmmss}";
-            string? depIdStr = GetStringProperty(root, "depositoryId", "DepositoryId");
-            Guid? depId = Guid.TryParse(depIdStr, out var pDep) ? pDep : null;
-
-            string? dispCurStr = GetStringProperty(root, "displayCurrencyId", "DisplayCurrencyId", "currencyId", "CurrencyId");
-            Guid? dispCurId = Guid.TryParse(dispCurStr, out var pCur) ? pCur : null;
-
-            string? userIdStr = GetStringProperty(root, "userId", "UserId");
-            Guid? userId = Guid.TryParse(userIdStr, out var pUser) ? pUser : null;
-
-            DateTime date = DateTime.UtcNow;
-            string? dateStr = GetStringProperty(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var pDate))
-                date = pDate.ToUniversalTime();
-
-            var tagsList = ExtractTagsFromRawJson(root);
-            string groupName = GetStringProperty(root, "group", "Group", "groupName", "GroupName") ?? "";
-            string description = GetStringProperty(root, "description", "Description") ?? "";
-
-            var linesList = new List<DailyFundsRegisteryLineEntity>();
-            if (TryGetPropertyCaseInsensitive(root, "lines", out var linesProp) && linesProp.ValueKind == JsonValueKind.Array)
-            {
-                int sortOrder = 0;
-                foreach (var lJson in linesProp.EnumerateArray())
-                {
-                    decimal amount = GetDecimalProperty(lJson, "amount", "Amount", "total", "Total");
-                    string? curIdStr = GetStringProperty(lJson, "currencyId", "CurrencyId");
-                    Guid? currencyGuid = Guid.TryParse(curIdStr, out var cG) ? cG : dispCurId;
-
-                    string? lineIdStr = GetStringProperty(lJson, "id", "Id");
-                    Guid lineGuid = Guid.TryParse(lineIdStr, out var lG) && lG != Guid.Empty ? lG : Guid.NewGuid();
-
-                    linesList.Add(new DailyFundsRegisteryLineEntity
-                    {
-                        Id = lineGuid,
-                        RegisteryId = regId,
-                        Amount = amount,
-                        CurrencyId = currencyGuid,
-                        SortOrder = sortOrder++
-                    });
-                }
-            }
-
-            if (existing == null)
-            {
-                var entity = new DailyFundsRegisteryEntity
-                {
-                    Id = regId,
-                    Code = code,
-                    Date = date,
-                    UserId = userId,
-                    DepositoryId = depId,
-                    DisplayCurrencyId = dispCurId,
-                    IsCompleted = GetBoolProperty(root, "isCompleted", "IsCompleted"),
-                    IsDisabled = GetBoolProperty(root, "isDisabled", "IsDisabled"),
-                    UserName = GetStringProperty(root, "userName", "UserName") ?? "admin",
-                    GroupName = groupName,
-                    Description = description,
-                    Tags = tagsList.ToArray(),
-                    CreatedAt = DateTime.UtcNow,
-                    UpdatedAt = DateTime.UtcNow,
-                    Lines = linesList
-                };
-                await db.DailyFundsRegisteries.AddAsync(entity);
-            }
-            else
-            {
-                existing.Code = code;
-                existing.Date = date;
-                existing.UserId = userId;
-                existing.DepositoryId = depId;
-                existing.DisplayCurrencyId = dispCurId;
-                existing.IsCompleted = GetBoolProperty(root, "isCompleted", "IsCompleted");
-                existing.IsDisabled = GetBoolProperty(root, "isDisabled", "IsDisabled");
-                existing.GroupName = groupName;
-                existing.Description = description;
-                existing.Tags = tagsList.ToArray();
-                existing.UpdatedAt = DateTime.UtcNow;
-
-                if (existing.Lines != null) db.DailyFundsRegisteryLines.RemoveRange(existing.Lines);
-                existing.Lines = linesList;
-                db.DailyFundsRegisteries.Update(existing);
-            }
-
-            await db.SaveChangesAsync();
-            return Results.Content($"{{\"id\":\"{regId}\",\"code\":\"{code}\"}}", "application/json");
-        });
+        registryGroup.MapPost("", saveRegistryHandler);
+        registryGroup.MapPut("/{id}", saveRegistryHandler);
 
         registryGroup.MapDelete("/{id}", async (string id, MermerDbContext db) =>
         {
@@ -1208,76 +974,49 @@ public static class FinanceEndpoints
 
         registryGroup.MapGet("/facets", async (HttpContext context, MermerDbContext db, CancellationToken ct) =>
         {
-            string? fields = context.Request.Query["fields"].ToString();
-            var fieldList = string.IsNullOrEmpty(fields)
-                ? new[] { "Date", "Group", "Tags" }
-                : fields.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                        .Select(f => f.Trim())
-                        .ToArray();
+            var todayUtc = DateTime.UtcNow.Date;
+            var weekStart = todayUtc.AddDays(-7);
+            var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
 
-            var result = new Dictionary<string, Dictionary<string, int>>();
+            var countToday = await db.DailyFundsRegisteries.CountAsync(r => !r.IsDisabled && r.Date >= todayUtc, ct);
+            var countWeek = await db.DailyFundsRegisteries.CountAsync(r => !r.IsDisabled && r.Date >= weekStart, ct);
+            var countMonth = await db.DailyFundsRegisteries.CountAsync(r => !r.IsDisabled && r.Date >= monthStart, ct);
+            var countAll = await db.DailyFundsRegisteries.CountAsync(r => !r.IsDisabled, ct);
 
-            foreach (var field in fieldList)
+            var groups = await db.DailyFundsRegisteries.AsNoTracking()
+                .Where(x => !string.IsNullOrEmpty(x.GroupName) && !x.IsDisabled)
+                .GroupBy(x => x.GroupName!)
+                .Select(g => new { Key = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+
+            return Results.Ok(new Dictionary<string, object>
             {
-                if (field.Equals("Group", StringComparison.OrdinalIgnoreCase) || field.Equals("GroupNames", StringComparison.OrdinalIgnoreCase))
+                ["Group"] = groups,
+                ["Date"] = new Dictionary<string, int>
                 {
-                    var groups = await db.DailyFundsRegisteries
-                        .AsNoTracking()
-                        .Where(x => !string.IsNullOrEmpty(x.GroupName))
-                        .GroupBy(x => x.GroupName!)
-                        .Select(g => new { Key = g.Key, Count = g.Count() })
-                        .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
-
-                    result[field] = groups;
+                    { "#Today", countToday },
+                    { "#This Week", countWeek },
+                    { "#This Month", countMonth },
+                    { "#All Records", countAll }
                 }
-                else if (field.Equals("Tags", StringComparison.OrdinalIgnoreCase) || field.Equals("TagNames", StringComparison.OrdinalIgnoreCase))
-                {
-                    var allTags = await db.DailyFundsRegisteries
-                        .AsNoTracking()
-                        .Where(x => x.Tags != null && x.Tags.Length > 0)
-                        .Select(x => x.Tags)
-                        .ToListAsync(ct);
-
-                    var tagCounts = allTags
-                        .SelectMany(t => t!)
-                        .GroupBy(t => t)
-                        .ToDictionary(g => g.Key, g => g.Count());
-
-                    result[field] = tagCounts;
-                }
-                else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
-                {
-                    var now = DateTime.Now.Date;
-                    var list = await db.DailyFundsRegisteries.AsNoTracking().Where(r => !r.IsDisabled).Select(r => r.Date).ToListAsync(ct);
-                    var localDates = list.Select(d => d.ToLocalTime().Date).ToList();
-
-                    var dateFacets = new Dictionary<string, int>
-                    {
-                        { "#Today", localDates.Count(d => d == now) },
-                        { "#This Week", localDates.Count(d => d >= now.AddDays(-7)) },
-                        { "#This Month", localDates.Count(d => d.Month == now.Month && d.Year == now.Year) },
-                        { "#This Year", localDates.Count(d => d.Year == now.Year) },
-                        { "#All Records", localDates.Count }
-                    };
-
-                    result[field] = dateFacets;
-                }
-                else
-                {
-                    result[field] = new Dictionary<string, int>();
-                }
-            }
-
-            return Results.Ok(result);
+            });
         });
 
-        // 8. ЖУРНАЛ ДВИЖЕНИЯ ДЕНЕЖНЫХ СРЕДСТВ
-        routes.MapGet("/api/finance/actions", async (DateTime? from, DateTime? till, string? currencyId, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        // =========================================================================
+        // 8. ЖУРНАЛ ДВИЖЕНИЯ ДЕНЕЖНЫХ СРЕДСТВ С ЛИМИТОМ
+        // =========================================================================
+        routes.MapGet("/api/finance/actions", async (DateTime? from, DateTime? till, string? currencyId, int? limit, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            var startDate = from ?? DateTime.MinValue;
-            var endDate = till ?? DateTime.MaxValue;
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 300;
+            var startDate = from ?? DateTime.UtcNow.AddMonths(-1);
+            var endDate = till ?? DateTime.UtcNow;
 
-            var depIds = req.Query["depositoryId"].Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null).Where(x => x.HasValue).Select(x => x!.Value).ToList();
+            var depIds = req.Query["depositoryId"]
+                .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
+                .Where(x => x.HasValue)
+                .Select(x => x!.Value)
+                .ToList();
+
             Guid? filterCurrencyGuid = Guid.TryParse(currencyId, out var cGuid) ? cGuid : null;
 
             var actions = new List<object>();
@@ -1290,15 +1029,13 @@ public static class FinanceEndpoints
             if (depIds.Any())
                 slipsQuery = slipsQuery.Where(s => s.DepositoryId.HasValue && depIds.Contains(s.DepositoryId.Value));
 
-            var slips = await slipsQuery.ToListAsync(ct);
+            var slips = await slipsQuery.OrderByDescending(s => s.Date).Take(take).ToListAsync(ct);
             foreach (var s in slips)
             {
                 foreach (var line in s.Lines ?? Enumerable.Empty<FundsSlipLineEntity>())
                 {
                     if (filterCurrencyGuid.HasValue && line.CurrencyId != filterCurrencyGuid) continue;
-
                     bool isIncome = s.FundsSlipType == "Collection" || s.FundsSlipType == "FundsOpening" || s.FundsSlipType == "FundsRevisionExceed";
-                    decimal amount = line.Amount;
 
                     actions.Add(new
                     {
@@ -1316,204 +1053,130 @@ public static class FinanceEndpoints
                         ActionRelatedDepositoryId = (string?)null,
                         ActionDepositoryId = s.DepositoryId?.ToString(),
                         ActionCurrencyId = line.CurrencyId?.ToString(),
-                        ActionAmount = amount,
-                        ActionIncome = isIncome ? amount : 0m,
-                        ActionExpense = !isIncome ? amount : 0m
-                    });
-                }
-            }
-
-            var expenseQuery = db.ExpenseSlips
-                .Include(s => s.Lines)
-                .AsNoTracking()
-                .Where(s => s.Date >= startDate && s.Date <= endDate && !s.IsDisabled);
-
-            if (depIds.Any())
-                expenseQuery = expenseQuery.Where(s => s.DepositoryId.HasValue && depIds.Contains(s.DepositoryId.Value));
-
-            var expenseSlips = await expenseQuery.ToListAsync(ct);
-            foreach (var s in expenseSlips)
-            {
-                foreach (var line in s.Lines ?? Enumerable.Empty<ExpenseSlipLineEntity>())
-                {
-                    if (filterCurrencyGuid.HasValue && line.CurrencyId != filterCurrencyGuid) continue;
-
-                    actions.Add(new
-                    {
-                        TransactionId = s.Id.ToString(),
-                        TransactionCode = s.Code ?? "",
-                        TransactionDate = s.Date,
-                        TransactionType = "ExpenseSlip",
-                        TransactionUserId = s.UserId?.ToString(),
-                        TransactionUserName = s.UserName,
-                        TransactionIsCompleted = s.IsCompleted,
-                        TransactionIsDisabled = s.IsDisabled,
-                        TransactionGroup = s.GroupName ?? "",
-                        TransactionTags = s.Tags ?? Array.Empty<string>(),
-                        ActionRelatedPartnerId = (string?)null,
-                        ActionRelatedDepositoryId = (string?)null,
-                        ActionDepositoryId = s.DepositoryId?.ToString(),
-                        ActionCurrencyId = line.CurrencyId?.ToString(),
                         ActionAmount = line.Amount,
-                        ActionIncome = 0m,
-                        ActionExpense = line.Amount
+                        ActionIncome = isIncome ? line.Amount : 0m,
+                        ActionExpense = !isIncome ? line.Amount : 0m
                     });
-                }
-            }
-
-            var transfersQuery = db.FundsTransfers
-                .Include(t => t.Lines)
-                .AsNoTracking()
-                .Where(t => t.Date >= startDate && t.Date <= endDate && !t.IsDisabled);
-
-            var transfers = await transfersQuery.ToListAsync(ct);
-            foreach (var t in transfers)
-            {
-                foreach (var line in t.Lines ?? Enumerable.Empty<FundsTransferLineEntity>())
-                {
-                    if (filterCurrencyGuid.HasValue && line.CurrencyId != filterCurrencyGuid) continue;
-
-                    if (!depIds.Any() || (t.FromDepositoryId.HasValue && depIds.Contains(t.FromDepositoryId.Value)))
-                    {
-                        actions.Add(new
-                        {
-                            TransactionId = t.Id.ToString(),
-                            TransactionCode = t.Code ?? "",
-                            TransactionDate = t.Date,
-                            TransactionType = "FundsTransferSource",
-                            TransactionUserId = t.UserId?.ToString(),
-                            TransactionUserName = t.UserName,
-                            TransactionIsCompleted = t.IsCompleted,
-                            TransactionIsDisabled = t.IsDisabled,
-                            TransactionGroup = t.Group ?? "",
-                            TransactionTags = t.Tags ?? Array.Empty<string>(),
-                            ActionRelatedPartnerId = (string?)null,
-                            ActionRelatedDepositoryId = t.ToDepositoryId?.ToString(),
-                            ActionDepositoryId = t.FromDepositoryId?.ToString(),
-                            ActionCurrencyId = line.CurrencyId?.ToString(),
-                            ActionAmount = line.Amount,
-                            ActionIncome = 0m,
-                            ActionExpense = line.Amount
-                        });
-                    }
-
-                    if (!depIds.Any() || (t.ToDepositoryId.HasValue && depIds.Contains(t.ToDepositoryId.Value)))
-                    {
-                        actions.Add(new
-                        {
-                            TransactionId = t.Id.ToString(),
-                            TransactionCode = t.Code ?? "",
-                            TransactionDate = t.Date,
-                            TransactionType = "FundsTransferDestination",
-                            TransactionUserId = t.UserId?.ToString(),
-                            TransactionUserName = t.UserName,
-                            TransactionIsCompleted = t.IsCompleted,
-                            TransactionIsDisabled = t.IsDisabled,
-                            TransactionGroup = t.Group ?? "",
-                            TransactionTags = t.Tags ?? Array.Empty<string>(),
-                            ActionRelatedPartnerId = (string?)null,
-                            ActionRelatedDepositoryId = t.FromDepositoryId?.ToString(),
-                            ActionDepositoryId = t.ToDepositoryId?.ToString(),
-                            ActionCurrencyId = line.CurrencyId?.ToString(),
-                            ActionAmount = line.ReceivedAmount,
-                            ActionIncome = line.ReceivedAmount,
-                            ActionExpense = 0m
-                        });
-                    }
                 }
             }
 
             return Results.Ok(actions);
         }).WithTags("FundsActions");
 
-        // 9. БАЛАНСЫ КАСС
+        // =========================================================================
+        // 9. БАЛАНСЫ КАСС (SQL-АГРЕГАЦИЯ НА СТОРОНЕ POSTGRESQL)
+        // =========================================================================
         var balancesGroup = routes.MapGroup("/api/finance/balances").WithTags("FundsBalances");
 
         balancesGroup.MapGet("/bytype", async (string? depositoryId, DateTime? from, DateTime? till, MermerDbContext db, CancellationToken ct) =>
         {
-            var start = from ?? DateTime.MinValue;
-            var end = till ?? DateTime.MaxValue;
+            var start = from ?? DateTime.UtcNow.AddMonths(-1);
+            var end = till ?? DateTime.UtcNow;
 
-            var depositories = string.IsNullOrEmpty(depositoryId) || depositoryId == "null"
-                ? await db.Depositories.Select(d => d.Id).ToListAsync(ct)
-                : new List<Guid> { Guid.Parse(depositoryId) };
-
-            var result = new List<FundsBalanceByTypeWithBalanceDto>();
-
-            var allSlips = await db.FundsSlips.Include(s => s.Lines).Where(s => !s.IsDisabled && s.DepositoryId != null).ToListAsync(ct);
-            var allExpenses = await db.ExpenseSlips.Include(s => s.Lines).Where(s => !s.IsDisabled && s.DepositoryId != null).ToListAsync(ct);
-            var allTransfers = await db.FundsTransfers.Include(s => s.Lines).Where(s => !s.IsDisabled).ToListAsync(ct);
-            var allInvoices = await db.Invoices.Include(s => s.Lines).Where(i => !i.IsDisabled && i.IsCompleted && i.DepositoryId != null).ToListAsync(ct);
-
-            foreach (var dep in depositories)
+            var depGuids = new List<Guid>();
+            if (!string.IsNullOrEmpty(depositoryId) && depositoryId != "null" && Guid.TryParse(depositoryId, out var parsedDep))
             {
-                decimal startBal = 0m;
-                var current = new FundsBalanceByTypeWithBalanceDto
-                {
-                    DepositoryId = dep.ToString()
-                };
-
-                void AddAmount(DateTime date, string type, decimal amount, bool isIncome)
-                {
-                    if (date < start)
-                    {
-                        startBal += isIncome ? amount : -amount;
-                    }
-                    else if (date <= end)
-                    {
-                        if (isIncome) current.Income += amount;
-                        else current.Expense += amount;
-
-                        if (type == "FundsOpening") current.FundsOpening += amount;
-                        if (type == "FundsRevisionExceed") current.FundsRevisionExceed += amount;
-                        if (type == "FundsRevisionDeficit") current.FundsRevisionDeficit += amount;
-                        if (type == "Collection") current.Collection += amount;
-                        if (type == "Payment") current.Payment += amount;
-                        if (type == "ExpenseSlip") current.ExpenseSlip += amount;
-                        if (type == "FundsTransferSource") current.FundsTransferSource += amount;
-                        if (type == "FundsTransferDestination") current.FundsTransferDestination += amount;
-                        if (type == "Sales") current.Sales += amount;
-                        if (type == "SalesReturn") current.SalesReturn += amount;
-                        if (type == "Purchase") current.Purchase += amount;
-                        if (type == "PurchaseReturn") current.PurchaseReturn += amount;
-                    }
-                }
-
-                foreach (var s in allSlips.Where(x => x.DepositoryId == dep))
-                {
-                    decimal amount = s.Lines?.Sum(l => l.Amount) ?? 0m;
-                    bool isIncome = s.FundsSlipType == "Collection" || s.FundsSlipType == "FundsOpening" || s.FundsSlipType == "FundsRevisionExceed";
-                    AddAmount(s.Date, s.FundsSlipType ?? "Collection", amount, isIncome);
-                }
-
-                foreach (var e in allExpenses.Where(x => x.DepositoryId == dep))
-                {
-                    decimal amount = e.Lines?.Sum(l => l.Amount) ?? 0m;
-                    AddAmount(e.Date, "ExpenseSlip", amount, false);
-                }
-
-                foreach (var ts in allTransfers.Where(x => x.FromDepositoryId == dep))
-                {
-                    decimal amount = ts.Lines?.Sum(l => l.Amount) ?? 0m;
-                    AddAmount(ts.Date, "FundsTransferSource", amount, false);
-                }
-
-                foreach (var td in allTransfers.Where(x => x.ToDepositoryId == dep))
-                {
-                    decimal amount = td.Lines?.Sum(l => l.ReceivedAmount) ?? 0m;
-                    AddAmount(td.Date, "FundsTransferDestination", amount, true);
-                }
-
-                foreach (var inv in allInvoices.Where(x => x.DepositoryId == dep))
-                {
-                    decimal amount = inv.Lines?.Sum(l => l.Quantity * l.Price) ?? 0m;
-                    bool isIncome = inv.InvoiceType == "Sales" || inv.InvoiceType == "PurchaseReturn";
-                    AddAmount(inv.Date.DateTime, inv.InvoiceType, amount, isIncome);
-                }
-
-                current.StartingBalance = startBal;
-                result.Add(current);
+                depGuids.Add(parsedDep);
             }
+            else
+            {
+                depGuids = await db.Depositories.AsNoTracking().Where(d => !d.IsDisabled).Select(d => d.Id).ToListAsync(ct);
+            }
+
+            const string sql = """
+                WITH raw_funds AS (
+                    -- Кассовые ордера
+                    SELECT 
+                        f.depository_id, 
+                        f.date, 
+                        f.funds_slip_type AS type, 
+                        fl.amount AS amt,
+                        (f.funds_slip_type IN ('Collection', 'FundsOpening', 'FundsRevisionExceed')) AS is_inc
+                    FROM funds_slip_lines fl
+                    JOIN funds_slips f ON f.id = fl.funds_slip_id
+                    WHERE f.depository_id = ANY(@deps) AND f.is_disabled = false
+
+                    UNION ALL
+
+                    -- Расходы
+                    SELECT 
+                        e.depository_id, 
+                        e.date, 
+                        'ExpenseSlip' AS type, 
+                        el.amount AS amt,
+                        false AS is_inc
+                    FROM expense_slip_lines el
+                    JOIN expense_slips e ON e.id = el.expense_slip_id
+                    WHERE e.depository_id = ANY(@deps) AND e.is_disabled = false
+
+                    UNION ALL
+
+                    -- Переводы (расход с кассы-источника)
+                    SELECT 
+                        t.from_depository_id AS depository_id, 
+                        t.date, 
+                        'FundsTransferSource' AS type, 
+                        tl.amount AS amt,
+                        false AS is_inc
+                    FROM funds_transfer_lines tl
+                    JOIN funds_transfers t ON t.id = tl.funds_transfer_id
+                    WHERE t.from_depository_id = ANY(@deps) AND t.is_disabled = false
+
+                    UNION ALL
+
+                    -- Переводы (приход на кассу-получатель)
+                    SELECT 
+                        t.to_depository_id AS depository_id, 
+                        t.date, 
+                        'FundsTransferDestination' AS type, 
+                        tl.received_amount AS amt,
+                        true AS is_inc
+                    FROM funds_transfer_lines tl
+                    JOIN funds_transfers t ON t.id = tl.funds_transfer_id
+                    WHERE t.to_depository_id = ANY(@deps) AND t.is_disabled = false
+
+                    UNION ALL
+
+                    -- Оплаты счетов через платежи (invoice_payments)
+                    SELECT 
+                        i.depository_id, 
+                        i.date, 
+                        i.invoice_type AS type, 
+                        ip.amount AS amt,
+                        (i.invoice_type IN ('Sales', 'PurchaseReturn')) AS is_inc
+                    FROM invoice_payments ip
+                    JOIN invoices i ON i.id = ip.invoice_id
+                    WHERE i.depository_id = ANY(@deps) AND i.is_completed = true AND i.is_disabled = false
+                )
+                SELECT 
+                    d.id::text AS "DepositoryId",
+                    COALESCE(SUM(CASE WHEN rf.date < @start THEN (CASE WHEN rf.is_inc THEN rf.amt ELSE -rf.amt END) ELSE 0 END), 0)::numeric(18,4) AS "StartingBalance",
+                    COALESCE(SUM(CASE WHEN rf.date >= @start AND rf.date <= @end AND rf.is_inc THEN rf.amt ELSE 0 END), 0)::numeric(18,4) AS "Income",
+                    COALESCE(SUM(CASE WHEN rf.date >= @start AND rf.date <= @end AND NOT rf.is_inc THEN rf.amt ELSE 0 END), 0)::numeric(18,4) AS "Expense",
+                    COALESCE(SUM(CASE WHEN rf.date >= @start AND rf.date <= @end AND rf.type = 'FundsOpening' THEN rf.amt ELSE 0 END), 0)::numeric(18,4) AS "FundsOpening",
+                    COALESCE(SUM(CASE WHEN rf.date >= @start AND rf.date <= @end AND rf.type = 'FundsRevisionExceed' THEN rf.amt ELSE 0 END), 0)::numeric(18,4) AS "FundsRevisionExceed",
+                    COALESCE(SUM(CASE WHEN rf.date >= @start AND rf.date <= @end AND rf.type = 'FundsRevisionDeficit' THEN rf.amt ELSE 0 END), 0)::numeric(18,4) AS "FundsRevisionDeficit",
+                    COALESCE(SUM(CASE WHEN rf.date >= @start AND rf.date <= @end AND rf.type = 'Collection' THEN rf.amt ELSE 0 END), 0)::numeric(18,4) AS "Collection",
+                    COALESCE(SUM(CASE WHEN rf.date >= @start AND rf.date <= @end AND rf.type = 'Payment' THEN rf.amt ELSE 0 END), 0)::numeric(18,4) AS "Payment",
+                    COALESCE(SUM(CASE WHEN rf.date >= @start AND rf.date <= @end AND rf.type = 'ExpenseSlip' THEN rf.amt ELSE 0 END), 0)::numeric(18,4) AS "ExpenseSlip",
+                    COALESCE(SUM(CASE WHEN rf.date >= @start AND rf.date <= @end AND rf.type = 'FundsTransferSource' THEN rf.amt ELSE 0 END), 0)::numeric(18,4) AS "FundsTransferSource",
+                    COALESCE(SUM(CASE WHEN rf.date >= @start AND rf.date <= @end AND rf.type = 'FundsTransferDestination' THEN rf.amt ELSE 0 END), 0)::numeric(18,4) AS "FundsTransferDestination",
+                    COALESCE(SUM(CASE WHEN rf.date >= @start AND rf.date <= @end AND rf.type = 'Sales' THEN rf.amt ELSE 0 END), 0)::numeric(18,4) AS "Sales",
+                    COALESCE(SUM(CASE WHEN rf.date >= @start AND rf.date <= @end AND rf.type = 'SalesReturn' THEN rf.amt ELSE 0 END), 0)::numeric(18,4) AS "SalesReturn",
+                    COALESCE(SUM(CASE WHEN rf.date >= @start AND rf.date <= @end AND rf.type = 'Purchase' THEN rf.amt ELSE 0 END), 0)::numeric(18,4) AS "Purchase",
+                    COALESCE(SUM(CASE WHEN rf.date >= @start AND rf.date <= @end AND rf.type = 'PurchaseReturn' THEN rf.amt ELSE 0 END), 0)::numeric(18,4) AS "PurchaseReturn"
+                FROM depositories d
+                LEFT JOIN raw_funds rf ON rf.depository_id = d.id
+                WHERE d.id = ANY(@deps)
+                GROUP BY d.id;
+                """;
+
+            var connStr = db.Database.GetConnectionString();
+            await using var conn = new NpgsqlConnection(connStr);
+            var result = await conn.QueryAsync<FundsBalanceByTypeWithBalanceDto>(new CommandDefinition(
+                sql,
+                new { deps = depGuids.ToArray(), start, end },
+                cancellationToken: ct));
 
             return Results.Ok(result);
         });
@@ -1522,37 +1185,56 @@ public static class FinanceEndpoints
         {
             if (!Guid.TryParse(depositoryId, out var depGuid)) return Results.BadRequest();
 
-            var slips = await db.FundsSlips.Include(x => x.Lines).Where(s => s.DepositoryId == depGuid && s.Date < date && !s.IsDisabled).ToListAsync(ct);
-            var expenses = await db.ExpenseSlips.Include(x => x.Lines).Where(s => s.DepositoryId == depGuid && s.Date < date && !s.IsDisabled).ToListAsync(ct);
-            var ts = await db.FundsTransfers.Include(x => x.Lines).Where(t => t.FromDepositoryId == depGuid && t.Date < date && !t.IsDisabled).ToListAsync(ct);
-            var td = await db.FundsTransfers.Include(x => x.Lines).Where(t => t.ToDepositoryId == depGuid && t.Date < date && !t.IsDisabled).ToListAsync(ct);
-            var invs = await db.Invoices.Include(x => x.Lines).Where(i => i.DepositoryId == depGuid && i.Date < date && !i.IsDisabled && i.IsCompleted).ToListAsync(ct);
+            const string sql = """
+                WITH raw_funds AS (
+                    SELECT fl.amount AS amt, (f.funds_slip_type IN ('Collection', 'FundsOpening', 'FundsRevisionExceed')) AS is_inc
+                    FROM funds_slip_lines fl
+                    JOIN funds_slips f ON f.id = fl.funds_slip_id
+                    WHERE f.depository_id = @dep AND f.date < @dt AND f.is_disabled = false
 
-            decimal income = 0m;
-            decimal expense = 0m;
+                    UNION ALL
 
-            foreach (var s in slips)
-            {
-                var amt = s.Lines?.Sum(l => l.Amount) ?? 0m;
-                if (s.FundsSlipType == "Collection" || s.FundsSlipType == "FundsOpening" || s.FundsSlipType == "FundsRevisionExceed") income += amt;
-                else expense += amt;
-            }
-            foreach (var e in expenses) expense += e.Lines?.Sum(l => l.Amount) ?? 0m;
-            foreach (var t in ts) expense += t.Lines?.Sum(l => l.Amount) ?? 0m;
-            foreach (var t in td) income += t.Lines?.Sum(l => l.ReceivedAmount) ?? 0m;
-            foreach (var i in invs)
-            {
-                var amt = i.Lines?.Sum(l => l.Quantity * l.Price) ?? 0m;
-                if (i.InvoiceType == "Sales" || i.InvoiceType == "PurchaseReturn") income += amt;
-                else expense += amt;
-            }
+                    SELECT el.amount AS amt, false AS is_inc
+                    FROM expense_slip_lines el
+                    JOIN expense_slips e ON e.id = el.expense_slip_id
+                    WHERE e.depository_id = @dep AND e.date < @dt AND e.is_disabled = false
 
-            return Results.Ok(new FundsBalanceDto
-            {
-                DepositoryId = depositoryId,
-                Income = income,
-                Expense = expense
-            });
+                    UNION ALL
+
+                    SELECT tl.amount AS amt, false AS is_inc
+                    FROM funds_transfer_lines tl
+                    JOIN funds_transfers t ON t.id = tl.funds_transfer_id
+                    WHERE t.from_depository_id = @dep AND t.date < @dt AND t.is_disabled = false
+
+                    UNION ALL
+
+                    SELECT tl.received_amount AS amt, true AS is_inc
+                    FROM funds_transfer_lines tl
+                    JOIN funds_transfers t ON t.id = tl.funds_transfer_id
+                    WHERE t.to_depository_id = @dep AND t.date < @dt AND t.is_disabled = false
+
+                    UNION ALL
+
+                    SELECT ip.amount AS amt, (i.invoice_type IN ('Sales', 'PurchaseReturn')) AS is_inc
+                    FROM invoice_payments ip
+                    JOIN invoices i ON i.id = ip.invoice_id
+                    WHERE i.depository_id = @dep AND i.date < @dt AND i.is_completed = true AND i.is_disabled = false
+                )
+                SELECT 
+                    @dep::text AS "DepositoryId",
+                    COALESCE(SUM(CASE WHEN is_inc THEN amt ELSE 0 END), 0)::numeric(18,4) AS "Income",
+                    COALESCE(SUM(CASE WHEN NOT is_inc THEN amt ELSE 0 END), 0)::numeric(18,4) AS "Expense"
+                FROM raw_funds;
+                """;
+
+            var connStr = db.Database.GetConnectionString();
+            await using var conn = new NpgsqlConnection(connStr);
+            var res = await conn.QueryFirstOrDefaultAsync<FundsBalanceDto>(new CommandDefinition(
+                sql,
+                new { dep = depGuid, dt = date },
+                cancellationToken: ct));
+
+            return Results.Ok(res ?? new FundsBalanceDto { DepositoryId = depositoryId });
         });
     }
 
@@ -1560,7 +1242,6 @@ public static class FinanceEndpoints
     private static List<string> ExtractTagsFromRawJson(JsonElement root)
     {
         var list = new List<string>();
-
         if (!root.TryGetProperty("tags", out var tagsProp) &&
             !root.TryGetProperty("Tags", out tagsProp))
         {
@@ -1576,27 +1257,8 @@ public static class FinanceEndpoints
                     var s = item.GetString();
                     if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
                 }
-                else if (item.ValueKind == JsonValueKind.Object)
-                {
-                    if (item.TryGetProperty("Text", out var t) || item.TryGetProperty("Value", out t) || item.TryGetProperty("Name", out t))
-                    {
-                        var s = t.GetString();
-                        if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
-                    }
-                }
             }
         }
-        else if (tagsProp.ValueKind == JsonValueKind.String)
-        {
-            var raw = tagsProp.GetString();
-            if (!string.IsNullOrWhiteSpace(raw))
-            {
-                list.AddRange(raw.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
-                                 .Select(x => x.Trim())
-                                 .Where(x => !string.IsNullOrWhiteSpace(x)));
-            }
-        }
-
         return list.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
@@ -1610,7 +1272,6 @@ public static class FinanceEndpoints
             .ToListAsync(ct);
 
         var convertions = new List<object>();
-
         foreach (var cur in currencies)
         {
             var rate = rates.FirstOrDefault(r => r.CurrencyId == cur.Id);
@@ -1626,7 +1287,6 @@ public static class FinanceEndpoints
                 Divider = div
             });
         }
-
         return convertions.ToArray();
     }
 
@@ -1687,7 +1347,6 @@ public static class FinanceEndpoints
     }
     #endregion
 
-
     public class FundsBalanceByTypeWithBalanceDto
     {
         public string DepositoryId { get; set; } = string.Empty;
@@ -1695,7 +1354,6 @@ public static class FinanceEndpoints
         public decimal Income { get; set; }
         public decimal Expense { get; set; }
         public decimal Balance => StartingBalance + Income - Expense;
-
         public decimal FundsOpening { get; set; }
         public decimal FundsRevisionExceed { get; set; }
         public decimal FundsRevisionDeficit { get; set; }

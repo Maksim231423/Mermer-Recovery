@@ -205,29 +205,48 @@ public class StockSearcher : BindableObject
 
   public virtual Task OnReinitializeAsync() => this.Initialize(true);
 
-  public async Task SearchAsync(string text)
-  {
-    try
+    public async Task SearchAsync(string text)
     {
-      this._cancellationTokenSource?.Cancel();
-      this.WillSearch = this.IsSearching = false;
-      this._cancellationTokenSource = new CancellationTokenSource();
-      if (string.IsNullOrEmpty(text))
-        return;
-      this.WillSearch = true;
-      await Task.Delay(TimeSpan.FromSeconds(0.5), this._cancellationTokenSource.Token);
-      this.WillSearch = false;
-      this.IsSearching = true;
-      this.SearchResult = await this._stockSearchService.Search(text, this.WarehouseId, this.PriceGroup, this.CurrencyId, this._cancellationTokenSource.Token);
-      this.IsSearching = false;
-      this._cancellationTokenSource = (CancellationTokenSource) null;
-    }
-    catch (Exception ex)
-    {
-    }
-  }
+        try
+        {
+            this._cancellationTokenSource?.Cancel();
+            this.WillSearch = this.IsSearching = false;
+            this._cancellationTokenSource = new CancellationTokenSource();
 
-  public void Select(StockSearchResult result) => this.OnResultSelected(this, result);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                this.SearchResult = Enumerable.Empty<StockSearchResult>();
+                return;
+            }
+
+            this.WillSearch = true;
+            // ОПТИМИЗАЦИЯ: Уменьшаем задержку с 500 мс до 150 мс (мгновенный отклик)
+            await Task.Delay(150, this._cancellationTokenSource.Token);
+            this.WillSearch = false;
+            this.IsSearching = true;
+
+            this.SearchResult = await this._stockSearchService.Search(
+                text.Trim(),
+                this.WarehouseId,
+                this.PriceGroup,
+                this.CurrencyId,
+                this._cancellationTokenSource.Token);
+
+            this.IsSearching = false;
+            this._cancellationTokenSource = null;
+        }
+        catch (OperationCanceledException)
+        {
+            // Игнорируем отмену предыдущего ввода при быстром наборе
+        }
+        catch (Exception)
+        {
+            this.IsSearching = false;
+            this.WillSearch = false;
+        }
+    }
+
+    public void Select(StockSearchResult result) => this.OnResultSelected(this, result);
 
   public event SearchResultSelected ResultSelected;
 

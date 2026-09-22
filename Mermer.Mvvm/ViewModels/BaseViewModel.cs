@@ -117,14 +117,29 @@ public abstract class BaseViewModel : MvxViewModel, IDisposable
     base.ViewDestroy();
   }
 
-  protected void ForceCommandCanExecuteChanges(object sender, PropertyChangedEventArgs e)
-  {
-    foreach (PropertyInfo propertyInfo in this.GetType().GetRuntimeProperties().Where<PropertyInfo>((Func<PropertyInfo, bool>) (p => TypeExtensions.IsAssignableFrom(typeof (ICommand), p.PropertyType))))
+    // Добавляем кэш на уровне класса
+    private PropertyInfo[] _commandProperties;
+
+    protected void ForceCommandCanExecuteChanges(object sender, PropertyChangedEventArgs e)
     {
-      if (propertyInfo.GetValue((object) this) is IMvxCommand mvxCommand)
-        mvxCommand.RaiseCanExecuteChanged();
+        // 1. Собираем команды через рефлексию только ОДИН раз
+        if (_commandProperties == null)
+        {
+            _commandProperties = this.GetType()
+                .GetRuntimeProperties()
+                .Where(p => typeof(ICommand).IsAssignableFrom(p.PropertyType))
+                .ToArray();
+        }
+
+        // 2. Мгновенно пробегаемся по кэшу без нагрузки на процессор
+        foreach (var propertyInfo in _commandProperties)
+        {
+            if (propertyInfo.GetValue(this) is IMvxCommand mvxCommand)
+            {
+                mvxCommand.RaiseCanExecuteChanged();
+            }
+        }
     }
-  }
 
     public IMvxLanguageBinder TextSource
     {

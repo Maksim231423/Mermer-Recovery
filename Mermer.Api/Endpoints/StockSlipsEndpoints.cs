@@ -90,7 +90,7 @@ public static class StockSlipsEndpoints
                 var slipIds = rawSlips.Select(x => x.Id).ToList();
                 var allLines = await db.StockSlipLines
                     .AsNoTracking()
-                    .Where(l => slipIds.Contains(l.StockSlipId)) // <--- ИСПРАВЛЕНО
+                    .Where(l => slipIds.Contains(l.StockSlipId))
                     .Select(l => new
                     {
                         l.Id,
@@ -105,14 +105,14 @@ public static class StockSlipsEndpoints
                     .ToListAsync(ct);
 
                 var linesGrouped = allLines
-                    .GroupBy(l => l.StockSlipId) // <--- ИСПРАВЛЕНО (БЕЗ .Value)
+                    .GroupBy(l => l.StockSlipId)
                     .ToDictionary(g => g.Key, g => g.ToList());
 
                 // 5. Формируем DTO для клиента
                 var result = rawSlips.Select(s =>
                 {
                     var linesList = new List<object>();
-                    var unitConvertions = new List<object>();
+                    var unitConvertionsDict = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
 
                     if (linesGrouped.TryGetValue(s.Id, out var slipLines) && slipLines.Any())
                     {
@@ -136,13 +136,17 @@ public static class StockSlipsEndpoints
                                 SortOrder = l.SortOrder
                             });
 
-                            unitConvertions.Add(new
+                            string convKey = $"{sId}_{uId}";
+                            if (!unitConvertionsDict.ContainsKey(convKey))
                             {
-                                StockId = sId,
-                                UnitId = uId,
-                                Multiplier = 1m,
-                                Divider = 1m
-                            });
+                                unitConvertionsDict[convKey] = new
+                                {
+                                    StockId = sId,
+                                    UnitId = uId,
+                                    Multiplier = 1m,
+                                    Divider = 1m
+                                };
+                            }
                         }
                     }
                     else if (s.DisplayTotal > 0m)
@@ -164,13 +168,14 @@ public static class StockSlipsEndpoints
                             SortOrder = 0
                         });
 
-                        unitConvertions.Add(new
+                        string convKey = $"{dummyStockId}_{dummyUnitId}";
+                        unitConvertionsDict[convKey] = new
                         {
                             StockId = dummyStockId,
                             UnitId = dummyUnitId,
                             Multiplier = 1m,
                             Divider = 1m
-                        });
+                        };
                     }
 
                     decimal finalTotal = s.DisplayTotal != 0m
@@ -200,7 +205,7 @@ public static class StockSlipsEndpoints
 
                         DisplayCurrencyId = defCurId,
                         Lines = linesList,
-                        StockUnitConvertions = unitConvertions,
+                        StockUnitConvertions = unitConvertionsDict.Values.ToList(),
                         CurrencyConvertions = convertions
                     };
                 });
@@ -230,13 +235,14 @@ public static class StockSlipsEndpoints
 
             var unitConvertions = s.Lines != null && s.Lines.Any()
                 ? s.Lines.Where(l => l.StockId.HasValue && l.UnitId.HasValue)
-                         .Select(l => new
+                         .GroupBy(l => new { StockId = l.StockId!.Value, UnitId = l.UnitId!.Value })
+                         .Select(g => (object)new
                          {
-                             StockId = l.StockId!.Value.ToString(),
-                             UnitId = l.UnitId!.Value.ToString(),
+                             StockId = g.Key.StockId.ToString(),
+                             UnitId = g.Key.UnitId.ToString(),
                              Multiplier = 1m,
                              Divider = 1m
-                         }).Distinct().ToList<object>()
+                         }).ToList()
                 : new List<object>();
 
             decimal calculatedTotal = s.DisplayTotal;
@@ -357,7 +363,6 @@ public static class StockSlipsEndpoints
                 }
             }
 
-            // ЕСЛИ displayTotal НЕ ПРИШЕЛ ИЛИ РАВЕН 0 — СЧИТАЕМ СУММУ ПО СТРОКАМ
             if (displayTotal == 0m && linesList.Any())
             {
                 displayTotal = linesList.Sum(l => l.ActionTotal);

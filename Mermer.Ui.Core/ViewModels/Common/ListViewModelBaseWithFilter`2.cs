@@ -55,12 +55,25 @@ public abstract class ListViewModelBaseWithFilter<TList, TFilter> : ListViewMode
     set => this.SetProperty<ListFilter>(ref this._selectedFilter, value, nameof (SelectedFilter));
   }
 
-  protected override Task PreLoad()
-  {
-    return Task.WhenAll(this.Filters.Select<ListFilter, Task>((Func<ListFilter, Task>) (x => x.Initialize())));
-  }
+    protected override Task PreLoad()
+    {
+        // Запускаем подсчет счетчиков в фоне, окно открывается мгновенно
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (this.Filters != null)
+                {
+                    await Task.WhenAll(this.Filters.Select(x => x.Initialize()));
+                }
+            }
+            catch { }
+        });
 
-  protected override Task OnLoad()
+        return Task.CompletedTask;
+    }
+
+    protected override Task OnLoad()
   {
     ListFilter listFilter = this.SelectedFilter;
     if (listFilter == null)

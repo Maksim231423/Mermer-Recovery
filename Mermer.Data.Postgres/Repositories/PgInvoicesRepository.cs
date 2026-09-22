@@ -41,86 +41,102 @@ public class PgInvoicesRepository : IInvoicesRepository
     }
 
     public async Task<IReadOnlyList<InvoiceInfo>> GetInfoAsync(
-         DateTime from, DateTime till,
-         string? displayCurrencyId = null,
-         CancellationToken ct = default)
+    DateTime from, DateTime till,
+    string? displayCurrencyId = null,
+    CancellationToken ct = default)
     {
         var safeFrom = from == default || from == DateTime.MinValue ? new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc) : from.ToUniversalTime();
         var safeTill = till >= DateTime.MaxValue.AddDays(-2) ? new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Utc) : till.AddDays(1).ToUniversalTime();
 
+        // ОПТИМИЗАЦИЯ: Сначала отбираем только нужные ID накладных через индекс,
+        // а агрегации делаем ТОЛЬКО по отобранным накладным!
         const string sql = """
-            WITH lines_agg AS (
-                SELECT 
-                    invoice_id,
-                    COALESCE(SUM(quantity * price), 0)::numeric(18,4) AS subtotal
-                FROM invoice_lines
-                GROUP BY invoice_id
-            ),
-            discounts_agg AS (
-                SELECT
-                    id2.invoice_id,
-                    COALESCE(SUM(
-                        CASE id2.discount_type
-                            WHEN 'Percentage' THEN COALESCE(la.subtotal, 0) * id2.amount / 100
-                            ELSE id2.amount
-                        END
-                    ), 0)::numeric(18,4) AS discount_total
-                FROM invoice_discounts id2
-                LEFT JOIN lines_agg la ON la.invoice_id = id2.invoice_id
-                GROUP BY id2.invoice_id
-            ),
-            payments_agg AS (
-                SELECT 
-                    invoice_id,
-                    COALESCE(SUM(amount) FILTER (WHERE payment_type = 'Payment'), 0)::numeric(18,4) AS payment_total,
-                    COALESCE(SUM(amount) FILTER (WHERE payment_type = 'Change'),  0)::numeric(18,4) AS change_total
-                FROM invoice_payments
-                GROUP BY invoice_id
-            ),
-            overheads_agg AS (
-                SELECT 
-                    invoice_id,
-                    COALESCE(SUM(amount), 0)::numeric(18,4) AS overhead_total
-                FROM invoice_overheads
-                GROUP BY invoice_id
-            )
-            SELECT
+        WITH target_invoices AS (
+            SELECT 
                 i.id, i.code, i.date, i.invoice_type, i.is_completed, i.is_disabled,
-                i.partner_id, p.name AS partner_name,
-                i.warehouse_id, w.name AS warehouse_name,
-                i.office_id, o.name AS office_name,
-                i.depository_id, i.user_id, i.user_name,
-                i.group_name AS "group", i.tags,
-
-                COALESCE(la.subtotal, 0)::numeric(18,4) AS subtotal,
-                COALESCE(da.discount_total, 0)::numeric(18,4) AS discounts_total,
-                COALESCE(oa.overhead_total, 0)::numeric(18,4) AS overheads_total,
-
-                (COALESCE(la.subtotal, 0)
-                 - COALESCE(da.discount_total, 0)
-                 + COALESCE(oa.overhead_total, 0))::numeric(18,4) AS grand_total,
-
-                COALESCE(pa.payment_total, 0)::numeric(18,4) AS payments_total,
-
-                GREATEST(
-                    0,
-                    COALESCE(la.subtotal, 0)
-                    - COALESCE(da.discount_total, 0)
-                    + COALESCE(oa.overhead_total, 0)
-                    - COALESCE(pa.payment_total, 0)
-                    + COALESCE(pa.change_total,  0)
-                )::numeric(18,4) AS left_total
+                i.partner_id, i.warehouse_id, i.office_id, i.depository_id,
+                i.user_id, i.user_name, i.group_name AS "group", i.tags
             FROM invoices i
-            LEFT JOIN partners      p  ON p.id  = i.partner_id
-            LEFT JOIN warehouses    w  ON w.id  = i.warehouse_id
-            LEFT JOIN offices       o  ON o.id  = i.office_id
-            LEFT JOIN lines_agg     la ON la.invoice_id = i.id
-            LEFT JOIN discounts_agg da ON da.invoice_id = i.id
-            LEFT JOIN payments_agg  pa ON pa.invoice_id = i.id
-            LEFT JOIN overheads_agg oa ON oa.invoice_id = i.id
             WHERE i.date >= @from AND i.date < @till
+              AND i.is_disabled = false
             ORDER BY i.date DESC
-            """;
+            LIMIT 500 -- Защита: не даем выгрузить больше 500 записей за раз без пагинации
+        ),
+        lines_agg AS (
+            SELECT 
+                il.invoice_id,
+                COALESCE(SUM(il.quantity * il.price), 0)::numeric(18,4) AS subtotal
+            FROM invoice_lines il
+            JOIN target_invoices ti ON ti.id = il.invoice_id
+            GROUP BY il.invoice_id
+        ),
+        discounts_agg AS (
+            SELECT
+                id2.invoice_id,
+                COALESCE(SUM(
+                    CASE id2.discount_type
+                        WHEN 'Percentage' THEN COALESCE(la.subtotal, 0) * id2.amount / 100
+                        ELSE id2.amount
+                    END
+                ), 0)::numeric(18,4) AS discount_total
+            FROM invoice_discounts id2
+            JOIN target_invoices ti ON ti.id = id2.invoice_id
+            LEFT JOIN lines_agg la ON la.invoice_id = id2.invoice_id
+            GROUP BY id2.invoice_id
+        ),
+        payments_agg AS (
+            SELECT 
+                ip.invoice_id,
+                COALESCE(SUM(ip.amount) FILTER (WHERE ip.payment_type = 'Payment'), 0)::numeric(18,4) AS payment_total,
+                COALESCE(SUM(ip.amount) FILTER (WHERE ip.payment_type = 'Change'),  0)::numeric(18,4) AS change_total
+            FROM invoice_payments ip
+            JOIN target_invoices ti ON ti.id = ip.invoice_id
+            GROUP BY ip.invoice_id
+        ),
+        overheads_agg AS (
+            SELECT 
+                io.invoice_id,
+                COALESCE(SUM(io.amount), 0)::numeric(18,4) AS overhead_total
+            FROM invoice_overheads io
+            JOIN target_invoices ti ON ti.id = io.invoice_id
+            GROUP BY io.invoice_id
+        )
+        SELECT
+            ti.id, ti.code, ti.date, ti.invoice_type, ti.is_completed, ti.is_disabled,
+            ti.partner_id, p.name AS partner_name,
+            ti.warehouse_id, w.name AS warehouse_name,
+            ti.office_id, o.name AS office_name,
+            ti.depository_id, ti.user_id, ti.user_name,
+            ti."group", ti.tags,
+
+            COALESCE(la.subtotal, 0)::numeric(18,4) AS subtotal,
+            COALESCE(da.discount_total, 0)::numeric(18,4) AS discounts_total,
+            COALESCE(oa.overhead_total, 0)::numeric(18,4) AS overheads_total,
+
+            (COALESCE(la.subtotal, 0)
+             - COALESCE(da.discount_total, 0)
+             + COALESCE(oa.overhead_total, 0))::numeric(18,4) AS grand_total,
+
+            COALESCE(pa.payment_total, 0)::numeric(18,4) AS payments_total,
+
+            GREATEST(
+                0,
+                COALESCE(la.subtotal, 0)
+                - COALESCE(da.discount_total, 0)
+                + COALESCE(oa.overhead_total, 0)
+                - COALESCE(pa.payment_total, 0)
+                + COALESCE(pa.change_total,  0)
+            )::numeric(18,4) AS left_total
+        FROM target_invoices ti
+        LEFT JOIN partners     p  ON p.id  = ti.partner_id
+        LEFT JOIN warehouses   w  ON w.id  = ti.warehouse_id
+        LEFT JOIN offices      o  ON o.id  = ti.office_id
+        LEFT JOIN lines_agg     la ON la.invoice_id = ti.id
+        LEFT JOIN discounts_agg da ON da.invoice_id = ti.id
+        LEFT JOIN payments_agg  pa ON pa.invoice_id = ti.id
+        LEFT JOIN overheads_agg oa ON oa.invoice_id = ti.id
+        ORDER BY ti.date DESC;
+        """;
 
         await using var conn = new NpgsqlConnection(_connectionString);
         var rows = await conn.QueryAsync(new CommandDefinition(sql,
@@ -145,7 +161,6 @@ public class PgInvoicesRepository : IInvoicesRepository
             UserId = ((Guid?)r.user_id)?.ToString(),
             UserName = (string?)r.user_name,
             Group = (string?)r.group,
-            // <-- Гарантируем, что Tags не будет null (чтобы не ломать TokenConverter)
             Tags = r.tags is string[] tagsArray ? tagsArray.ToList() : new List<string>(),
             Subtotal = (decimal)r.subtotal,
             DiscountsTotal = (decimal)r.discounts_total,

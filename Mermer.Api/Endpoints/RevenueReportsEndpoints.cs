@@ -3,10 +3,12 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Dapper;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Mermer.Data.Postgres;
 
 namespace Mermer.Api.Endpoints;
@@ -19,15 +21,14 @@ public static class RevenueReportsEndpoints
 
         group.MapGet("/", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTimeOffset dateFrom = DateTimeOffset.MinValue;
-            DateTimeOffset dateTill = DateTimeOffset.MaxValue;
+            DateTime dateFrom = DateTime.UtcNow.AddMonths(-1);
+            DateTime dateTill = DateTime.UtcNow;
 
-            if (DateTimeOffset.TryParse(req.Query["dateFrom"].FirstOrDefault()?.Replace(" ", "+"), out var pf))
+            if (DateTime.TryParse(req.Query["dateFrom"].FirstOrDefault()?.Replace(" ", "+"), out var pf))
                 dateFrom = pf.ToUniversalTime();
-            if (DateTimeOffset.TryParse(req.Query["dateTill"].FirstOrDefault()?.Replace(" ", "+"), out var pt))
+            if (DateTime.TryParse(req.Query["dateTill"].FirstOrDefault()?.Replace(" ", "+"), out var pt))
                 dateTill = pt.ToUniversalTime();
 
-            // Защита от перевернутых дат
             if (dateFrom > dateTill)
             {
                 var temp = dateFrom;
@@ -39,108 +40,93 @@ public static class RevenueReportsEndpoints
                 .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
                 .Where(x => x.HasValue)
                 .Select(x => x!.Value)
-                .ToList();
+                .ToArray();
 
-            if (!whIds.Any())
+            if (whIds.Length == 0)
             {
-                return Results.Ok(new List<RevenueReportDto>());
+                return Results.Ok(Array.Empty<RevenueReportDto>());
             }
 
-            // 1. Выгружаем Продажи (Sales) и Возвраты от покупателей (SalesReturn)
-            var targetLines = await db.InvoiceLines
-                .Include(l => l.Invoice)
-                .Include(l => l.Stock)
-                .Where(l => l.Invoice.IsCompleted && !l.Invoice.IsDisabled)
-                .Where(l => l.Invoice.WarehouseId.HasValue && whIds.Contains(l.Invoice.WarehouseId.Value))
-                .Where(l => l.Invoice.Date >= dateFrom && l.Invoice.Date <= dateTill)
-                .Where(l => l.Invoice.InvoiceType == "Sales" || l.Invoice.InvoiceType == "SalesReturn")
-                .ToListAsync(ct);
+            int limit = int.TryParse(req.Query["limit"], out var l) ? Math.Clamp(l, 1, 2000) : 500;
+            int offset = int.TryParse(req.Query["offset"], out var o) ? Math.Max(0, o) : 0;
 
-            if (!targetLines.Any())
-                return Results.Ok(new List<RevenueReportDto>());
+            const string sql = """
+                WITH target_sales AS (
+                    SELECT 
+                        il.id AS line_id,
+                        il.source_id,
+                        il.stock_id,
+                        il.quantity,
+                        il.price AS actual_price,
+                        i.warehouse_id,
+                        i.date,
+                        i.invoice_type,
+                        CASE WHEN i.invoice_type = 'SalesReturn' THEN -il.quantity ELSE il.quantity END AS signed_qty
+                    FROM invoice_lines il
+                    JOIN invoices i ON i.id = il.invoice_id
+                    WHERE i.is_completed = true 
+                      AND i.is_disabled = false
+                      AND i.warehouse_id = ANY(@whs)
+                      AND i.date >= @from AND i.date <= @till
+                      AND i.invoice_type IN ('Sales', 'SalesReturn')
+                      AND il.stock_id IS NOT NULL
+                    ORDER BY i.date DESC
+                    LIMIT @limit OFFSET @offset
+                ),
+                avg_purchases AS (
+                    SELECT 
+                        il.stock_id,
+                        CASE 
+                            WHEN SUM(CASE WHEN i.invoice_type = 'PurchaseReturn' THEN -il.quantity ELSE il.quantity END) > 0 
+                            THEN SUM(CASE WHEN i.invoice_type = 'PurchaseReturn' THEN -il.quantity * il.price ELSE il.quantity * il.price END) /
+                                 SUM(CASE WHEN i.invoice_type = 'PurchaseReturn' THEN -il.quantity ELSE il.quantity END)
+                            ELSE 0 
+                        END AS avg_cost
+                    FROM invoice_lines il
+                    JOIN invoices i ON i.id = il.invoice_id
+                    WHERE il.stock_id IN (SELECT DISTINCT stock_id FROM target_sales)
+                      AND i.is_completed = true 
+                      AND i.is_disabled = false
+                      AND i.invoice_type IN ('Purchase', 'StockOpening', 'PurchaseReturn')
+                    GROUP BY il.stock_id
+                ),
+                latest_prices AS (
+                    SELECT DISTINCT ON (sp.stock_id) 
+                        sp.stock_id, 
+                        sp.price
+                    FROM stock_prices sp
+                    WHERE sp.stock_id IN (SELECT DISTINCT stock_id FROM target_sales)
+                    ORDER BY sp.stock_id, sp.valid_from DESC
+                )
+                SELECT 
+                    ts.date                         AS "Date",
+                    ts.warehouse_id::text          AS "WarehouseId",
+                    ts.stock_id::text              AS "StockId",
+                    COALESCE(s.code, '')           AS "StockCode",
+                    COALESCE(s.name, '')           AS "StockName",
+                    COALESCE(s.type, '')           AS "StockType",
+                    COALESCE(s.group_name, '')     AS "StockGroup",
+                    ts.signed_qty                  AS "Quantity",
+                    (ts.signed_qty * COALESCE(src.price, ap.avg_cost, 0))::numeric(18,4) AS "InitialCosts",
+                    0::numeric(18,4)               AS "OverheadsCosts",
+                    COALESCE(lp.price, 0)::numeric(18,4) AS "RecommendedPrice",
+                    ts.actual_price                AS "ActualPrice"
+                FROM target_sales ts
+                LEFT JOIN stocks s ON s.id = ts.stock_id
+                LEFT JOIN invoice_lines src ON src.id = ts.source_id AND src.price > 0
+                LEFT JOIN avg_purchases ap ON ap.stock_id = ts.stock_id
+                LEFT JOIN latest_prices lp ON lp.stock_id = ts.stock_id
+                ORDER BY ts.date;
+                """;
 
-            var stockIds = targetLines.Where(l => l.StockId.HasValue).Select(l => l.StockId!.Value).Distinct().ToList();
+            var connStr = db.Database.GetConnectionString();
+            await using var conn = new NpgsqlConnection(connStr);
+            var results = await conn.QueryAsync<RevenueReportDto>(new CommandDefinition(
+                sql,
+                new { whs = whIds, from = dateFrom, till = dateTill, limit, offset },
+                cancellationToken: ct));
 
-            // 2. Выгружаем прайс-лист для "Рекомендованной цены"
-            var stockPrices = await db.StockPrices
-                .Where(p => stockIds.Contains(p.StockId))
-                .OrderByDescending(p => p.ValidFrom)
-                .AsNoTracking()
-                .ToListAsync(ct);
-
-            // 3. Выгружаем Закупки для вычисления себестоимости (Cost of Goods Sold)
-            var purchases = await db.InvoiceLines
-                .Include(l => l.Invoice)
-                .Where(l => l.StockId.HasValue && stockIds.Contains(l.StockId.Value) && l.Invoice.IsCompleted && !l.Invoice.IsDisabled)
-                .Where(l => l.Invoice.InvoiceType == "Purchase" || l.Invoice.InvoiceType == "StockOpening" || l.Invoice.InvoiceType == "PurchaseReturn")
-                .AsNoTracking()
-                .ToListAsync(ct);
-
-            // Считаем средневзвешенную закупочную цену для каждого товара
-            var avgCosts = new Dictionary<Guid, decimal>();
-            foreach (var sId in stockIds)
-            {
-                var pLines = purchases.Where(p => p.StockId == sId).ToList();
-                decimal totalVal = pLines.Sum(p => (p.Invoice.InvoiceType == "PurchaseReturn" ? -1 : 1) * p.Quantity * p.Price);
-                decimal totalQty = pLines.Sum(p => (p.Invoice.InvoiceType == "PurchaseReturn" ? -1 : 1) * p.Quantity);
-
-                avgCosts[sId] = totalQty > 0 ? totalVal / totalQty : 0m;
-            }
-
-            // 4. Формируем DTO для интерфейса
-            var results = new List<RevenueReportDto>();
-
-            foreach (var line in targetLines)
-            {
-                if (!line.StockId.HasValue) continue;
-
-                // Для продаж Quantity с плюсом, для возвратов - с минусом (чтобы отнять прибыль)
-                decimal quantity = line.Invoice.InvoiceType == "SalesReturn" ? -line.Quantity : line.Quantity;
-
-                // РАСЧЕТ СЕБЕСТОИМОСТИ (ИСПРАВЛЕНИЕ БАГА)
-                decimal unitCost = 0m;
-
-                // Если есть прямая ссылка на закупку или предыдущую продажу (SourceId)
-                if (line.SourceId.HasValue)
-                {
-                    var sourceLine = purchases.FirstOrDefault(p => p.Id == line.SourceId.Value)
-                                  ?? targetLines.FirstOrDefault(t => t.Id == line.SourceId.Value);
-
-                    if (sourceLine != null && sourceLine.Price > 0)
-                        unitCost = sourceLine.Price;
-                    else
-                        unitCost = avgCosts.GetValueOrDefault(line.StockId.Value, 0m);
-                }
-                else
-                {
-                    // Если связи нет, используем средневзвешенную цену закупки
-                    unitCost = avgCosts.GetValueOrDefault(line.StockId.Value, 0m);
-                }
-
-                decimal initialCosts = quantity * unitCost;
-
-                // Рекомендованная цена (из прайса на момент продажи)
-                var recPrice = stockPrices.FirstOrDefault(p => p.StockId == line.StockId.Value && p.ValidFrom <= line.Invoice.Date)?.Price ?? 0m;
-
-                results.Add(new RevenueReportDto
-                {
-                    Date = line.Invoice.Date.UtcDateTime,
-                    WarehouseId = line.Invoice.WarehouseId.ToString(),
-                    StockId = line.StockId.ToString(),
-                    StockCode = line.Stock?.Code ?? "",
-                    StockName = line.Stock?.Name ?? "",
-                    StockType = line.Stock?.Type ?? "",
-                    StockGroup = line.Stock?.Group ?? "",
-                    StockTags = new List<string>(), // Можно заполнить, если нужно отображать в гриде
-                    Quantity = quantity,
-                    InitialCosts = initialCosts,
-                    OverheadsCosts = 0m,
-                    RecommendedPrice = recPrice,
-                    ActualPrice = line.Price
-                });
-            }
-
-            return Results.Ok(results.OrderBy(r => r.Date).ToList());
+            return Results.Ok(results);
         });
 
         return app;

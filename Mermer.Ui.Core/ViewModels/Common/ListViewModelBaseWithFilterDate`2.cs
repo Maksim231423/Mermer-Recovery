@@ -4,14 +4,15 @@
 // MVID: DC92D011-8413-44AC-9F10-F866D891CF66
 // Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.Ui.Core.dll
 
+using Mermer.Data.Tools.Expressions;
+using Mermer.Mvvm.Services;
+using Mermer.Ui.Core.Helpers;
 using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
 using MvvmCross.Plugins.Messenger;
-using Mermer.Ui.Core.Helpers;
-using Mermer.Data.Tools.Expressions;
-using Mermer.Mvvm.Services;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Linq.Expressions;
 using System.Threading.Tasks;
 using System.Windows.Input;
@@ -131,12 +132,20 @@ public abstract class ListViewModelBaseWithFilterDate<TList, TFilter> :
     }
   }
 
-  protected override Task OnLoad()
-  {
-    return !this._isCustomDateFilter ? base.OnLoad() : this.LoadByDateAsync(false);
-  }
+    protected override Task OnLoad()
+    {
+        if (this.SelectedFilter == null)
+        {
+            // Используем публичное свойство SelectedFilter вместо закрытого поля _selectedFilter
+            this.SelectedFilter = this.Filters?.FirstOrDefault();
+        }
 
-  protected override async Task LoadByFilterAsync(ListFilter filter, bool setBusiness = true)
+        return this.SelectedFilter == null
+            ? Task.CompletedTask
+            : this.LoadByFilterAsync(this.SelectedFilter, false);
+    }
+
+    protected override async Task LoadByFilterAsync(ListFilter filter, bool setBusiness = true)
   {
     ListViewModelBaseWithFilterDate<TList, TFilter> baseWithFilterDate = this;
     if (setBusiness)

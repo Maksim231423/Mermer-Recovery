@@ -20,11 +20,14 @@ public static class SpendingEndpoints
     {
         var group = routes.MapGroup("/api/spending/slips").WithTags("SpendingSlips");
 
-        // 1. СПИСОК АКТОВ РАСХОДОВ
-        group.MapGet("", async (DateTime? from, DateTime? till, string? depositoryId, MermerDbContext db, CancellationToken ct) =>
+        // 1. СПИСОК АКТОВ РАСХОДОВ (С ПАГИНАЦИЕЙ)
+        group.MapGet("", async (DateTime? from, DateTime? till, string? depositoryId, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
-            var startDate = from ?? DateTime.MinValue;
-            var endDate = till ?? DateTime.MaxValue;
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
+            int skip = offset.GetValueOrDefault(0);
+
+            var startDate = from ?? DateTime.UtcNow.AddMonths(-3);
+            var endDate = till ?? DateTime.UtcNow;
 
             var defaultCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
                              ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
@@ -33,15 +36,19 @@ public static class SpendingEndpoints
             var allConvertions = await GetCurrencyConvertionsAsync(db, DateTime.UtcNow, ct);
 
             var query = db.ExpenseSlips
-                .Include(s => s.Lines)
-                .AsSplitQuery()
                 .AsNoTracking()
-                .Where(s => s.Date >= startDate && s.Date <= endDate);
+                .Where(s => s.Date >= startDate && s.Date <= endDate && !s.IsDisabled);
 
             if (Guid.TryParse(depositoryId, out var depGuid))
                 query = query.Where(s => s.DepositoryId == depGuid);
 
-            var slips = await query.OrderByDescending(s => s.Date).ToListAsync(ct);
+            var slips = await query
+                .OrderByDescending(s => s.Date)
+                .Skip(skip)
+                .Take(take)
+                .Include(s => s.Lines)
+                .AsSplitQuery()
+                .ToListAsync(ct);
 
             var result = slips.Select(s =>
             {
@@ -150,11 +157,9 @@ public static class SpendingEndpoints
             using var doc = JsonDocument.Parse(body);
             var root = doc.RootElement;
 
-            // Извлекаем Id
             string? idStr = GetStringProp(root, "id", "Id");
             Guid id = Guid.TryParse(idStr, out var g) && g != Guid.Empty ? g : Guid.NewGuid();
 
-            // Явно ищем запись
             var existing = await db.ExpenseSlips.Include(x => x.Lines).FirstOrDefaultAsync(x => x.Id == id);
 
             string code = GetStringProp(root, "code", "Code") ?? $"EXP-{DateTime.UtcNow:yyMMddHHmmss}";
@@ -190,7 +195,6 @@ public static class SpendingEndpoints
 
             if (existing == null)
             {
-                // Запись не найдена - СОЗДАЕМ
                 await db.ExpenseSlips.AddAsync(new ExpenseSlipEntity
                 {
                     Id = id,
@@ -213,7 +217,6 @@ public static class SpendingEndpoints
             }
             else
             {
-                // Запись найдена - ОБНОВЛЯЕМ
                 existing.Code = code;
                 existing.Date = date;
                 existing.UserId = userId;
@@ -227,7 +230,6 @@ public static class SpendingEndpoints
                 existing.Tags = tagsList.ToArray();
                 existing.UpdatedAt = DateTime.UtcNow;
 
-                // Для обновления вложенной коллекции нужно очистить старые и добавить новые
                 db.ExpenseSlipLines.RemoveRange(existing.Lines);
                 existing.Lines = linesList;
                 db.ExpenseSlips.Update(existing);
@@ -237,14 +239,8 @@ public static class SpendingEndpoints
             return Results.Content($"{{\"id\":\"{id}\",\"code\":\"{code}\"}}", "application/json");
         };
 
-        // Обратите внимание на явный захват ID из URL в методе PUT!
         group.MapPost("/", saveHandler);
-        group.MapPut("/{routeId}", async (string routeId, HttpRequest request, MermerDbContext db) =>
-        {
-            // Здесь мы принудительно устанавливаем ID из URL в запрос, чтобы saveHandler точно знал, кого обновлять
-            return await saveHandler(request, db);
-        });
-
+        group.MapPut("/{routeId}", async (string routeId, HttpRequest request, MermerDbContext db) => await saveHandler(request, db));
         group.MapPost("", saveHandler);
         group.MapPut("/{id}", saveHandler);
 
@@ -264,77 +260,44 @@ public static class SpendingEndpoints
             return Results.Ok();
         });
 
-        // 5. ФАСЕТЫ ДЛЯ ВЫПАДАЮЩИХ СПИСКОВ
+        // 5. ФАСЕТЫ (БЕЗ ВЫГРУЗКИ ВСЕЙ ТАБЛИЦЫ В ПАМЯТЬ)
         group.MapGet("/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
-            string? fields = ctx.Request.Query["fields"].ToString();
-            var fieldList = string.IsNullOrEmpty(fields)
-                ? new[] { "Date", "Group", "Tags" }
-                : fields.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                        .Select(f => f.Trim())
-                        .ToArray();
+            var todayUtc = DateTime.UtcNow.Date;
+            var weekStart = todayUtc.AddDays(-7);
+            var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
 
-            var result = new Dictionary<string, Dictionary<string, int>>();
+            var countToday = await db.ExpenseSlips.CountAsync(s => !s.IsDisabled && s.Date >= todayUtc, ct);
+            var countWeek = await db.ExpenseSlips.CountAsync(s => !s.IsDisabled && s.Date >= weekStart, ct);
+            var countMonth = await db.ExpenseSlips.CountAsync(s => !s.IsDisabled && s.Date >= monthStart, ct);
+            var countAll = await db.ExpenseSlips.CountAsync(s => !s.IsDisabled, ct);
 
-            foreach (var field in fieldList)
+            var groups = await db.ExpenseSlips
+                .AsNoTracking()
+                .Where(x => !string.IsNullOrEmpty(x.GroupName) && !x.IsDisabled)
+                .GroupBy(x => x.GroupName!)
+                .Select(g => new { Key = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+
+            return Results.Ok(new Dictionary<string, object>
             {
-                if (field.Equals("Group", StringComparison.OrdinalIgnoreCase) || field.Equals("GroupNames", StringComparison.OrdinalIgnoreCase))
+                ["Group"] = groups,
+                ["Date"] = new Dictionary<string, int>
                 {
-                    var groups = await db.ExpenseSlips
-                        .AsNoTracking()
-                        .Where(x => !string.IsNullOrEmpty(x.GroupName))
-                        .GroupBy(x => x.GroupName!)
-                        .Select(g => new { Key = g.Key, Count = g.Count() })
-                        .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
-
-                    result[field] = groups;
+                    { "#Today", countToday },
+                    { "#This Week", countWeek },
+                    { "#This Month", countMonth },
+                    { "#All Records", countAll }
                 }
-                else if (field.Equals("Tags", StringComparison.OrdinalIgnoreCase) || field.Equals("TagNames", StringComparison.OrdinalIgnoreCase))
-                {
-                    var allTags = await db.ExpenseSlips
-                        .AsNoTracking()
-                        .Where(x => x.Tags != null && x.Tags.Length > 0)
-                        .Select(x => x.Tags)
-                        .ToListAsync(ct);
-
-                    var tagCounts = allTags
-                        .SelectMany(t => t!)
-                        .GroupBy(t => t)
-                        .ToDictionary(g => g.Key, g => g.Count());
-
-                    result[field] = tagCounts;
-                }
-                else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
-                {
-                    var now = DateTime.Now.Date;
-                    var slips = await db.ExpenseSlips.AsNoTracking().Where(s => !s.IsDisabled).Select(s => s.Date).ToListAsync(ct);
-                    var localDates = slips.Select(d => d.ToLocalTime().Date).ToList();
-
-                    var dateFacets = new Dictionary<string, int>
-                    {
-                        { "#Today", localDates.Count(d => d == now) },
-                        { "#This Week", localDates.Count(d => d >= now.AddDays(-7)) },
-                        { "#This Month", localDates.Count(d => d.Month == now.Month && d.Year == now.Year) },
-                        { "#This Year", localDates.Count(d => d.Year == now.Year) },
-                        { "#All Records", localDates.Count }
-                    };
-
-                    result[field] = dateFacets;
-                }
-                else
-                {
-                    result[field] = new Dictionary<string, int>();
-                }
-            }
-
-            return Results.Ok(result);
+            });
         });
 
-        // 6. ЖУРНАЛ СТАТЕЙ РАСХОДОВ
-        routes.MapGet("/api/spending/actions", async (DateTime? from, DateTime? till, string? expenseId, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        // 6. ЖУРНАЛ СТАТЕЙ РАСХОДОВ С ЛИМИТОМ
+        routes.MapGet("/api/spending/actions", async (DateTime? from, DateTime? till, string? expenseId, int? limit, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            var startDate = from ?? DateTime.MinValue;
-            var endDate = till ?? DateTime.MaxValue;
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 300;
+            var startDate = from ?? DateTime.UtcNow.AddMonths(-1);
+            var endDate = till ?? DateTime.UtcNow;
 
             var depIds = req.Query["depositoryId"]
                 .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
@@ -354,7 +317,7 @@ public static class SpendingEndpoints
                 query = query.Where(s => s.DepositoryId.HasValue && depIds.Contains(s.DepositoryId.Value));
             }
 
-            var slips = await query.OrderByDescending(s => s.Date).ToListAsync(ct);
+            var slips = await query.OrderByDescending(s => s.Date).Take(take).ToListAsync(ct);
             var actions = new List<object>();
 
             foreach (var s in slips)
@@ -390,7 +353,6 @@ public static class SpendingEndpoints
     private static List<string> ExtractTagsFromRawJson(JsonElement root)
     {
         var list = new List<string>();
-
         if (!root.TryGetProperty("tags", out var tagsProp) &&
             !root.TryGetProperty("Tags", out tagsProp))
         {
@@ -406,27 +368,8 @@ public static class SpendingEndpoints
                     var s = item.GetString();
                     if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
                 }
-                else if (item.ValueKind == JsonValueKind.Object)
-                {
-                    if (item.TryGetProperty("Text", out var t) || item.TryGetProperty("Value", out t) || item.TryGetProperty("Name", out t))
-                    {
-                        var s = t.GetString();
-                        if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
-                    }
-                }
             }
         }
-        else if (tagsProp.ValueKind == JsonValueKind.String)
-        {
-            var raw = tagsProp.GetString();
-            if (!string.IsNullOrWhiteSpace(raw))
-            {
-                list.AddRange(raw.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
-                                 .Select(x => x.Trim())
-                                 .Where(x => !string.IsNullOrWhiteSpace(x)));
-            }
-        }
-
         return list.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 

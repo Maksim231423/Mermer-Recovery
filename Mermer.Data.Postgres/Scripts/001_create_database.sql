@@ -1,13 +1,12 @@
 ﻿-- ============================================================================
 -- Mermer ERP — PostgreSQL Database Schema
 -- Migration from Couchbase (NoSQL) to PostgreSQL (Relational)
--- Version: 1.8.0 | Core + Licensing
+-- Version: 1.8.1 | Core + Licensing (Optimized Indexes & Fixes)
 -- ============================================================================
 
 -- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
-
 
 -- ============================================================================
 -- LICENSING & ACTIVATION (Priority 0 — Security & Audit)
@@ -32,7 +31,6 @@ CREATE TABLE licenses (
 CREATE INDEX idx_licenses_key ON licenses(key);
 CREATE INDEX idx_licenses_app_mod ON licenses(application_id, module_id);
 
--- Таблица аудита и истории активаций/проверок
 CREATE TABLE license_logs (
     id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     license_key VARCHAR(255),
@@ -49,20 +47,18 @@ CREATE INDEX idx_license_logs_action ON license_logs(action);
 CREATE INDEX idx_license_logs_created_at ON license_logs(created_at DESC);
 
 -- ============================================================================
--- 5. ТАБЛИЦА МАКЕТОВ ДИЗАЙНЕРА ОТЧЕТОВ И ПЕЧАТНЫХ ФОРМ (DevExpress)
+-- REPORT LAYOUTS (DevExpress)
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS report_layouts (
-    id          VARCHAR(150) PRIMARY KEY, -- Пример: 'Report-BillStandard', 'Report-StockSlipStandard'
+    id          VARCHAR(150) PRIMARY KEY,
     name        VARCHAR(150) NOT NULL,
     layout      TEXT NOT NULL,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Индекс для быстрого поиска по базовому имени отчета
 CREATE INDEX IF NOT EXISTS idx_report_layouts_name ON report_layouts(name);
 
--- Комментарии к структуре (для читаемости схемы в pgAdmin)
 COMMENT ON TABLE report_layouts IS 'Пользовательские XML-макеты печатных форм DevExpress';
 COMMENT ON COLUMN report_layouts.id IS 'Уникальный строковый ключ формы вида Report-{ClassName}';
 COMMENT ON COLUMN report_layouts.layout IS 'XML-разметка сериализованного отчета XtraReport';
@@ -71,7 +67,6 @@ COMMENT ON COLUMN report_layouts.layout IS 'XML-разметка сериали�
 -- REFERENCE TABLES (Priority 1 — Core)
 -- ============================================================================
 
--- Offices
 CREATE TABLE offices (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name            VARCHAR(200) NOT NULL,
@@ -83,7 +78,6 @@ CREATE TABLE offices (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Warehouses
 CREATE TABLE warehouses (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     office_id       UUID REFERENCES offices(id),
@@ -97,7 +91,6 @@ CREATE TABLE warehouses (
 
 CREATE INDEX idx_warehouses_office_id ON warehouses(office_id);
 
--- Depositories (Cash registers / fund storage)
 CREATE TABLE depositories (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     office_id       UUID REFERENCES offices(id),
@@ -111,7 +104,6 @@ CREATE TABLE depositories (
 
 CREATE INDEX idx_depositories_office_id ON depositories(office_id);
 
--- Currencies
 CREATE TABLE currencies (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name            VARCHAR(100) NOT NULL,
@@ -123,7 +115,6 @@ CREATE TABLE currencies (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Currency Rates (historical exchange rates)
 CREATE TABLE currency_rates (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     currency_id     UUID NOT NULL REFERENCES currencies(id) ON DELETE CASCADE,
@@ -171,7 +162,7 @@ CREATE TABLE user_roles (
 );
 
 -- ============================================================================
--- CRM — Partners
+-- CRM — Partners & Partner Actions
 -- ============================================================================
 
 CREATE TABLE partners (
@@ -194,7 +185,6 @@ CREATE TABLE partners (
 CREATE INDEX idx_partners_code ON partners(code);
 CREATE INDEX idx_partners_name_trgm ON partners USING GIN (name gin_trgm_ops);
 
--- Partner Slips (Opening Balance, Revisions, Adjustments)
 CREATE TABLE partner_slips (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code            VARCHAR(50) NOT NULL,
@@ -213,8 +203,8 @@ CREATE TABLE partner_slips (
 );
 
 CREATE INDEX idx_partner_slips_date ON partner_slips(date DESC);
+CREATE INDEX idx_partner_slips_office_date ON partner_slips(office_id, date DESC);
 
--- Partner Slip Lines
 CREATE TABLE partner_slip_lines (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     partner_slip_id     UUID NOT NULL REFERENCES partner_slips(id) ON DELETE CASCADE,
@@ -228,7 +218,6 @@ CREATE TABLE partner_slip_lines (
 CREATE INDEX idx_partner_slip_lines_slip_id ON partner_slip_lines(partner_slip_id);
 CREATE INDEX idx_partner_slip_lines_partner_id ON partner_slip_lines(partner_id);
 
--- Partner Transfers
 CREATE TABLE partner_transfers (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code            VARCHAR(50) NOT NULL,
@@ -246,7 +235,6 @@ CREATE TABLE partner_transfers (
 
 CREATE INDEX idx_partner_transfers_date ON partner_transfers(date DESC);
 
--- Partner Transfer Lines
 CREATE TABLE partner_transfer_lines (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     partner_transfer_id UUID NOT NULL REFERENCES partner_transfers(id) ON DELETE CASCADE,
@@ -260,13 +248,27 @@ CREATE TABLE partner_transfer_lines (
 
 CREATE INDEX idx_partner_transfer_lines_transfer_id ON partner_transfer_lines(partner_transfer_id);
 CREATE INDEX idx_partner_transfer_lines_partner_id ON partner_transfer_lines(partner_id);
-CREATE INDEX IF NOT EXISTS idx_partner_actions_partner_date ON partner_actions(partner_id, created_at DESC);
+
+-- Таблица взаиморасчетов перенесена сюда, строго до создания ее индексов
+CREATE TABLE IF NOT EXISTS partner_actions (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    partner_id      UUID NOT NULL REFERENCES partners(id) ON DELETE CASCADE,
+    office_id       UUID REFERENCES offices(id),
+    action_type     VARCHAR(20) NOT NULL CHECK (action_type IN ('Debit','Credit')),
+    amount          NUMERIC(18,4) NOT NULL DEFAULT 0,
+    currency_id     UUID REFERENCES currencies(id),
+    description     TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_partner_actions_partner_id ON partner_actions(partner_id);
+CREATE INDEX idx_partner_actions_office_id  ON partner_actions(office_id);
+CREATE INDEX idx_partner_actions_partner_date ON partner_actions(partner_id, created_at DESC);
 
 -- ============================================================================
--- STOCK MANAGEMENT — Products, Composers & Alternatives
+-- STOCK MANAGEMENT
 -- ============================================================================
 
--- Stocks (Products / Items)
 CREATE TABLE stocks (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code            VARCHAR(50),
@@ -290,9 +292,11 @@ CREATE INDEX idx_stocks_name_trgm ON stocks USING GIN (name gin_trgm_ops);
 CREATE INDEX idx_stocks_code_trgm ON stocks USING GIN (code gin_trgm_ops) WHERE code IS NOT NULL;
 CREATE INDEX idx_stocks_barcodes ON stocks USING GIN (barcodes);
 CREATE INDEX idx_stocks_is_disabled ON stocks(is_disabled) WHERE NOT is_disabled;
-CREATE INDEX IF NOT EXISTS ix_stocks_search_vector ON stocks USING gin(search_vector);
+CREATE INDEX IF NOT EXISTS ix_stocks_search_vector ON stocks USING GIN(search_vector);
+CREATE INDEX IF NOT EXISTS ix_stocks_name_prefix ON stocks (LOWER(name) varchar_pattern_ops);
+CREATE INDEX IF NOT EXISTS ix_stocks_code_prefix ON stocks (LOWER(code) varchar_pattern_ops);
 
--- Stock Units
+
 CREATE TABLE stock_units (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     stock_id        UUID NOT NULL REFERENCES stocks(id) ON DELETE CASCADE,
@@ -306,6 +310,8 @@ CREATE TABLE stock_units (
 );
 
 CREATE INDEX idx_stock_units_stock_id ON stock_units(stock_id);
+-- >>> ДОБАВЛЕНО СЮДА: быстрый поиск дефолтной единицы для CTE без LATERAL <<<
+CREATE INDEX IF NOT EXISTS idx_stock_units_default ON stock_units(stock_id) WHERE is_default = TRUE;
 
 -- Stock Prices
 CREATE TABLE stock_prices (
@@ -320,8 +326,9 @@ CREATE TABLE stock_prices (
 
 CREATE INDEX idx_stock_prices_stock_id ON stock_prices(stock_id);
 CREATE INDEX idx_stock_prices_lookup ON stock_prices(stock_id, price_group, valid_from DESC);
+-- >>> ДОБАВЛЕНО СЮДА: быстрый DISTINCT ON (stock_id) valid_from DESC <<<
+CREATE INDEX IF NOT EXISTS idx_stock_prices_distinct ON stock_prices(stock_id, valid_from DESC);, price_group, valid_from DESC);
 
--- Stock Additional Prices
 CREATE TABLE stock_additional_prices (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     stock_id        UUID NOT NULL REFERENCES stocks(id) ON DELETE CASCADE,
@@ -333,7 +340,6 @@ CREATE TABLE stock_additional_prices (
 
 CREATE INDEX idx_stock_additional_prices_stock_id ON stock_additional_prices(stock_id);
 
--- Stock Name Composers
 CREATE TABLE stock_name_composers (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     "order"         INT NOT NULL DEFAULT 0,
@@ -346,7 +352,6 @@ CREATE TABLE stock_name_composers (
 
 CREATE INDEX idx_stock_name_composers_order ON stock_name_composers("order");
 
--- Stock Name Composer Values
 CREATE TABLE stock_name_composer_values (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     composer_id     UUID NOT NULL REFERENCES stock_name_composers(id) ON DELETE CASCADE,
@@ -357,7 +362,6 @@ CREATE TABLE stock_name_composer_values (
 
 CREATE INDEX idx_snc_values_composer_id ON stock_name_composer_values(composer_id);
 
--- Stock Alternatives
 CREATE TABLE stock_alternatives (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name            VARCHAR(500) NOT NULL,
@@ -367,7 +371,6 @@ CREATE TABLE stock_alternatives (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Stock Alternative Lines
 CREATE TABLE stock_alternative_lines (
     id                      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     stock_alternative_id    UUID NOT NULL REFERENCES stock_alternatives(id) ON DELETE CASCADE,
@@ -381,7 +384,6 @@ CREATE INDEX idx_stock_alt_lines_stock_id ON stock_alternative_lines(stock_id);
 -- WAREHOUSING & TRANSACTIONS
 -- ============================================================================
 
--- Stock Slips
 CREATE TABLE stock_slips (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code                VARCHAR(50),
@@ -402,8 +404,8 @@ CREATE TABLE stock_slips (
 CREATE INDEX idx_stock_slips_date ON stock_slips(date DESC);
 CREATE INDEX idx_stock_slips_warehouse_id ON stock_slips(warehouse_id);
 CREATE INDEX idx_stock_slips_slip_type ON stock_slips(slip_type);
+CREATE INDEX idx_stock_slips_wh_date ON stock_slips(warehouse_id, date DESC);
 
--- Stock Slip Lines
 CREATE TABLE stock_slip_lines (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     stock_slip_id       UUID NOT NULL REFERENCES stock_slips(id) ON DELETE CASCADE,
@@ -419,7 +421,6 @@ CREATE TABLE stock_slip_lines (
 CREATE INDEX idx_stock_slip_lines_slip_id ON stock_slip_lines(stock_slip_id);
 CREATE INDEX idx_stock_slip_lines_stock_id ON stock_slip_lines(stock_id);
 
--- Stock Transfers
 CREATE TABLE stock_transfers (
     id                          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code                        VARCHAR(50),
@@ -442,8 +443,8 @@ CREATE TABLE stock_transfers (
 CREATE INDEX idx_stock_transfers_date ON stock_transfers(date DESC);
 CREATE INDEX idx_stock_transfers_wh ON stock_transfers(warehouse_id);
 CREATE INDEX idx_stock_transfers_dest_wh ON stock_transfers(destination_warehouse_id);
+CREATE INDEX idx_stock_transfers_wh_date ON stock_transfers(warehouse_id, date DESC);
 
--- Stock Transfer Lines
 CREATE TABLE stock_transfer_lines (
     id                      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     stock_transfer_id       UUID NOT NULL REFERENCES stock_transfers(id) ON DELETE CASCADE,
@@ -461,7 +462,6 @@ CREATE TABLE stock_transfer_lines (
 CREATE INDEX idx_stock_transfer_lines_doc ON stock_transfer_lines(stock_transfer_id);
 CREATE INDEX idx_stock_transfer_lines_stock ON stock_transfer_lines(stock_id);
 
--- Stock Revisions
 CREATE TABLE stock_revisions (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code                VARCHAR(50),
@@ -483,8 +483,8 @@ CREATE TABLE stock_revisions (
 
 CREATE INDEX idx_stock_revisions_date ON stock_revisions(date DESC);
 CREATE INDEX idx_stock_revisions_wh ON stock_revisions(warehouse_id);
+CREATE INDEX idx_stock_revisions_wh_date ON stock_revisions(warehouse_id, date DESC);
 
--- Stock Revision Lines
 CREATE TABLE stock_revision_lines (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     stock_revision_id   UUID NOT NULL REFERENCES stock_revisions(id) ON DELETE CASCADE,
@@ -503,7 +503,6 @@ CREATE TABLE stock_revision_lines (
 CREATE INDEX idx_stock_revision_lines_rev_id ON stock_revision_lines(stock_revision_id);
 CREATE INDEX idx_stock_revision_lines_stock_id ON stock_revision_lines(stock_id);
 
--- Stock Orders
 CREATE TABLE stock_orders (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code                VARCHAR(50),
@@ -524,8 +523,8 @@ CREATE TABLE stock_orders (
 CREATE INDEX idx_stock_orders_date ON stock_orders(date DESC);
 CREATE INDEX idx_stock_orders_warehouse ON stock_orders(warehouse_id);
 CREATE INDEX idx_stock_orders_partner ON stock_orders(partner_id);
+CREATE INDEX idx_stock_orders_wh_date ON stock_orders(warehouse_id, date DESC);
 
--- Stock Order Lines
 CREATE TABLE stock_order_lines (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     stock_order_id      UUID NOT NULL REFERENCES stock_orders(id) ON DELETE CASCADE,
@@ -537,7 +536,6 @@ CREATE TABLE stock_order_lines (
 CREATE INDEX idx_stock_order_lines_order_id ON stock_order_lines(stock_order_id);
 CREATE INDEX idx_stock_order_lines_stock_id ON stock_order_lines(stock_id);
 
--- Stock Order Unit Convertions
 CREATE TABLE stock_order_unit_convertions (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     stock_order_id      UUID NOT NULL REFERENCES stock_orders(id) ON DELETE CASCADE,
@@ -549,7 +547,6 @@ CREATE TABLE stock_order_unit_convertions (
 
 CREATE INDEX idx_stock_order_conv_order_id ON stock_order_unit_convertions(stock_order_id);
 
--- Stock Order Templates
 CREATE TABLE stock_order_templates (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name                VARCHAR(500) NOT NULL,
@@ -561,7 +558,6 @@ CREATE TABLE stock_order_templates (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Stock Order Template Lines
 CREATE TABLE stock_order_template_lines (
     id                      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     stock_order_template_id UUID NOT NULL REFERENCES stock_order_templates(id) ON DELETE CASCADE,
@@ -571,7 +567,6 @@ CREATE TABLE stock_order_template_lines (
 CREATE INDEX idx_sot_lines_template_id ON stock_order_template_lines(stock_order_template_id);
 CREATE INDEX idx_sot_lines_stock_id ON stock_order_template_lines(stock_id);
 
--- Aggregated Stock Orders
 CREATE TABLE aggregated_stock_orders (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code                VARCHAR(50),
@@ -593,7 +588,6 @@ CREATE INDEX idx_agg_orders_date ON aggregated_stock_orders(date DESC);
 CREATE INDEX idx_agg_orders_wh ON aggregated_stock_orders(warehouse_id);
 CREATE INDEX idx_agg_orders_partner ON aggregated_stock_orders(partner_id);
 
--- Aggregated Stock Order Lines
 CREATE TABLE aggregated_stock_order_lines (
     id                          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     aggregated_stock_order_id   UUID NOT NULL REFERENCES aggregated_stock_orders(id) ON DELETE CASCADE,
@@ -604,12 +598,9 @@ CREATE TABLE aggregated_stock_order_lines (
 
 CREATE INDEX idx_agg_order_lines_order_id ON aggregated_stock_order_lines(aggregated_stock_order_id);
 CREATE INDEX idx_agg_order_lines_stock_id ON aggregated_stock_order_lines(stock_id);
-CREATE INDEX IF NOT EXISTS idx_stock_slips_wh_date ON stock_slips(warehouse_id, date DESC);
-CREATE INDEX IF NOT EXISTS idx_stock_transfers_wh_date ON stock_transfers(warehouse_id, date DESC);
-CREATE INDEX IF NOT EXISTS idx_stock_orders_wh_date ON stock_orders(warehouse_id, date DESC);
 
 -- ============================================================================
--- COMMERCE — Invoices (Sales, Purchases, Returns)
+-- COMMERCE — Invoices
 -- ============================================================================
 
 CREATE TABLE invoices (
@@ -641,8 +632,13 @@ CREATE INDEX idx_invoices_partner_id ON invoices(partner_id);
 CREATE INDEX idx_invoices_warehouse_id ON invoices(warehouse_id);
 CREATE INDEX idx_invoices_type ON invoices(invoice_type);
 CREATE INDEX idx_invoices_code ON invoices(code);
+-- Добавлен критичный составной индекс по филиалу и дате
+CREATE INDEX idx_invoices_office_date ON invoices(office_id, date DESC);
+CREATE INDEX idx_invoices_partner_date ON invoices(partner_id, date DESC);
+CREATE INDEX idx_invoices_type_date ON invoices(invoice_type, date DESC);
+CREATE INDEX idx_invoices_wh_date ON invoices(warehouse_id, date DESC);
+CREATE INDEX idx_invoices_active_date ON invoices(date DESC) WHERE is_disabled = FALSE;
 
--- Invoice Lines
 CREATE TABLE invoice_lines (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     invoice_id      UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
@@ -659,7 +655,6 @@ CREATE INDEX idx_invoice_lines_invoice_id ON invoice_lines(invoice_id);
 CREATE INDEX idx_invoice_lines_stock_id ON invoice_lines(stock_id);
 CREATE INDEX idx_invoice_lines_source_id ON invoice_lines(source_id) WHERE source_id IS NOT NULL;
 
--- Invoice Currency Convertions
 CREATE TABLE invoice_currency_convertions (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     invoice_id      UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
@@ -673,7 +668,6 @@ CREATE TABLE invoice_currency_convertions (
 
 CREATE INDEX idx_inv_cc_invoice_id ON invoice_currency_convertions(invoice_id);
 
--- Invoice Stock Unit Convertions
 CREATE TABLE invoice_stock_unit_convertions (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     invoice_id      UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
@@ -688,7 +682,6 @@ CREATE TABLE invoice_stock_unit_convertions (
 
 CREATE INDEX idx_inv_suc_invoice_id ON invoice_stock_unit_convertions(invoice_id);
 
--- Invoice Discounts
 CREATE TABLE invoice_discounts (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     invoice_id      UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
@@ -700,7 +693,6 @@ CREATE TABLE invoice_discounts (
 
 CREATE INDEX idx_invoice_discounts_invoice_id ON invoice_discounts(invoice_id);
 
--- Invoice Payments
 CREATE TABLE invoice_payments (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     invoice_id      UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
@@ -712,7 +704,6 @@ CREATE TABLE invoice_payments (
 
 CREATE INDEX idx_invoice_payments_invoice_id ON invoice_payments(invoice_id);
 
--- Invoice Overheads
 CREATE TABLE invoice_overheads (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     invoice_id      UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
@@ -723,12 +714,7 @@ CREATE TABLE invoice_overheads (
 );
 
 CREATE INDEX idx_invoice_overheads_invoice_id ON invoice_overheads(invoice_id);
-CREATE INDEX IF NOT EXISTS idx_invoices_partner_date ON invoices(partner_id, date DESC);
-CREATE INDEX IF NOT EXISTS idx_invoices_type_date ON invoices(invoice_type, date DESC);
-CREATE INDEX IF NOT EXISTS idx_invoices_wh_date ON invoices(warehouse_id, date DESC);
 
--- Частичный индекс для ускорения загрузки "Активных" документов (отсекаем удаленные)
-CREATE INDEX IF NOT EXISTS idx_invoices_active_date ON invoices(date DESC) WHERE is_disabled = FALSE;
 -- ============================================================================
 -- STOCK BALANCES
 -- ============================================================================
@@ -750,7 +736,6 @@ CREATE INDEX idx_stock_balances_warehouse_id ON stock_balances(warehouse_id);
 -- FUNDS MANAGEMENT
 -- ============================================================================
 
--- Funds Slips
 CREATE TABLE funds_slips (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code                VARCHAR(50),
@@ -771,7 +756,11 @@ CREATE TABLE funds_slips (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Funds Slip Lines
+CREATE INDEX idx_funds_slips_date ON funds_slips(date DESC);
+CREATE INDEX idx_funds_slips_partner ON funds_slips(partner_id);
+CREATE INDEX idx_funds_slips_dep_date ON funds_slips(depository_id, date DESC);
+CREATE INDEX idx_funds_slips_office_date ON funds_slips(office_id, date DESC);
+
 CREATE TABLE funds_slip_lines (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     funds_slip_id   UUID NOT NULL REFERENCES funds_slips(id) ON DELETE CASCADE,
@@ -782,7 +771,6 @@ CREATE TABLE funds_slip_lines (
 
 CREATE INDEX idx_funds_slip_lines_slip_id ON funds_slip_lines(funds_slip_id);
 
--- Funds Transfers
 CREATE TABLE funds_transfers (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code                VARCHAR(50),
@@ -801,7 +789,10 @@ CREATE TABLE funds_transfers (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Funds Transfer Lines
+CREATE INDEX idx_funds_transfers_date ON funds_transfers(date DESC);
+CREATE INDEX idx_funds_transfers_from_dep ON funds_transfers(from_depository_id);
+CREATE INDEX idx_funds_transfers_to_dep ON funds_transfers(to_depository_id);
+
 CREATE TABLE funds_transfer_lines (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     funds_transfer_id   UUID NOT NULL REFERENCES funds_transfers(id) ON DELETE CASCADE,
@@ -812,13 +803,6 @@ CREATE TABLE funds_transfer_lines (
 );
 
 CREATE INDEX idx_funds_transfer_lines_transfer_id ON funds_transfer_lines(funds_transfer_id);
-CREATE INDEX IF NOT EXISTS idx_funds_slips_date ON funds_slips(date DESC);
-CREATE INDEX IF NOT EXISTS idx_funds_slips_partner ON funds_slips(partner_id);
-CREATE INDEX IF NOT EXISTS idx_funds_slips_dep_date ON funds_slips(depository_id, date DESC);
-
-CREATE INDEX IF NOT EXISTS idx_funds_transfers_date ON funds_transfers(date DESC);
-CREATE INDEX IF NOT EXISTS idx_funds_transfers_from_dep ON funds_transfers(from_depository_id);
-CREATE INDEX IF NOT EXISTS idx_funds_transfers_to_dep ON funds_transfers(to_depository_id);
 
 -- ============================================================================
 -- EXPENSES & REGISTRIES
@@ -840,7 +824,6 @@ CREATE INDEX idx_expenses_name_trgm ON expenses USING GIN (name gin_trgm_ops);
 CREATE INDEX idx_expenses_group_name ON expenses(group_name);
 CREATE INDEX idx_expenses_is_disabled ON expenses(is_disabled) WHERE NOT is_disabled;
 
--- Expense Slips
 CREATE TABLE expense_slips (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code                VARCHAR(50),
@@ -860,8 +843,8 @@ CREATE TABLE expense_slips (
 );
 
 CREATE INDEX idx_expense_slips_date ON expense_slips(date DESC);
+CREATE INDEX idx_expense_slips_office_date ON expense_slips(office_id, date DESC);
 
--- Expense Slip Lines
 CREATE TABLE expense_slip_lines (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     expense_slip_id     UUID NOT NULL REFERENCES expense_slips(id) ON DELETE CASCADE,
@@ -873,7 +856,6 @@ CREATE TABLE expense_slip_lines (
 
 CREATE INDEX idx_expense_slip_lines_slip_id ON expense_slip_lines(expense_slip_id);
 
--- Daily Funds Registeries
 CREATE TABLE daily_funds_registeries (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code                VARCHAR(50),
@@ -902,21 +884,6 @@ CREATE TABLE daily_funds_registery_lines (
 CREATE INDEX idx_daily_funds_reg_date ON daily_funds_registeries(date DESC);
 CREATE INDEX idx_daily_funds_reg_dep ON daily_funds_registeries(depository_id);
 CREATE INDEX idx_daily_funds_reg_lines_reg_id ON daily_funds_registery_lines(registery_id);
-
--- Partner actions (debit/credit ledger)
-CREATE TABLE IF NOT EXISTS partner_actions (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    partner_id      UUID NOT NULL REFERENCES partners(id) ON DELETE CASCADE,
-    office_id       UUID REFERENCES offices(id),
-    action_type     VARCHAR(20) NOT NULL CHECK (action_type IN ('Debit','Credit')),
-    amount          NUMERIC(18,4) NOT NULL DEFAULT 0,
-    currency_id     UUID REFERENCES currencies(id),
-    description     TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_partner_actions_partner_id ON partner_actions(partner_id);
-CREATE INDEX idx_partner_actions_office_id  ON partner_actions(office_id);
 
 -- ============================================================================
 -- MATERIALIZED VIEW: Stock Search
@@ -968,11 +935,14 @@ DECLARE
     tbl TEXT;
 BEGIN
     FOR tbl IN
-        SELECT table_name
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND column_name = 'updated_at'
-          AND table_name NOT LIKE 'mv_%'
+        SELECT c.table_name
+        FROM information_schema.columns c
+        JOIN information_schema.tables t 
+          ON c.table_name = t.table_name 
+         AND c.table_schema = t.table_schema
+        WHERE c.table_schema = 'public'
+          AND c.column_name = 'updated_at'
+          AND t.table_type = 'BASE TABLE'
     LOOP
         EXECUTE format(
             'CREATE TRIGGER trg_%s_updated_at BEFORE UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION fn_update_timestamp()',

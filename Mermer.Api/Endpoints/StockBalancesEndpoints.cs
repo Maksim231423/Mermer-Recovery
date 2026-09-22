@@ -17,9 +17,12 @@ public static class StockBalancesEndpoints
     {
         var group = app.MapGroup("/api/stock-balances").WithTags("StockBalances");
 
-        // 1. Текущие остатки
+        // 1. ТЕКУЩИЕ ОСТАТКИ (Чтение напрямую из таблицы stock_balances с лимитом)
         group.MapGet("/", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
+            int limit = int.TryParse(req.Query["limit"], out var l) ? Math.Clamp(l, 1, 1000) : 250;
+            int offset = int.TryParse(req.Query["offset"], out var o) ? Math.Max(0, o) : 0;
+
             var whIds = req.Query["warehouseId"]
                 .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
                 .Where(x => x.HasValue).Select(x => x!.Value).ToList();
@@ -28,68 +31,34 @@ public static class StockBalancesEndpoints
                 .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
                 .Where(x => x.HasValue).Select(x => x!.Value).ToList();
 
-            var invQuery = db.InvoiceLines.Where(l => l.Invoice.IsCompleted && !l.Invoice.IsDisabled);
-            if (whIds.Any()) invQuery = invQuery.Where(l => l.Invoice.WarehouseId.HasValue && whIds.Contains(l.Invoice.WarehouseId.Value));
-            if (stockIds.Any()) invQuery = invQuery.Where(l => l.StockId.HasValue && stockIds.Contains(l.StockId.Value));
+            // Читаем напрямую из таблицы остатков, исключая нулевые
+            var query = db.StockBalances
+                .AsNoTracking()
+                .Where(sb => (sb.Income - sb.Expense) != 0);
 
-            var invSums = await invQuery.GroupBy(l => new { Wh = l.Invoice.WarehouseId, St = l.StockId })
-                .Select(g => new {
-                    WarehouseId = g.Key.Wh,
-                    StockId = g.Key.St,
-                    Income = g.Sum(x => x.Invoice.InvoiceType == "Purchase" || x.Invoice.InvoiceType == "SalesReturn" ? x.Quantity : 0),
-                    Expense = g.Sum(x => x.Invoice.InvoiceType == "Sales" || x.Invoice.InvoiceType == "PurchaseReturn" ? x.Quantity : 0)
-                }).ToListAsync(ct);
+            if (whIds.Any())
+                query = query.Where(sb => whIds.Contains(sb.WarehouseId));
 
-            var slipQuery = db.StockSlipLines.Where(l => l.StockSlip.IsCompleted);
-            if (whIds.Any()) slipQuery = slipQuery.Where(l => l.StockSlip.WarehouseId.HasValue && whIds.Contains(l.StockSlip.WarehouseId.Value));
-            if (stockIds.Any()) slipQuery = slipQuery.Where(l => l.StockId.HasValue && stockIds.Contains(l.StockId.Value));
+            if (stockIds.Any())
+                query = query.Where(sb => stockIds.Contains(sb.StockId));
 
-            var slipSums = await slipQuery.GroupBy(l => new { Wh = l.StockSlip.WarehouseId, St = l.StockId })
-                .Select(g => new {
-                    WarehouseId = g.Key.Wh,
-                    StockId = g.Key.St,
-                    Income = g.Sum(x => x.StockSlip.SlipType == "StockOpening" || x.StockSlip.SlipType == "RevisionExceed" ? x.Quantity : 0),
-                    Expense = g.Sum(x => x.StockSlip.SlipType != "StockOpening" && x.StockSlip.SlipType != "RevisionExceed" ? x.Quantity : 0)
-                }).ToListAsync(ct);
+            var balances = await query
+                .OrderBy(sb => sb.StockId)
+                .Skip(offset)
+                .Take(limit)
+                .Select(sb => new
+                {
+                    WarehouseId = sb.WarehouseId.ToString(),
+                    StockId = sb.StockId.ToString(),
+                    Income = sb.Income,
+                    Expense = sb.Expense
+                })
+                .ToListAsync(ct);
 
-            var trOutQuery = db.StockTransferLines.Where(l => l.StockTransfer.IsCompleted && !l.StockTransfer.IsDisabled);
-            if (whIds.Any()) trOutQuery = trOutQuery.Where(l => l.StockTransfer.WarehouseId.HasValue && whIds.Contains(l.StockTransfer.WarehouseId.Value));
-            if (stockIds.Any()) trOutQuery = trOutQuery.Where(l => l.StockId.HasValue && stockIds.Contains(l.StockId.Value));
-
-            var trOutSums = await trOutQuery.GroupBy(l => new { Wh = l.StockTransfer.WarehouseId, St = l.StockId })
-                .Select(g => new {
-                    WarehouseId = g.Key.Wh,
-                    StockId = g.Key.St,
-                    Income = 0m,
-                    Expense = g.Sum(x => x.Quantity)
-                }).ToListAsync(ct);
-
-            var trInQuery = db.StockTransferLines.Where(l => l.StockTransfer.IsCompleted && !l.StockTransfer.IsDisabled);
-            if (whIds.Any()) trInQuery = trInQuery.Where(l => l.StockTransfer.DestinationWarehouseId.HasValue && whIds.Contains(l.StockTransfer.DestinationWarehouseId.Value));
-            if (stockIds.Any()) trInQuery = trInQuery.Where(l => l.StockId.HasValue && stockIds.Contains(l.StockId.Value));
-
-            var trInSums = await trInQuery.GroupBy(l => new { Wh = l.StockTransfer.DestinationWarehouseId, St = l.StockId })
-                .Select(g => new {
-                    WarehouseId = g.Key.Wh,
-                    StockId = g.Key.St,
-                    Income = g.Sum(x => x.ReceivedQuantity),
-                    Expense = 0m
-                }).ToListAsync(ct);
-
-            var all = invSums.Concat(slipSums).Concat(trOutSums).Concat(trInSums)
-                .Where(x => x.WarehouseId.HasValue && x.StockId.HasValue)
-                .GroupBy(x => new { x.WarehouseId, x.StockId })
-                .Select(g => new {
-                    WarehouseId = g.Key.WarehouseId.ToString(),
-                    StockId = g.Key.StockId.ToString(),
-                    Income = g.Sum(x => x.Income),
-                    Expense = g.Sum(x => x.Expense)
-                }).ToList();
-
-            return Results.Ok(all);
+            return Results.Ok(balances);
         });
 
-        // 2. Отчет по типам документов
+        // 2. ОТЧЕТ ПО ТИПАМ ДОКУМЕНТОВ
         group.MapGet("/by-type", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             DateTimeOffset dateFrom = DateTimeOffset.MinValue;
@@ -120,9 +89,13 @@ public static class StockBalancesEndpoints
 
             if (filterStockGuid.HasValue)
                 stocksQuery = stocksQuery.Where(s => s.Id == filterStockGuid.Value);
+            else
+                stocksQuery = stocksQuery.Take(150); // Ограничение выборки номенклатуры
 
             var stocks = await stocksQuery.ToListAsync(ct);
-            if (!stocks.Any()) return Results.Ok(new object[0]);
+            if (!stocks.Any()) return Results.Ok(Array.Empty<object>());
+
+            var stockGuids = stocks.Select(s => s.Id).ToList();
 
             var slipsQuery = db.StockSlips.Include(s => s.Lines).AsNoTracking().Where(s => s.IsCompleted);
             if (whIds.Any()) slipsQuery = slipsQuery.Where(s => s.WarehouseId.HasValue && whIds.Contains(s.WarehouseId.Value));
@@ -142,7 +115,7 @@ public static class StockBalancesEndpoints
             {
                 foreach (var l in s.Lines ?? Enumerable.Empty<Data.Postgres.Entities.StockSlipLineEntity>())
                 {
-                    if (!l.StockId.HasValue || !s.WarehouseId.HasValue) continue;
+                    if (!l.StockId.HasValue || !s.WarehouseId.HasValue || !stockGuids.Contains(l.StockId.Value)) continue;
                     allMovements.Add(new StockMovementRecord(
                         s.WarehouseId.Value, l.StockId.Value, s.Date, s.SlipType,
                         s.SlipType == "StockOpening" || s.SlipType == "RevisionExceed" ? l.Quantity : 0m,
@@ -155,7 +128,7 @@ public static class StockBalancesEndpoints
             {
                 foreach (var l in t.Lines ?? Enumerable.Empty<Data.Postgres.Entities.StockTransferLineEntity>())
                 {
-                    if (!l.StockId.HasValue) continue;
+                    if (!l.StockId.HasValue || !stockGuids.Contains(l.StockId.Value)) continue;
                     if (t.WarehouseId.HasValue)
                         allMovements.Add(new StockMovementRecord(t.WarehouseId.Value, l.StockId.Value, t.Date, "StockTransferSource", 0m, l.Quantity));
                     if (t.DestinationWarehouseId.HasValue)
@@ -167,7 +140,7 @@ public static class StockBalancesEndpoints
             {
                 foreach (var l in inv.Lines ?? Enumerable.Empty<Data.Postgres.Entities.InvoiceLineEntity>())
                 {
-                    if (!l.StockId.HasValue || !inv.WarehouseId.HasValue) continue;
+                    if (!l.StockId.HasValue || !inv.WarehouseId.HasValue || !stockGuids.Contains(l.StockId.Value)) continue;
                     bool isIncome = inv.InvoiceType == "Purchase" || inv.InvoiceType == "SalesReturn";
                     allMovements.Add(new StockMovementRecord(
                         inv.WarehouseId.Value, l.StockId.Value, inv.Date, inv.InvoiceType,
@@ -283,7 +256,7 @@ public static class StockBalancesEndpoints
             return Results.Ok(result);
         });
 
-        // 3. Отчет по складам на дату
+        // 3. ОТЧЕТ ПО СКЛАДАМ НА ДАТУ (С ограничением выборки)
         group.MapGet("/by-date-warehouses", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             DateTimeOffset date = DateTimeOffset.UtcNow;
@@ -347,10 +320,10 @@ public static class StockBalancesEndpoints
                 .Where(x => x.Balance != 0)
                 .ToList();
 
-            var validStockIds = allBals.Select(x => x.St).Distinct().ToList();
-            if (stockIds.Any()) validStockIds = validStockIds.Union(stockIds).Distinct().ToList();
+            var validStockIds = allBals.Select(x => x.St).Distinct().Take(200).ToList();
+            if (stockIds.Any()) validStockIds = validStockIds.Union(stockIds).Distinct().Take(200).ToList();
 
-            if (!validStockIds.Any()) return Results.Ok(new object[0]);
+            if (!validStockIds.Any()) return Results.Ok(Array.Empty<object>());
 
             var stocks = await db.Stocks
                 .Include(s => s.Units)
@@ -412,7 +385,7 @@ public static class StockBalancesEndpoints
             return Results.Ok(result);
         });
 
-        // 4. Заглушка для агрегированного отчета
+        // 4. АГРЕГИРОВАННЫЙ ОТЧЕТ
         group.MapGet("/aggregated", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             return Results.Ok(new
@@ -420,7 +393,7 @@ public static class StockBalancesEndpoints
                 StartingBalance = 0,
                 Income = 0,
                 Expense = 0,
-                Lines = new object[0]
+                Lines = Array.Empty<object>()
             });
         });
 

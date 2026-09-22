@@ -30,10 +30,11 @@ public static class StockNameComposersEndpoints
         group.MapGet("/", async (MermerDbContext db, CancellationToken ct) =>
         {
             var list = await db.StockNameComposers
+                .AsNoTracking()
+                .Where(c => !c.IsDisabled)
+                .OrderBy(c => c.Order)
                 .Include(c => c.Values)
                 .AsSplitQuery()
-                .AsNoTracking()
-                .OrderBy(c => c.Order)
                 .ToListAsync(ct);
 
             return Results.Ok(list.Select(c => new
@@ -120,7 +121,8 @@ public static class StockNameComposersEndpoints
                 var o = await db.StockNameComposers.FirstOrDefaultAsync(x => x.Id == guid);
                 if (o != null)
                 {
-                    db.StockNameComposers.Remove(o);
+                    o.IsDisabled = true;
+                    o.UpdatedAt = DateTimeOffset.UtcNow;
                     await db.SaveChangesAsync();
                 }
             }

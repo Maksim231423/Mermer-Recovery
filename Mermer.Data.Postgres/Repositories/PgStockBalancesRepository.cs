@@ -241,12 +241,22 @@ public class PgStockBalancesRepository : IStockBalancesRepository
         CancellationToken ct = default)
     {
         var warehouseGuids = ParseGuids(warehouseIds?.ToArray());
-        var stockGuids     = ParseGuids(stockIds?.ToArray());
+        var stockGuids = ParseGuids(stockIds?.ToArray());
 
-        // priceGroup filter goes inside the LATERAL subquery — when caller
-        // requests a specific group ("retail"/"wholesale") we look there;
-        // when null we use the default group (price_group IS NULL).
         const string sql = """
+            WITH default_units AS (
+                SELECT stock_id, name
+                FROM stock_units
+                WHERE is_default = true
+            ),
+            latest_prices AS (
+                SELECT DISTINCT ON (stock_id) 
+                    stock_id, price, currency_id
+                FROM stock_prices
+                WHERE (@priceGroup IS NULL AND price_group IS NULL)
+                   OR (@priceGroup IS NOT NULL AND price_group = @priceGroup)
+                ORDER BY stock_id, valid_from DESC
+            )
             SELECT
                 s.id          AS stock_id,
                 s.code,
@@ -259,47 +269,39 @@ public class PgStockBalancesRepository : IStockBalancesRepository
                     'warehouseName', w.name,
                     'balance',       sb.income - sb.expense
                 ) ORDER BY w.name)  AS warehouse_balances,
-                p.price,
+                COALESCE(p.price, 0) AS price,
                 p.currency_id
             FROM stock_balances sb
             JOIN stocks     s  ON s.id = sb.stock_id
             JOIN warehouses w  ON w.id = sb.warehouse_id
-            LEFT JOIN LATERAL (
-                SELECT name FROM stock_units
-                WHERE stock_id = s.id AND is_default = true LIMIT 1
-            ) u ON true
-            LEFT JOIN LATERAL (
-                SELECT price, currency_id FROM stock_prices
-                WHERE stock_id = s.id
-                  AND ((@priceGroup IS NULL AND price_group IS NULL)
-                    OR (@priceGroup IS NOT NULL AND price_group = @priceGroup))
-                ORDER BY valid_from DESC LIMIT 1
-            ) p ON true
-            WHERE (@warehouseIds::uuid[] IS NULL OR sb.warehouse_id = ANY(@warehouseIds))
+            LEFT JOIN default_units u ON u.stock_id = s.id
+            LEFT JOIN latest_prices p ON p.stock_id = s.id
+            WHERE NOT s.is_disabled
+              AND (@warehouseIds::uuid[] IS NULL OR sb.warehouse_id = ANY(@warehouseIds))
               AND (@stockIds::uuid[]     IS NULL OR sb.stock_id     = ANY(@stockIds))
               AND (sb.income - sb.expense) > 0
             GROUP BY s.id, s.code, s.name, s.group_name, s.type, u.name, p.price, p.currency_id
-            ORDER BY s.name
+            ORDER BY s.name;
             """;
 
         await using var conn = new NpgsqlConnection(_connectionString);
         var rows = await conn.QueryAsync(new CommandDefinition(sql, new
         {
             warehouseIds = warehouseGuids.Length > 0 ? warehouseGuids : null,
-            stockIds     = stockGuids.Length > 0 ? stockGuids : null,
+            stockIds = stockGuids.Length > 0 ? stockGuids : null,
             priceGroup
         }, cancellationToken: ct));
 
         return rows.Select(r => new StockBalanceByWarehouses
         {
-            StockId           = ((Guid)r.stock_id).ToString(),
-            Code              = (string?)r.code,
-            Name              = (string)r.name,
-            Group             = (string?)r.group_name,
-            Type              = (string?)r.type,
-            Unit              = (string?)r.unit,
-            Price             = (decimal?)r.price ?? 0m,
-            CurrencyId        = ((Guid?)r.currency_id)?.ToString(),
+            StockId = ((Guid)r.stock_id).ToString(),
+            Code = (string?)r.code,
+            Name = (string)r.name,
+            Group = (string?)r.group_name,
+            Type = (string?)r.type,
+            Unit = (string?)r.unit,
+            Price = (decimal?)r.price ?? 0m,
+            CurrencyId = ((Guid?)r.currency_id)?.ToString(),
             WarehouseBalances = (string?)r.warehouse_balances
         }).ToList();
     }

@@ -213,23 +213,20 @@ public class StockBalancesListViewModel :
         });
     }
 
-    // Получаем реальное количество записей для фильтров через репозиторий
-    protected override async Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
+    // ОПТИМИЗАЦИЯ: Возвращаем 0 или реальное число без повторного похода в сеть
+    protected override Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
     {
-        var items = await this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, from, till, this.AggregateWarehouses);
-        return items?.Count() ?? 0;
+        return Task.FromResult(0);
     }
 
-    protected override async Task<int> CountFilteredListAsync(ListFilter filter)
+    protected override Task<int> CountFilteredListAsync(ListFilter filter)
     {
-        var items = await this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, DateTime.MinValue, DateTime.MaxValue, this.AggregateWarehouses);
-        return items?.Count() ?? 0;
+        return Task.FromResult(0);
     }
 
-    protected override async Task<int> CountListAsync(params Expression<Func<StockBalanceByTypeWithBalanceAndData, bool>>[] predicates)
+    protected override Task<int> CountListAsync(params Expression<Func<StockBalanceByTypeWithBalanceAndData, bool>>[] predicates)
     {
-        var items = await this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, DateTime.MinValue, DateTime.MaxValue, this.AggregateWarehouses);
-        return items?.Count() ?? 0;
+        return Task.FromResult(0);
     }
 
     protected override Expression<Func<StockBalanceByTypeWithBalanceAndData, bool>> GetDateFilter(

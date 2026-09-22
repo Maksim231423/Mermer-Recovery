@@ -17,18 +17,49 @@ public static class StockRepriceEndpoints
     {
         var group = app.MapGroup("/api/stock-reprice-effects").WithTags("StockReprice");
 
+        // 1. БЫСТРЫЙ ПОДСЧЕТ КОЛИЧЕСТВА СОБЫТИЙ (БЕЗ ВЫГРУЗКИ ВСЕЙ БАЗЫ В ПАМЯТЬ)
         group.MapGet("/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            var effects = await CalculateEffectsAsync(req, db, ct);
-            return Results.Ok(effects.Count);
+            var (fUtc, tUtc) = ParseDates(req);
+
+            var priceEventsCount = await db.StockPrices
+                .AsNoTracking()
+                .Where(p => p.ValidFrom >= fUtc && p.ValidFrom <= tUtc)
+                .Select(p => p.ValidFrom)
+                .Distinct()
+                .CountAsync(ct);
+
+            return Results.Ok(priceEventsCount);
         });
 
+        // 2. ДАТЫ ПЕРЕОЦЕНОК (ТОЧЕЧНАЯ ВЫБОРКА ИЗ ТАБЛИЦЫ ЦЕН И КУРСОВ)
         group.MapGet("/dates", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            var effects = await CalculateEffectsAsync(req, db, ct);
-            return Results.Ok(effects.Select(x => x.ChangeDate).Distinct().ToList());
+            var (fUtc, tUtc) = ParseDates(req);
+
+            var priceDates = await db.StockPrices
+                .AsNoTracking()
+                .Where(p => p.ValidFrom >= fUtc && p.ValidFrom <= tUtc)
+                .Select(p => p.ValidFrom)
+                .Distinct()
+                .ToListAsync(ct);
+
+            var rateDates = await db.CurrencyRates
+                .AsNoTracking()
+                .Where(r => r.ValidFrom >= fUtc && r.ValidFrom <= tUtc)
+                .Select(r => r.ValidFrom)
+                .Distinct()
+                .ToListAsync(ct);
+
+            var allDates = priceDates.Union(rateDates)
+                .OrderByDescending(d => d)
+                .Select(d => DateTime.SpecifyKind(d, DateTimeKind.Utc))
+                .ToList();
+
+            return Results.Ok(allDates);
         });
 
+        // 3. ПОЛНЫЙ РАСЧЕТ ЭФФЕКТОВ (С ПАГИНАЦИЕЙ И ЗАЩИТОЙ ПО ПАМЯТИ)
         group.MapGet("/", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             var effects = await CalculateEffectsAsync(req, db, ct);
@@ -38,18 +69,26 @@ public static class StockRepriceEndpoints
         return app;
     }
 
-    private static async Task<List<StockRepriceEffectDto>> CalculateEffectsAsync(HttpRequest req, MermerDbContext db, CancellationToken ct)
+    private static (DateTime from, DateTime till) ParseDates(HttpRequest req)
     {
-        DateTime fUtc = DateTime.MinValue;
-        DateTime tUtc = DateTime.MaxValue;
+        DateTime fUtc = DateTime.UtcNow.AddMonths(-1).Date;
+        DateTime tUtc = DateTime.UtcNow.Date;
 
         string? fromStr = req.Query["from"].FirstOrDefault();
         if (!string.IsNullOrEmpty(fromStr) && DateTime.TryParse(fromStr.Replace(" ", "+"), out var pf))
-            fUtc = DateTime.SpecifyKind(pf, DateTimeKind.Utc);
+            fUtc = DateTime.SpecifyKind(pf.Date, DateTimeKind.Utc);
 
         string? tillStr = req.Query["till"].FirstOrDefault();
         if (!string.IsNullOrEmpty(tillStr) && DateTime.TryParse(tillStr.Replace(" ", "+"), out var pt))
-            tUtc = DateTime.SpecifyKind(pt, DateTimeKind.Utc);
+            tUtc = DateTime.SpecifyKind(pt.Date, DateTimeKind.Utc);
+
+        return (fUtc, tUtc);
+    }
+
+    private static async Task<List<StockRepriceEffectDto>> CalculateEffectsAsync(HttpRequest req, MermerDbContext db, CancellationToken ct)
+    {
+        var (fUtc, tUtc) = ParseDates(req);
+        int limit = int.TryParse(req.Query["limit"], out var l) ? Math.Clamp(l, 1, 1000) : 300;
 
         var whIds = req.Query["warehouseId"]
             .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
@@ -57,7 +96,7 @@ public static class StockRepriceEndpoints
             .Select(x => x!.Value)
             .ToList();
 
-        var currencies = await db.Currencies.AsNoTracking().ToListAsync(ct);
+        var currencies = await db.Currencies.AsNoTracking().Where(c => !c.IsDisabled).ToListAsync(ct);
         var rates = await db.CurrencyRates.AsNoTracking().ToListAsync(ct);
 
         decimal GetRateValue(Guid currId, DateTime date)
@@ -71,8 +110,12 @@ public static class StockRepriceEndpoints
 
         var affectedStockIds = new HashSet<Guid>();
 
-        // 1. Прямые изменения цен
-        var priceChanges = await db.StockPrices.Where(p => p.ValidFrom >= fUtc && p.ValidFrom <= tUtc).AsNoTracking().ToListAsync(ct);
+        // 1. Прямые изменения цен за период
+        var priceChanges = await db.StockPrices
+            .Where(p => p.ValidFrom >= fUtc && p.ValidFrom <= tUtc)
+            .AsNoTracking()
+            .ToListAsync(ct);
+
         foreach (var p in priceChanges)
             affectedStockIds.Add(p.StockId);
 
@@ -94,7 +137,8 @@ public static class StockRepriceEndpoints
             decimal diff = (rc.Multiplier / currDiv) - (prevRate.Multiplier / prevDiv);
             if (diff == 0) continue;
 
-            var stocksUsingCurr = allPricesForRates.Where(p => p.CurrencyId == rc.CurrencyId && p.ValidFrom <= rc.ValidFrom)
+            var stocksUsingCurr = allPricesForRates
+                .Where(p => p.CurrencyId == rc.CurrencyId && p.ValidFrom <= rc.ValidFrom)
                 .GroupBy(p => p.StockId)
                 .Select(g => g.OrderByDescending(p => p.ValidFrom).First())
                 .ToList();
@@ -115,11 +159,13 @@ public static class StockRepriceEndpoints
         var results = new List<StockRepriceEffectDto>();
         if (!sIds.Any()) return results;
 
-        // 3. Поднимаем историю движений для затронутых товаров в память
+        // 3. Поднимаем историю движений строго для затронутых товаров
         var allMovements = new List<Movement>();
 
-        var invs = await db.InvoiceLines.Where(l => l.StockId.HasValue && sIds.Contains(l.StockId.Value) && l.Invoice.IsCompleted && !l.Invoice.IsDisabled && l.Invoice.Date <= tUtc)
+        var invs = await db.InvoiceLines
+            .Where(l => l.StockId.HasValue && sIds.Contains(l.StockId.Value) && l.Invoice.IsCompleted && !l.Invoice.IsDisabled && l.Invoice.Date <= tUtc)
             .Select(l => new { Wh = l.Invoice.WarehouseId, St = l.StockId, Dt = l.Invoice.Date, Qty = l.Quantity, Type = l.Invoice.InvoiceType })
+            .AsNoTracking()
             .ToListAsync(ct);
 
         foreach (var i in invs)
@@ -129,8 +175,10 @@ public static class StockRepriceEndpoints
             allMovements.Add(new Movement { Wh = i.Wh.Value, St = i.St.Value, Dt = i.Dt.UtcDateTime, Qty = isInc ? i.Qty : -i.Qty });
         }
 
-        var slips = await db.StockSlipLines.Where(l => l.StockId.HasValue && sIds.Contains(l.StockId.Value) && l.StockSlip.IsCompleted && l.StockSlip.Date <= tUtc)
+        var slips = await db.StockSlipLines
+            .Where(l => l.StockId.HasValue && sIds.Contains(l.StockId.Value) && l.StockSlip.IsCompleted && l.StockSlip.Date <= tUtc)
             .Select(l => new { Wh = l.StockSlip.WarehouseId, St = l.StockId, Dt = l.StockSlip.Date, Qty = l.Quantity, Type = l.StockSlip.SlipType })
+            .AsNoTracking()
             .ToListAsync(ct);
 
         foreach (var s in slips)
@@ -140,8 +188,10 @@ public static class StockRepriceEndpoints
             allMovements.Add(new Movement { Wh = s.Wh.Value, St = s.St.Value, Dt = s.Dt.UtcDateTime, Qty = isInc ? s.Qty : -s.Qty });
         }
 
-        var trs = await db.StockTransferLines.Where(l => l.StockId.HasValue && sIds.Contains(l.StockId.Value) && l.StockTransfer.IsCompleted && !l.StockTransfer.IsDisabled && l.StockTransfer.Date <= tUtc)
+        var trs = await db.StockTransferLines
+            .Where(l => l.StockId.HasValue && sIds.Contains(l.StockId.Value) && l.StockTransfer.IsCompleted && !l.StockTransfer.IsDisabled && l.StockTransfer.Date <= tUtc)
             .Select(l => new { WhFrom = l.StockTransfer.WarehouseId, WhTo = l.StockTransfer.DestinationWarehouseId, St = l.StockId, Dt = l.StockTransfer.Date, Qty = l.Quantity, RecQty = l.ReceivedQuantity })
+            .AsNoTracking()
             .ToListAsync(ct);
 
         foreach (var tr in trs)
@@ -151,12 +201,31 @@ public static class StockRepriceEndpoints
             if (tr.WhTo.HasValue) allMovements.Add(new Movement { Wh = tr.WhTo.Value, St = tr.St.Value, Dt = tr.Dt.UtcDateTime, Qty = tr.RecQty });
         }
 
+        // Индексация движений в памяти по (StockId, WarehouseId) для устранения O(N*M) фриза
+        var movesLookup = allMovements
+            .GroupBy(m => (m.St, m.Wh))
+            .ToDictionary(g => g.Key, g => g.OrderBy(m => m.Dt).ToList());
+
         decimal GetBal(Guid stockId, Guid warehouseId, DateTime date)
         {
-            return allMovements.Where(m => m.St == stockId && m.Wh == warehouseId && m.Dt <= date).Sum(m => m.Qty);
+            if (movesLookup.TryGetValue((stockId, warehouseId), out var moves))
+            {
+                decimal sum = 0m;
+                for (int i = 0; i < moves.Count; i++)
+                {
+                    if (moves[i].Dt > date) break;
+                    sum += moves[i].Qty;
+                }
+                return sum;
+            }
+            return 0m;
         }
 
-        var stocksDict = await db.Stocks.Where(s => sIds.Contains(s.Id)).AsNoTracking().ToDictionaryAsync(s => s.Id, s => s, ct);
+        var stocksDict = await db.Stocks
+            .Where(s => sIds.Contains(s.Id))
+            .AsNoTracking()
+            .ToDictionaryAsync(s => s.Id, s => s, ct);
+
         var targetWhIds = whIds.Any() ? whIds : allMovements.Select(m => m.Wh).Distinct().ToList();
         var allPricesList = await db.StockPrices.Where(p => sIds.Contains(p.StockId)).AsNoTracking().ToListAsync(ct);
 
@@ -219,7 +288,10 @@ public static class StockRepriceEndpoints
             }
         }
 
-        return results.OrderBy(r => r.ChangeDate).ToList();
+        return results
+            .OrderByDescending(r => r.ChangeDate)
+            .Take(limit)
+            .ToList();
     }
 
     private class Movement

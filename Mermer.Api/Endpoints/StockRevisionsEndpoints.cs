@@ -20,10 +20,20 @@ public static class StockRevisionsEndpoints
     {
         var group = app.MapGroup("/api/warehousing/revisions").WithTags("StockRevisions");
 
-        // 1. СПИСОК ИНВЕНТАРИЗАЦИЙ
-        group.MapGet("/", async (MermerDbContext db, CancellationToken ct) =>
+        // 1. СПИСОК ИНВЕНТАРИЗАЦИЙ (С ЛИМИТОМ)
+        group.MapGet("/", async (int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
-            var list = await db.StockRevisions.AsNoTracking().OrderByDescending(r => r.Date).ToListAsync(ct);
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 500) : 150;
+            int skip = offset.GetValueOrDefault(0);
+
+            var list = await db.StockRevisions
+                .AsNoTracking()
+                .Where(r => !r.IsDisabled)
+                .OrderByDescending(r => r.Date)
+                .Skip(skip)
+                .Take(take)
+                .ToListAsync(ct);
+
             return Results.Ok(list.Select(r => new
             {
                 Id = r.Id.ToString(),
@@ -241,7 +251,7 @@ public static class StockRevisionsEndpoints
         group.MapPost("/", saveRevisionHandler);
         group.MapPut("/{id}", saveRevisionHandler);
 
-        // 7. ФАСЕТЫ (GroupNames, TagNames, Date)
+        // 7. ФАСЕТЫ
         group.MapGet("/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
             string? fields = ctx.Request.Query["fields"].ToString();
@@ -257,7 +267,7 @@ public static class StockRevisionsEndpoints
                 {
                     var groups = await db.StockRevisions
                         .AsNoTracking()
-                        .Where(x => !string.IsNullOrEmpty(x.GroupName))
+                        .Where(x => !string.IsNullOrEmpty(x.GroupName) && !x.IsDisabled)
                         .GroupBy(x => x.GroupName!)
                         .Select(g => new { Key = g.Key, Count = g.Count() })
                         .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
@@ -268,7 +278,7 @@ public static class StockRevisionsEndpoints
                 {
                     var allTags = await db.StockRevisions
                         .AsNoTracking()
-                        .Where(x => x.Tags != null && x.Tags.Length > 0)
+                        .Where(x => x.Tags != null && x.Tags.Length > 0 && !x.IsDisabled)
                         .Select(x => x.Tags)
                         .ToListAsync(ct);
 
@@ -281,18 +291,22 @@ public static class StockRevisionsEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var now = DateTime.Now.Date;
-                    var revs = await db.StockRevisions.AsNoTracking().Where(r => !r.IsDisabled).Select(r => r.Date).ToListAsync(ct);
-                    var localDates = revs.Select(d => d.ToLocalTime().Date).ToList();
+                    var todayUtc = DateTime.UtcNow.Date;
+                    var weekStart = todayUtc.AddDays(-7);
+                    var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
 
-                    var dateFacets = new Dictionary<string, int>
+                    var countToday = await db.StockRevisions.CountAsync(r => !r.IsDisabled && r.Date >= todayUtc, ct);
+                    var countWeek = await db.StockRevisions.CountAsync(r => !r.IsDisabled && r.Date >= weekStart, ct);
+                    var countMonth = await db.StockRevisions.CountAsync(r => !r.IsDisabled && r.Date >= monthStart, ct);
+                    var countAll = await db.StockRevisions.CountAsync(r => !r.IsDisabled, ct);
+
+                    result[field] = new Dictionary<string, int>
                     {
-                        { "#Today", localDates.Count(d => d == now) },
-                        { "#This Week", localDates.Count(d => d >= now.AddDays(-7)) },
-                        { "#This Month", localDates.Count(d => d.Month == now.Month && d.Year == now.Year) },
-                        { "#All Records", localDates.Count }
+                        { "#Today", countToday },
+                        { "#This Week", countWeek },
+                        { "#This Month", countMonth },
+                        { "#All Records", countAll }
                     };
-                    result[field] = dateFacets;
                 }
                 else
                 {

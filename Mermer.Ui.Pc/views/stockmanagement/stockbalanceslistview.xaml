@@ -68,14 +68,15 @@
                 </dxlc:LayoutGroup>
             </dxlc:LayoutGroup>
 
-            <dx:PLinqInstantFeedbackDataSource Name="ParalelLinqInstantSource" ItemsSource="{Binding List}"/>
+            
 
             <!-- ДОДАНО: SelectedItem з підключеним конвертером -->
-            <ctrl:StyledGridControl x:Name="GridControl" ItemsSource="{Binding ElementName=ParalelLinqInstantSource, Path=Data}"
-                              SelectedItem="{Binding SelectedItem, Converter={StaticResource IgnoreNotLoadedConverter}}"
-                              PrintButton="{Binding ElementName=PrintButton, Mode=OneWay}"
-                              FilterButton="{Binding ElementName=FilterButton, Mode=OneWay}"
-                              SearchControl="{Binding ElementName=SearchControl, Mode=OneWay}">
+            <ctrl:StyledGridControl x:Name="GridControl" 
+                                    ItemsSource="{Binding List}"
+                                    SelectedItem="{Binding SelectedItem, Converter={StaticResource IgnoreNotLoadedConverter}}"
+                                    PrintButton="{Binding ElementName=PrintButton, Mode=OneWay}"
+                                    FilterButton="{Binding ElementName=FilterButton, Mode=OneWay}"
+                                    SearchControl="{Binding ElementName=SearchControl, Mode=OneWay}">
                 <dxg:GridControl.Bands>
                     <dxg:GridControlBand Header="{Localize Stock}">
                         <dxg:GridColumn FieldName="StockCode" ReadOnly="true" AllowEditing="False" AllowCellMerge="True"

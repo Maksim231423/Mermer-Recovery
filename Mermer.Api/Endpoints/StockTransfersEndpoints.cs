@@ -21,10 +21,13 @@ public static class StockTransfersEndpoints
         var group = routes.MapGroup("/api/warehousing/transfers").WithTags("StockTransfers");
 
         // 1. СПИСОК ПЕРЕМЕЩЕНИЙ
-        group.MapGet("/", async (DateTime? from, DateTime? till, string? warehouseId, string? destinationWarehouseId, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/", async (DateTime? from, DateTime? till, string? warehouseId, string? destinationWarehouseId, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTimeOffset startDate = from.HasValue ? new DateTimeOffset(from.Value.ToUniversalTime()) : DateTimeOffset.MinValue;
-            DateTimeOffset endDate = till.HasValue ? new DateTimeOffset(till.Value.ToUniversalTime()) : DateTimeOffset.MaxValue;
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
+            int skip = offset.GetValueOrDefault(0);
+
+            DateTimeOffset startDate = from.HasValue ? new DateTimeOffset(from.Value.ToUniversalTime()) : DateTimeOffset.UtcNow.AddMonths(-1);
+            DateTimeOffset endDate = till.HasValue ? new DateTimeOffset(till.Value.ToUniversalTime()) : DateTimeOffset.UtcNow;
 
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
                          ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
@@ -32,9 +35,8 @@ public static class StockTransfersEndpoints
             var convertions = await GetCurrencyConvertionsAsync(db, DateTime.UtcNow, ct);
 
             var query = db.StockTransfers
-                .Include(t => t.Lines)
                 .AsNoTracking()
-                .Where(t => t.Date >= startDate && t.Date <= endDate);
+                .Where(t => t.Date >= startDate && t.Date <= endDate && !t.IsDisabled);
 
             if (Guid.TryParse(warehouseId, out var srcGuid))
                 query = query.Where(t => t.WarehouseId == srcGuid);
@@ -42,7 +44,13 @@ public static class StockTransfersEndpoints
             if (Guid.TryParse(destinationWarehouseId, out var dstGuid))
                 query = query.Where(t => t.DestinationWarehouseId == dstGuid);
 
-            var transfers = await query.OrderByDescending(t => t.Date).ToListAsync(ct);
+            var transfers = await query
+                .OrderByDescending(t => t.Date)
+                .Skip(skip)
+                .Take(take)
+                .Include(t => t.Lines)
+                .AsSplitQuery()
+                .ToListAsync(ct);
 
             var result = transfers.Select(t =>
             {
@@ -93,7 +101,7 @@ public static class StockTransfersEndpoints
         group.MapGet("/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
         {
             if (!Guid.TryParse(id, out var guid)) return Results.NotFound();
-            var t = await db.StockTransfers.Include(x => x.Lines).FirstOrDefaultAsync(x => x.Id == guid, ct);
+            var t = await db.StockTransfers.Include(x => x.Lines).AsNoTracking().FirstOrDefaultAsync(x => x.Id == guid, ct);
             if (t == null) return Results.NotFound();
 
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
@@ -277,7 +285,7 @@ public static class StockTransfersEndpoints
             return Results.Ok();
         });
 
-        // 5. ФАСЕТЫ
+        // 5. ФАСЕТЫ (БЕЗ N+1 И СКАНИРОВАНИЯ ВСЕЙ ТАБЛИЦЫ)
         group.MapGet("/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
             string? fields = ctx.Request.Query["fields"].ToString();
@@ -293,7 +301,7 @@ public static class StockTransfersEndpoints
                 {
                     var groups = await db.StockTransfers
                         .AsNoTracking()
-                        .Where(x => !string.IsNullOrEmpty(x.GroupName))
+                        .Where(x => !string.IsNullOrEmpty(x.GroupName) && !x.IsDisabled)
                         .GroupBy(x => x.GroupName!)
                         .Select(g => new { Key = g.Key, Count = g.Count() })
                         .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
@@ -304,7 +312,7 @@ public static class StockTransfersEndpoints
                 {
                     var allTags = await db.StockTransfers
                         .AsNoTracking()
-                        .Where(x => x.Tags != null && x.Tags.Length > 0)
+                        .Where(x => x.Tags != null && x.Tags.Length > 0 && !x.IsDisabled)
                         .Select(x => x.Tags)
                         .ToListAsync(ct);
 
@@ -317,18 +325,22 @@ public static class StockTransfersEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var now = DateTime.Now.Date;
-                    var transfers = await db.StockTransfers.AsNoTracking().Where(r => !r.IsDisabled).Select(r => r.Date).ToListAsync(ct);
-                    var localDates = transfers.Select(d => d.ToLocalTime().Date).ToList();
+                    var todayUtc = DateTime.UtcNow.Date;
+                    var weekStart = todayUtc.AddDays(-7);
+                    var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
 
-                    var dateFacets = new Dictionary<string, int>
+                    var countToday = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= todayUtc, ct);
+                    var countWeek = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= weekStart, ct);
+                    var countMonth = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= monthStart, ct);
+                    var countAll = await db.StockTransfers.CountAsync(r => !r.IsDisabled, ct);
+
+                    result[field] = new Dictionary<string, int>
                     {
-                        { "#Today", localDates.Count(d => d == now) },
-                        { "#This Week", localDates.Count(d => d >= now.AddDays(-7)) },
-                        { "#This Month", localDates.Count(d => d.Month == now.Month && d.Year == now.Year) },
-                        { "#All Records", localDates.Count }
+                        { "#Today", countToday },
+                        { "#This Week", countWeek },
+                        { "#This Month", countMonth },
+                        { "#All Records", countAll }
                     };
-                    result[field] = dateFacets;
                 }
                 else
                 {

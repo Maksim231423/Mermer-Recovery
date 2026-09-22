@@ -20,10 +20,20 @@ public static class ExpensesEndpoints
     {
         var group = routes.MapGroup("/api/expenses").WithTags("Expenses");
 
-        // 1. Получение списка всех статей
-        group.MapGet("/", async (MermerDbContext db, CancellationToken ct) =>
+        // 1. Получение списка всех статей с пагинацией
+        group.MapGet("/", async (int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
-            var expenses = await db.Expenses.AsNoTracking().Where(e => !e.IsDisabled).ToListAsync(ct);
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 500) : 200;
+            int skip = offset.GetValueOrDefault(0);
+
+            var expenses = await db.Expenses
+                .AsNoTracking()
+                .Where(e => !e.IsDisabled)
+                .OrderBy(e => e.Name)
+                .Skip(skip)
+                .Take(take)
+                .ToListAsync(ct);
+
             var result = expenses.Select(e => new
             {
                 Id = e.Id.ToString(),
@@ -153,15 +163,16 @@ public static class ExpensesEndpoints
             return Results.NoContent();
         });
 
-        // 5. Фасеты для выпадающих списков (TypeNames, GroupNames, TagNames)
+        // 5. Фасеты для выпадающих списков (оптимизированный вариант)
         group.MapGet("/facets", async (HttpContext context, MermerDbContext db, CancellationToken ct) =>
         {
             var result = new Dictionary<string, Dictionary<string, int>>();
-            var all = await db.Expenses.AsNoTracking().Where(e => !e.IsDisabled).ToListAsync(ct);
 
-            var typeDict = all.Where(x => !string.IsNullOrWhiteSpace(x.Type))
-                              .GroupBy(x => x.Type!)
-                              .ToDictionary(g => g.Key, g => g.Count());
+            var typeDict = await db.Expenses.AsNoTracking()
+                .Where(x => !string.IsNullOrEmpty(x.Type) && !x.IsDisabled)
+                .GroupBy(x => x.Type!)
+                .Select(g => new { Key = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
 
             var defaultTypes = new[] { "Operating", "Administrative", "Commercial", "Financial", "Other" };
             foreach (var dt in defaultTypes)
@@ -169,9 +180,11 @@ public static class ExpensesEndpoints
                 if (!typeDict.ContainsKey(dt)) typeDict[dt] = 0;
             }
 
-            var groupDict = all.Where(x => !string.IsNullOrWhiteSpace(x.Group))
-                               .GroupBy(x => x.Group!)
-                               .ToDictionary(g => g.Key, g => g.Count());
+            var groupDict = await db.Expenses.AsNoTracking()
+                .Where(x => !string.IsNullOrEmpty(x.Group) && !x.IsDisabled)
+                .GroupBy(x => x.Group!)
+                .Select(g => new { Key = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
 
             var defaultGroups = new[] { "General", "Office", "Rent", "Salary", "Logistics", "Marketing", "Taxes" };
             foreach (var dg in defaultGroups)
@@ -179,11 +192,15 @@ public static class ExpensesEndpoints
                 if (!groupDict.ContainsKey(dg)) groupDict[dg] = 0;
             }
 
-            var tagDict = all.Where(x => x.Tags != null && x.Tags.Length > 0)
-                             .SelectMany(x => x.Tags!)
-                             .Where(x => !string.IsNullOrWhiteSpace(x))
-                             .GroupBy(x => x)
-                             .ToDictionary(g => g.Key, g => g.Count());
+            var allTags = await db.Expenses.AsNoTracking()
+                .Where(x => x.Tags != null && x.Tags.Length > 0 && !x.IsDisabled)
+                .Select(x => x.Tags)
+                .ToListAsync(ct);
+
+            var tagDict = allTags.SelectMany(x => x!)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .GroupBy(x => x)
+                .ToDictionary(g => g.Key, g => g.Count());
 
             result["TypeNames"] = typeDict;
             result["GroupNames"] = groupDict;
@@ -200,7 +217,6 @@ public static class ExpensesEndpoints
     private static List<string> ExtractTagsFromRawJson(JsonElement root)
     {
         var list = new List<string>();
-
         if (!root.TryGetProperty("tags", out var tagsProp) &&
             !root.TryGetProperty("Tags", out tagsProp))
         {
@@ -216,27 +232,8 @@ public static class ExpensesEndpoints
                     var s = item.GetString();
                     if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
                 }
-                else if (item.ValueKind == JsonValueKind.Object)
-                {
-                    if (item.TryGetProperty("Text", out var t) || item.TryGetProperty("Value", out t) || item.TryGetProperty("Name", out t))
-                    {
-                        var s = t.GetString();
-                        if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
-                    }
-                }
             }
         }
-        else if (tagsProp.ValueKind == JsonValueKind.String)
-        {
-            var raw = tagsProp.GetString();
-            if (!string.IsNullOrWhiteSpace(raw))
-            {
-                list.AddRange(raw.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
-                                 .Select(x => x.Trim())
-                                 .Where(x => !string.IsNullOrWhiteSpace(x)));
-            }
-        }
-
         return list.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
@@ -259,9 +256,7 @@ public static class ExpensesEndpoints
         foreach (var name in propNames)
         {
             if (TryGetPropertyCaseInsensitive(element, name, out var prop) && prop.ValueKind == JsonValueKind.String)
-            {
                 return prop.GetString();
-            }
         }
         return null;
     }

@@ -26,9 +26,22 @@ public static class StockAlternativesEndpoints
             return default;
         }
 
-        group.MapGet("/", async (MermerDbContext db, CancellationToken ct) =>
+        // 1. СПИСОК (С ПАГИНАЦИЕЙ)
+        group.MapGet("/", async (int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
-            var list = await db.StockAlternatives.Include(a => a.Lines).AsSplitQuery().AsNoTracking().ToListAsync(ct);
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 500) : 150;
+            int skip = offset.GetValueOrDefault(0);
+
+            var list = await db.StockAlternatives
+                .AsNoTracking()
+                .Where(a => !a.IsDisabled)
+                .OrderBy(a => a.Name)
+                .Skip(skip)
+                .Take(take)
+                .Include(a => a.Lines)
+                .AsSplitQuery()
+                .ToListAsync(ct);
+
             return Results.Ok(list.Select(a => new
             {
                 Id = a.Id.ToString(),
@@ -39,16 +52,23 @@ public static class StockAlternativesEndpoints
             }));
         });
 
+        // 2. ДЛЯ КОНКРЕТНОГО ТОВАРА (В ОДИН ЗАПРОС)
         group.MapGet("/for-stock/{stockId}", async (string stockId, MermerDbContext db, CancellationToken ct) =>
         {
-            if (!Guid.TryParse(stockId, out var sG)) return Results.Ok(new { StockId = stockId, Alternatives = Array.Empty<string>() });
+            if (!Guid.TryParse(stockId, out var sG))
+                return Results.Ok(new { StockId = stockId, Alternatives = Array.Empty<string>() });
 
-            var altIds = await db.StockAlternativeLines.Where(l => l.StockId == sG).Select(l => l.StockAlternativeId).Distinct().ToListAsync(ct);
-            var resultIds = await db.StockAlternativeLines.Where(l => altIds.Contains(l.StockAlternativeId) && l.StockId != sG).Select(l => l.StockId.ToString()).Distinct().ToListAsync(ct);
+            var resultIds = await (
+                from l1 in db.StockAlternativeLines.AsNoTracking()
+                join l2 in db.StockAlternativeLines.AsNoTracking() on l1.StockAlternativeId equals l2.StockAlternativeId
+                where l1.StockId == sG && l2.StockId != sG && l2.StockId != null
+                select l2.StockId!.Value.ToString()
+            ).Distinct().ToListAsync(ct);
 
             return Results.Ok(new { StockId = stockId, Alternatives = resultIds });
         });
 
+        // 3. СОХРАНЕНИЕ
         group.MapPost("/", async (HttpRequest req, MermerDbContext db) =>
         {
             using var reader = new StreamReader(req.Body);
@@ -99,6 +119,7 @@ public static class StockAlternativesEndpoints
             return Results.Ok(new { id = altId });
         });
 
+        // 4. УДАЛЕНИЕ
         group.MapDelete("/{id}", async (string id, MermerDbContext db) =>
         {
             if (Guid.TryParse(id, out var guid))

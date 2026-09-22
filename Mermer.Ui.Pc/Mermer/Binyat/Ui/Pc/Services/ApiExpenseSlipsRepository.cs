@@ -64,12 +64,13 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
 
     private async Task<IEnumerable<ExpenseSlip>> GetAllAsync()
     {
+        // 1. Асинхронная синхронизация несинхронизированных документов в фоне
         _ = Task.Run(async () =>
         {
             try
             {
                 var unsynced = LocalSqliteCache.GetUnsyncedDocuments<ExpenseSlip>(DocType);
-                if (unsynced != null)
+                if (unsynced != null && unsynced.Any())
                 {
                     foreach (var item in unsynced)
                     {
@@ -81,23 +82,32 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
             catch { }
         });
 
-        var localItems = LocalSqliteCache.GetAllDocuments<ExpenseSlip>(DocType)?.ToList() ?? new List<ExpenseSlip>();
-
+        // 2. Получаем данные с сервера
         try
         {
-            var remote = await _restClient.GetAsync<IEnumerable<ExpenseSlip>>("/api/spending/slips");
+            var remote = await _restClient.GetAsync<List<ExpenseSlip>>("/api/spending/slips");
             if (remote != null && remote.Any())
             {
-                foreach (var item in remote)
+                // ОПТИМИЗАЦИЯ: Сохранение в локальный SQLite-кэш убираем из блокирующего пути UI в фоновый Task
+                _ = Task.Run(() =>
                 {
-                    LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
-                }
-                return remote.ToList();
+                    try
+                    {
+                        foreach (var item in remote)
+                        {
+                            LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
+                        }
+                    }
+                    catch { }
+                });
+
+                return remote;
             }
         }
         catch { }
 
-        return localItems;
+        // Если сеть недоступна — отдаем локальный кэш
+        return LocalSqliteCache.GetAllDocuments<ExpenseSlip>(DocType)?.ToList() ?? new List<ExpenseSlip>();
     }
 
     public async Task<int> CountAsync(params Expression<Func<ExpenseSlip, bool>>[] predicates)

@@ -117,12 +117,19 @@ public class RestClient
     private static async Task<T> ExportResult<T>(HttpResponseMessage response, string address = "")
     {
         if (!response.IsSuccessStatusCode)
-            throw await RestClient.ExportException(response, address);
+            throw await RestClient.ExportException(response, address).ConfigureAwait(false);
 
-        string str = await response.Content.ReadAsStringAsync();
-        if (string.IsNullOrWhiteSpace(str)) return default(T);
+        // Читаем поток без захвата контекста UI
+        using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        using var sr = new System.IO.StreamReader(stream);
+        using var reader = new JsonTextReader(sr);
 
-        return JsonConvert.DeserializeObject<T>(str, JsonSerializerSettings);
+        // Парсинг выполняется строго в пуле фоновых потоков (Task.Run), не фризя интерфейс!
+        return await Task.Run(() =>
+        {
+            var serializer = JsonSerializer.Create(JsonSerializerSettings);
+            return serializer.Deserialize<T>(reader);
+        }).ConfigureAwait(false);
     }
 
     private static async Task<Exception> ExportException(HttpResponseMessage response, string address = "")

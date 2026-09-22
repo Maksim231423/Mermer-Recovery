@@ -21,16 +21,17 @@ public static class StockOrdersEndpoints
         var group = app.MapGroup("/api/warehousing/orders").WithTags("StockOrders");
 
         // 1. СПИСОК ЗАКАЗОВ
-        group.MapGet("/", async (DateTime? from, DateTime? till, string? warehouseId, string? partnerId, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/", async (DateTime? from, DateTime? till, string? warehouseId, string? partnerId, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTimeOffset startDate = from.HasValue ? new DateTimeOffset(from.Value.ToUniversalTime()) : DateTimeOffset.MinValue;
-            DateTimeOffset endDate = till.HasValue ? new DateTimeOffset(till.Value.ToUniversalTime()) : DateTimeOffset.MaxValue;
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
+            int skip = offset.GetValueOrDefault(0);
+
+            DateTimeOffset startDate = from.HasValue ? new DateTimeOffset(from.Value.ToUniversalTime()) : DateTimeOffset.UtcNow.AddMonths(-1);
+            DateTimeOffset endDate = till.HasValue ? new DateTimeOffset(till.Value.ToUniversalTime()) : DateTimeOffset.UtcNow;
 
             var query = db.StockOrders
-                .Include(o => o.Lines)
-                .Include(o => o.UnitConvertions)
                 .AsNoTracking()
-                .Where(o => o.Date >= startDate && o.Date <= endDate);
+                .Where(o => o.Date >= startDate && o.Date <= endDate && !o.IsDisabled);
 
             if (Guid.TryParse(warehouseId, out var wG))
                 query = query.Where(o => o.WarehouseId == wG);
@@ -38,7 +39,14 @@ public static class StockOrdersEndpoints
             if (Guid.TryParse(partnerId, out var pG))
                 query = query.Where(o => o.PartnerId == pG);
 
-            var list = await query.OrderByDescending(o => o.Date).ToListAsync(ct);
+            var list = await query
+                .OrderByDescending(o => o.Date)
+                .Skip(skip)
+                .Take(take)
+                .Include(o => o.Lines)
+                .Include(o => o.UnitConvertions)
+                .AsSplitQuery()
+                .ToListAsync(ct);
 
             return Results.Ok(list.Select(o => new
             {
@@ -82,6 +90,8 @@ public static class StockOrdersEndpoints
             var o = await db.StockOrders
                 .Include(x => x.Lines)
                 .Include(x => x.UnitConvertions)
+                .AsSplitQuery()
+                .AsNoTracking()
                 .FirstOrDefaultAsync(x => x.Id == orderId, ct);
 
             if (o == null) return Results.NotFound();
@@ -120,7 +130,7 @@ public static class StockOrdersEndpoints
             });
         });
 
-        // 3. ФАСЕТЫ (GroupNames, TagNames, Date)
+        // 3. ФАСЕТЫ
         group.MapGet("/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
             string? fields = ctx.Request.Query["fields"].ToString();
@@ -136,7 +146,7 @@ public static class StockOrdersEndpoints
                 {
                     var groups = await db.StockOrders
                         .AsNoTracking()
-                        .Where(x => !string.IsNullOrEmpty(x.GroupName))
+                        .Where(x => !string.IsNullOrEmpty(x.GroupName) && !x.IsDisabled)
                         .GroupBy(x => x.GroupName!)
                         .Select(g => new { Key = g.Key, Count = g.Count() })
                         .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
@@ -147,7 +157,7 @@ public static class StockOrdersEndpoints
                 {
                     var allTags = await db.StockOrders
                         .AsNoTracking()
-                        .Where(x => x.Tags != null && x.Tags.Length > 0)
+                        .Where(x => x.Tags != null && x.Tags.Length > 0 && !x.IsDisabled)
                         .Select(x => x.Tags)
                         .ToListAsync(ct);
 
@@ -160,18 +170,22 @@ public static class StockOrdersEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var now = DateTime.Now.Date;
-                    var orders = await db.StockOrders.AsNoTracking().Where(r => !r.IsDisabled).Select(r => r.Date).ToListAsync(ct);
-                    var localDates = orders.Select(d => d.ToLocalTime().Date).ToList();
+                    var todayUtc = DateTime.UtcNow.Date;
+                    var weekStart = todayUtc.AddDays(-7);
+                    var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
 
-                    var dateFacets = new Dictionary<string, int>
+                    var countToday = await db.StockOrders.CountAsync(r => !r.IsDisabled && r.Date >= todayUtc, ct);
+                    var countWeek = await db.StockOrders.CountAsync(r => !r.IsDisabled && r.Date >= weekStart, ct);
+                    var countMonth = await db.StockOrders.CountAsync(r => !r.IsDisabled && r.Date >= monthStart, ct);
+                    var countAll = await db.StockOrders.CountAsync(r => !r.IsDisabled, ct);
+
+                    result[field] = new Dictionary<string, int>
                     {
-                        { "#Today", localDates.Count(d => d == now) },
-                        { "#This Week", localDates.Count(d => d >= now.AddDays(-7)) },
-                        { "#This Month", localDates.Count(d => d.Month == now.Month && d.Year == now.Year) },
-                        { "#All Records", localDates.Count }
+                        { "#Today", countToday },
+                        { "#This Week", countWeek },
+                        { "#This Month", countMonth },
+                        { "#All Records", countAll }
                     };
-                    result[field] = dateFacets;
                 }
                 else
                 {
@@ -214,7 +228,6 @@ public static class StockOrdersEndpoints
 
             var tagsList = ExtractTagsFromRawJson(root);
 
-            // Формируем строки
             var linesList = new List<StockOrderLineEntity>();
             if (TryGetPropCaseInsensitive(root, "lines", out var linesElem) && linesElem.ValueKind == JsonValueKind.Array)
             {
@@ -231,7 +244,6 @@ public static class StockOrdersEndpoints
                 }
             }
 
-            // Формируем конвертации
             var convList = new List<StockOrderUnitConvertionEntity>();
             if (TryGetPropCaseInsensitive(root, "stockUnitConvertions", out var convElem) && convElem.ValueKind == JsonValueKind.Array)
             {
@@ -289,7 +301,6 @@ public static class StockOrdersEndpoints
                 existing.Tags = tagsList.ToArray();
                 existing.UpdatedAt = DateTimeOffset.UtcNow;
 
-                // Безопасная перезапись строк и конвертаций
                 var curLines = await db.StockOrderLines.Where(l => l.StockOrderId == orderId).ToListAsync();
                 if (curLines.Any()) db.StockOrderLines.RemoveRange(curLines);
                 if (linesList.Any()) await db.StockOrderLines.AddRangeAsync(linesList);

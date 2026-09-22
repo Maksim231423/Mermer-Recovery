@@ -78,7 +78,20 @@ public class PgStocksRepository : IStocksRepository
 
     public async Task<IReadOnlyList<StockInfo>> GetInfoAsync(string[]? stockIds = null, CancellationToken ct = default)
     {
+        // ОПТИМИЗИРОВАННЫЙ ЗАПРОС: убраны тяжелые LATERAL subqueries в пользу плоских JOIN
         const string sql = """
+            WITH default_units AS (
+                SELECT stock_id, id, name
+                FROM stock_units
+                WHERE is_default = true
+            ),
+            latest_prices AS (
+                SELECT DISTINCT ON (stock_id) 
+                    stock_id, price, currency_id
+                FROM stock_prices
+                WHERE price_group IS NULL
+                ORDER BY stock_id, valid_from DESC
+            )
             SELECT
                 s.id,
                 s.code,
@@ -91,22 +104,14 @@ public class PgStocksRepository : IStocksRepository
                 s.is_disabled,
                 u.name        AS unit,
                 u.id          AS unit_id,
-                p.price,
+                COALESCE(p.price, 0) AS price,
                 p.currency_id
             FROM stocks s
-            LEFT JOIN LATERAL (
-                SELECT name, id FROM stock_units
-                WHERE stock_id = s.id AND is_default = true
-                LIMIT 1
-            ) u ON true
-            LEFT JOIN LATERAL (
-                SELECT price, currency_id FROM stock_prices
-                WHERE stock_id = s.id AND price_group IS NULL
-                ORDER BY valid_from DESC
-                LIMIT 1
-            ) p ON true
-            WHERE (@ids::uuid[] IS NULL OR s.id = ANY(@ids))
-            ORDER BY s.name
+            LEFT JOIN default_units u ON u.stock_id = s.id
+            LEFT JOIN latest_prices p ON p.stock_id = s.id
+            WHERE NOT s.is_disabled
+              AND (@ids::uuid[] IS NULL OR s.id = ANY(@ids))
+            ORDER BY s.name;
             """;
 
         var guids = stockIds is { Length: > 0 } ? ParseGuids(stockIds) : null;
@@ -117,18 +122,18 @@ public class PgStocksRepository : IStocksRepository
 
         return rows.Select(r => new StockInfo
         {
-            Id           = ((Guid)r.id).ToString(),
-            Code         = (string?)r.code,
-            Name         = (string)r.name,
-            ShortName    = (string?)r.short_name,
-            Unit         = (string?)r.unit,
-            Price        = (decimal?)r.price ?? 0m,
-            CurrencyId   = ((Guid?)r.currency_id)?.ToString(),
-            Type         = (string?)r.type,
-            Group        = (string?)r.group_name,
-            Tags         = ((string[]?)r.tags)?.ToList(),
-            Barcodes     = ((string[]?)r.barcodes)?.ToList(),
-            IsDisabled   = (bool)r.is_disabled
+            Id = ((Guid)r.id).ToString(),
+            Code = (string?)r.code,
+            Name = (string)r.name,
+            ShortName = (string?)r.short_name,
+            Unit = (string?)r.unit,
+            Price = (decimal?)r.price ?? 0m,
+            CurrencyId = ((Guid?)r.currency_id)?.ToString(),
+            Type = (string?)r.type,
+            Group = (string?)r.group_name,
+            Tags = ((string[]?)r.tags)?.ToList(),
+            Barcodes = ((string[]?)r.barcodes)?.ToList(),
+            IsDisabled = (bool)r.is_disabled
         }).ToList();
     }
 

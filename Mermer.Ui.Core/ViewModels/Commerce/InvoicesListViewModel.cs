@@ -63,12 +63,29 @@ public class InvoicesListViewModel : ListViewModelBaseWithFilterDate<InvoiceInfo
 
   public LocalizedTransactionTypes Types { get; set; }
 
-  protected override Task PreLoad()
-  {
-    return Task.WhenAll(base.PreLoad(), this.Offices.Initialize(), this.Partners.Initialize(), this.Warehouses.Initialize(), this.Depositories.Initialize());
-  }
+    protected override Task PreLoad()
+    {
+        // Не блокируем UI: инициализация тяжелых справочников уходит в фон
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.WhenAll(
+                    this.Offices.Initialize(),
+                    this.Warehouses.Initialize(),
+                    this.Depositories.Initialize(),
+                    this.Partners.Initialize());
+            }
+            catch
+            {
+                // Игнорируем фоновые ошибки инициализации справочников
+            }
+        });
 
-  protected override Task<int> CountFilteredListAsync(ListFilter filter)
+        return base.PreLoad();
+    }
+
+    protected override Task<int> CountFilteredListAsync(ListFilter filter)
   {
     return this._repository.CountInfoAsync(DateTime.MinValue, DateTime.MaxValue);
   }

@@ -1,11 +1,9 @@
 ﻿using DevExpress.Xpf.Editors;
 using DevExpress.Xpf.Grid;
 using System.Windows;
-
 using ButtonBase = System.Windows.Controls.Primitives.ButtonBase;
 
 namespace Mermer.Ui.Pc.Controls;
-
 
 public partial class StyledGridControl : GridControl
 {

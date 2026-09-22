@@ -21,15 +21,40 @@ public static class StocksEndpoints
     {
         var group = app.MapGroup("/api/stocks").WithTags("Stocks");
 
-        // 1. СПИСОК ТОВАРОВ
-        group.MapGet("/", async (MermerDbContext db, CancellationToken ct) =>
+        // 1. СПИСОК ТОВАРОВ (БЫСТРАЯ ВЫБОРКА ДЛЯ АВТОКОМПЛИТА)
+        group.MapGet("/", async (int? limit, int? offset, string? search, MermerDbContext db, CancellationToken ct) =>
         {
-            var list = await db.Stocks
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 500) : 100;
+            int skip = offset.GetValueOrDefault(0);
+
+            var query = db.Stocks
+                .AsNoTracking()
+                .Where(s => !s.IsDisabled);
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                string term = search.Trim();
+                if (term.Length <= 2)
+                {
+                    // Для 1-2 букв ищем по префиксу (мгновенно по B-Tree индексу)
+                    query = query.Where(s => EF.Functions.ILike(s.Name, $"{term}%") ||
+                                             (s.Code != null && EF.Functions.ILike(s.Code, $"{term}%")));
+                }
+                else
+                {
+                    // Для длинных слов ищем подстроку
+                    query = query.Where(s => EF.Functions.ILike(s.Name, $"%{term}%") ||
+                                             (s.Code != null && EF.Functions.ILike(s.Code, $"%{term}%")));
+                }
+            }
+
+            var list = await query
+                .OrderBy(s => s.Name)
+                .Skip(skip)
+                .Take(take)
                 .Include(s => s.Prices)
                 .Include(s => s.Units)
                 .AsSplitQuery()
-                .AsNoTracking()
-                .Where(s => !s.IsDisabled)
                 .ToListAsync(ct);
 
             var result = list.Select(s =>
@@ -39,28 +64,6 @@ public static class StocksEndpoints
                     .FirstOrDefault();
 
                 var defaultUnit = s.Units?.FirstOrDefault(u => u.IsDefault) ?? s.Units?.FirstOrDefault();
-
-                var pricesList = s.Prices != null && s.Prices.Any()
-                    ? s.Prices.Select(p => (object)new
-                    {
-                        Id = p.Id.ToString(),
-                        Price = p.Price,
-                        CurrencyId = p.CurrencyId?.ToString(),
-                        PriceGroup = p.PriceGroup,
-                        ValidFrom = p.ValidFrom
-                    }).ToList()
-                    : new List<object>();
-
-                var unitsList = s.Units != null && s.Units.Any()
-                    ? s.Units.Select(u => (object)new
-                    {
-                        Id = u.Id.ToString(),
-                        Name = u.Name,
-                        Multiplier = u.Multiplier,
-                        Divider = u.Divider,
-                        IsDefault = u.IsDefault
-                    }).ToList()
-                    : new List<object>();
 
                 return new
                 {
@@ -73,14 +76,30 @@ public static class StocksEndpoints
                     Group = s.Group ?? string.Empty,
                     Barcodes = s.Barcodes != null ? s.Barcodes.ToList() : new List<string>(),
                     Tags = s.Tags != null ? s.Tags.ToList() : new List<string>(),
-
                     Price = currentPrice?.Price ?? 0m,
                     CurrencyId = currentPrice?.CurrencyId?.ToString(),
                     Unit = defaultUnit?.Name ?? string.Empty,
                     UnitId = defaultUnit?.Id.ToString(),
-
-                    Prices = pricesList,
-                    Units = unitsList
+                    Prices = s.Prices != null && s.Prices.Any()
+                        ? s.Prices.Select(p => (object)new
+                        {
+                            Id = p.Id.ToString(),
+                            Price = p.Price,
+                            CurrencyId = p.CurrencyId?.ToString(),
+                            PriceGroup = p.PriceGroup,
+                            ValidFrom = p.ValidFrom
+                        }).ToList()
+                        : new List<object>(),
+                    Units = s.Units != null && s.Units.Any()
+                        ? s.Units.Select(u => (object)new
+                        {
+                            Id = u.Id.ToString(),
+                            Name = u.Name,
+                            Multiplier = u.Multiplier,
+                            Divider = u.Divider,
+                            IsDefault = u.IsDefault
+                        }).ToList()
+                        : new List<object>()
                 };
             });
 
@@ -88,11 +107,14 @@ public static class StocksEndpoints
         })
         .WithName("StocksList");
 
-        // 2. ПОИСК
+        // 2. БЫСТРЫЙ ПОИСК ТОВАРОВ
         group.MapGet("/search", async (string q, string? warehouseId, string? priceGroup, int? limit, double? minSimilarity, IStockSearchService search, CancellationToken ct) =>
         {
-            if (string.IsNullOrWhiteSpace(q)) return Results.BadRequest(new { error = "Query parameter 'q' is required." });
-            var result = await search.SearchAsync(q, warehouseId, priceGroup, limit ?? 32, minSimilarity ?? 0.1, ct);
+            if (string.IsNullOrWhiteSpace(q)) return Results.Ok(Array.Empty<object>());
+
+            // Ограничиваем выдачу 30 товарами, чтобы ответ прилетал моментально
+            int maxResults = limit.HasValue ? Math.Clamp(limit.Value, 1, 50) : 30;
+            var result = await search.SearchAsync(q.Trim(), warehouseId, priceGroup, maxResults, minSimilarity ?? 0.1, ct);
             return Results.Ok(result);
         })
         .WithName("StocksSearch");
@@ -219,8 +241,8 @@ public static class StocksEndpoints
         // 6. ЖУРНАЛ ДВИЖЕНИЯ ТОВАРОВ (STOCK ACTIONS)
         group.MapGet("/actions", async (DateTime? from, DateTime? till, string? stockId, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTimeOffset startDate = from.HasValue ? new DateTimeOffset(from.Value.ToUniversalTime()) : DateTimeOffset.MinValue;
-            DateTimeOffset endDate = till.HasValue ? new DateTimeOffset(till.Value.ToUniversalTime()) : DateTimeOffset.MaxValue;
+            DateTimeOffset startDate = from.HasValue ? new DateTimeOffset(from.Value.ToUniversalTime()) : DateTimeOffset.UtcNow.AddMonths(-1);
+            DateTimeOffset endDate = till.HasValue ? new DateTimeOffset(till.Value.ToUniversalTime()) : DateTimeOffset.UtcNow;
 
             var whIds = req.Query["warehouseId"].Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null).Where(x => x.HasValue).Select(x => x!.Value).ToList();
             Guid? filterStockGuid = Guid.TryParse(stockId, out var sG) ? sG : null;
@@ -233,7 +255,7 @@ public static class StocksEndpoints
 
             if (whIds.Any()) slipsQuery = slipsQuery.Where(s => s.WarehouseId.HasValue && whIds.Contains(s.WarehouseId.Value));
 
-            var slips = await slipsQuery.ToListAsync(ct);
+            var slips = await slipsQuery.OrderByDescending(s => s.Date).Take(300).ToListAsync(ct);
             foreach (var s in slips)
             {
                 foreach (var l in s.Lines ?? Enumerable.Empty<StockSlipLineEntity>())
@@ -270,7 +292,9 @@ public static class StocksEndpoints
             var transfersQuery = db.StockTransfers.Include(t => t.Lines).ThenInclude(l => l.Stock).AsSplitQuery().AsNoTracking()
                 .Where(t => t.Date >= startDate && t.Date <= endDate && !t.IsDisabled);
 
-            var transfers = await transfersQuery.ToListAsync(ct);
+            if (whIds.Any()) transfersQuery = transfersQuery.Where(t => t.WarehouseId.HasValue && whIds.Contains(t.WarehouseId.Value));
+
+            var transfers = await transfersQuery.OrderByDescending(t => t.Date).Take(300).ToListAsync(ct);
             foreach (var t in transfers)
             {
                 foreach (var l in t.Lines ?? Enumerable.Empty<StockTransferLineEntity>())
@@ -339,7 +363,7 @@ public static class StocksEndpoints
 
             if (whIds.Any()) invQuery = invQuery.Where(i => i.WarehouseId.HasValue && whIds.Contains(i.WarehouseId.Value));
 
-            var invoices = await invQuery.ToListAsync(ct);
+            var invoices = await invQuery.OrderByDescending(i => i.Date).Take(300).ToListAsync(ct);
             foreach (var i in invoices)
             {
                 foreach (var l in i.Lines ?? Enumerable.Empty<InvoiceLineEntity>())

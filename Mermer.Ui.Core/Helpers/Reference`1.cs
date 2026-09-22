@@ -24,7 +24,7 @@ public class Reference<T> : BindableObject, IDisposable where T : IModel
   private IEnumerable<T> _list;
   private Func<T, bool> _filter;
   private bool _SuspendLoading;
-  private bool _isLoaded;
+  public bool _isLoaded;
 
   public Reference(IRepository<T> repository, IMvxMessenger messenger)
   {
@@ -68,12 +68,13 @@ public class Reference<T> : BindableObject, IDisposable where T : IModel
   }
 
   public virtual async Task Initialize()
-  {
-    if (this.SuspendLoading)
-      return;
+{
+    if (this.SuspendLoading || this._isLoaded) // Если уже загружено — пропускаем!
+        return;
+        
     this.List = await this._repository.GetAsync();
     this._isLoaded = true;
-  }
+}
 
   public void Dispose() => this._messageToken?.Dispose();
 }

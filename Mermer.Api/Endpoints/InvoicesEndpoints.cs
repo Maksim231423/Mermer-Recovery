@@ -30,8 +30,8 @@ public static class InvoicesEndpoints
              IInvoicesRepository repo,
              CancellationToken ct) =>
         {
-            var startDate = EnsureUtc(from ?? DateTime.UtcNow.AddYears(-10));
-            var endDate = EnsureUtc(till ?? DateTime.UtcNow.AddYears(10));
+            var startDate = EnsureUtc(from ?? DateTime.UtcNow.AddMonths(-1));
+            var endDate = EnsureUtc(till ?? DateTime.UtcNow.AddDays(1));
 
             var info = await repo.GetInfoAsync(startDate, endDate, displayCurrencyId, ct);
 

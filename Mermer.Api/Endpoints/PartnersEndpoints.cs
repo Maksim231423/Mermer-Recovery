@@ -5,10 +5,12 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Dapper;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Mermer.Data.Postgres;
 using Mermer.Data.Postgres.Entities;
 
@@ -21,9 +23,13 @@ public static class PartnersEndpoints
         var group = routes.MapGroup("/api/partners").WithTags("Partners");
 
         // 1. СПИСОК ПАРТНЕРОВ
-        group.MapGet("/", async (MermerDbContext db) =>
+        group.MapGet("/", async (MermerDbContext db, CancellationToken ct) =>
         {
-            var partners = await db.Partners.AsNoTracking().Where(p => !p.IsDisabled).ToListAsync();
+            var partners = await db.Partners
+                .AsNoTracking()
+                .Where(p => !p.IsDisabled)
+                .OrderBy(p => p.Name)
+                .ToListAsync(ct);
             return Results.Ok(partners);
         });
 
@@ -42,7 +48,7 @@ public static class PartnersEndpoints
                 {
                     var groups = await db.Partners
                         .AsNoTracking()
-                        .Where(x => !string.IsNullOrEmpty(x.Group))
+                        .Where(x => !string.IsNullOrEmpty(x.Group) && !x.IsDisabled)
                         .GroupBy(x => x.Group!)
                         .Select(g => new { Key = g.Key, Count = g.Count() })
                         .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
@@ -53,7 +59,7 @@ public static class PartnersEndpoints
                 {
                     var allTags = await db.Partners
                         .AsNoTracking()
-                        .Where(x => x.Tags != null && x.Tags.Length > 0)
+                        .Where(x => x.Tags != null && x.Tags.Length > 0 && !x.IsDisabled)
                         .Select(x => x.Tags)
                         .ToListAsync(ct);
 
@@ -81,93 +87,101 @@ public static class PartnersEndpoints
             return Results.Ok(new { code = nextCode });
         });
 
-        // 3. РАСЧЕТ БАЛАНСОВ ПАРТНЕРОВ
-        group.MapGet("/balances/by-type", async (string? partnerId, DateTime? from, DateTime? till, [Microsoft.AspNetCore.Mvc.FromQuery] string[]? officeIds, MermerDbContext db) =>
+        // 3. РАСЧЕТ БАЛАНСОВ ПАРТНЕРОВ (БЫСТРАЯ SQL-АГРЕГАЦИЯ ВМЕСТО ЦИКЛА O(N*M))
+        group.MapGet("/balances/by-type", async (string? partnerId, DateTime? from, DateTime? till, [Microsoft.AspNetCore.Mvc.FromQuery] string[]? officeIds, MermerDbContext db, CancellationToken ct) =>
         {
-            var partnersQuery = db.Partners.AsNoTracking().Where(p => !p.IsDisabled);
-            if (!string.IsNullOrEmpty(partnerId) && Guid.TryParse(partnerId, out var pGuid))
-            {
-                partnersQuery = partnersQuery.Where(p => p.Id == pGuid);
-            }
-            var partners = await partnersQuery.ToListAsync();
+            DateTime fUtc = from?.ToUniversalTime() ?? DateTime.UtcNow.AddMonths(-1);
+            DateTime tUtc = till?.ToUniversalTime() ?? DateTime.UtcNow;
+
+            Guid? singlePartnerGuid = Guid.TryParse(partnerId, out var pG) ? pG : null;
 
             var targetOfficeGuids = officeIds?
                 .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
                 .Where(x => x.HasValue)
                 .Select(x => x!.Value)
-                .ToList() ?? new List<Guid>();
+                .ToArray() ?? Array.Empty<Guid>();
 
-            var resultList = new List<object>();
+            const string sql = """
+                WITH raw_moves AS (
+                    -- Накладные (Продажи и Возвраты)
+                    SELECT 
+                        i.partner_id,
+                        i.date,
+                        CASE WHEN i.invoice_type = 'Sales' THEN (il.quantity * il.price) ELSE 0 END AS sales,
+                        CASE WHEN i.invoice_type = 'SalesReturn' THEN (il.quantity * il.price) ELSE 0 END AS sales_return,
+                        CASE WHEN i.invoice_type = 'Purchase' THEN (il.quantity * il.price) ELSE 0 END AS purchase,
+                        CASE WHEN i.invoice_type = 'PurchaseReturn' THEN (il.quantity * il.price) ELSE 0 END AS purchase_return,
+                        0 AS opening,
+                        0 AS revision
+                    FROM invoice_lines il
+                    JOIN invoices i ON i.id = il.invoice_id
+                    WHERE i.partner_id IS NOT NULL 
+                      AND i.is_completed = true 
+                      AND i.is_disabled = false
+                      AND (@singlePartner::uuid IS NULL OR i.partner_id = @singlePartner)
+                      AND (cardinality(@offices::uuid[]) = 0 OR i.office_id = ANY(@offices))
 
-            foreach (var partner in partners)
-            {
-                // Фильтр накладных с учетом офиса
-                var invoicesQuery = db.Invoices.Include(i => i.Lines).AsNoTracking().Where(i => i.PartnerId == partner.Id);
-                if (from.HasValue) invoicesQuery = invoicesQuery.Where(i => i.Date >= from.Value.ToUniversalTime());
-                if (till.HasValue) invoicesQuery = invoicesQuery.Where(i => i.Date <= till.Value.ToUniversalTime());
-                if (targetOfficeGuids.Any()) invoicesQuery = invoicesQuery.Where(i => i.OfficeId.HasValue && targetOfficeGuids.Contains(i.OfficeId.Value));
+                    UNION ALL
 
-                var invoices = await invoicesQuery.ToListAsync();
+                    -- Акты сверки и начальные остатки
+                    SELECT 
+                        psl.partner_id,
+                        ps.date,
+                        0 AS sales, 0 AS sales_return, 0 AS purchase, 0 AS purchase_return,
+                        CASE WHEN ps.slip_type = 'PartnerOpeningBalance' THEN (psl.debit_amount - psl.credit_amount) ELSE 0 END AS opening,
+                        CASE WHEN ps.slip_type = 'PartnerBalanceRevision' THEN (psl.debit_amount - psl.credit_amount) ELSE 0 END AS revision
+                    FROM partner_slip_lines psl
+                    JOIN partner_slips ps ON ps.id = psl.partner_slip_id
+                    WHERE psl.partner_id IS NOT NULL
+                      AND ps.is_disabled = false
+                      AND (@singlePartner::uuid IS NULL OR psl.partner_id = @singlePartner)
+                      AND (cardinality(@offices::uuid[]) = 0 OR ps.office_id = ANY(@offices))
+                )
+                SELECT 
+                    p.id::text AS "PartnerId",
+                    COALESCE(@firstOffice::text, '') AS "OfficeId",
+                    COALESCE(SUM(CASE WHEN rm.date < @from THEN (rm.opening + rm.revision + rm.sales - rm.sales_return - rm.purchase + rm.purchase_return) ELSE 0 END), 0)::numeric(18,4) AS "StartingBalance",
+                    COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.opening ELSE 0 END), 0)::numeric(18,4) AS "Opening",
+                    COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.revision ELSE 0 END), 0)::numeric(18,4) AS "Revision",
+                    0::numeric(18,4) AS "Transfer",
+                    COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.sales ELSE 0 END), 0)::numeric(18,4) AS "Sales",
+                    COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.sales_return ELSE 0 END), 0)::numeric(18,4) AS "SalesReturn",
+                    COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.purchase ELSE 0 END), 0)::numeric(18,4) AS "Purchase",
+                    COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.purchase_return ELSE 0 END), 0)::numeric(18,4) AS "PurchaseReturn",
+                    0::numeric(18,4) AS "Payment",
+                    0::numeric(18,4) AS "Collection",
+                    COALESCE(SUM(rm.opening + rm.revision + rm.sales - rm.sales_return - rm.purchase + rm.purchase_return), 0)::numeric(18,4) AS "ResultingBalance"
+                FROM partners p
+                LEFT JOIN raw_moves rm ON rm.partner_id = p.id
+                WHERE NOT p.is_disabled
+                  AND (@singlePartner::uuid IS NULL OR p.id = @singlePartner)
+                GROUP BY p.id;
+                """;
 
-                decimal sales = invoices.Where(i => i.InvoiceType == "Sales").Sum(i => i.Lines?.Sum(l => l.Quantity * l.Price) ?? 0m);
-                decimal purchases = invoices.Where(i => i.InvoiceType == "Purchase").Sum(i => i.Lines?.Sum(l => l.Quantity * l.Price) ?? 0m);
-                decimal salesReturn = invoices.Where(i => i.InvoiceType == "SalesReturn").Sum(i => i.Lines?.Sum(l => l.Quantity * l.Price) ?? 0m);
-                decimal purchaseReturn = invoices.Where(i => i.InvoiceType == "PurchaseReturn").Sum(i => i.Lines?.Sum(l => l.Quantity * l.Price) ?? 0m);
-
-                // Фильтр актов взаиморасчетов с учетом офиса
-                var slipsQuery = db.PartnerSlips.Include(s => s.Lines).AsNoTracking();
-                if (from.HasValue) slipsQuery = slipsQuery.Where(s => s.Date >= from.Value.ToUniversalTime());
-                if (till.HasValue) slipsQuery = slipsQuery.Where(s => s.Date <= till.Value.ToUniversalTime());
-                if (targetOfficeGuids.Any()) slipsQuery = slipsQuery.Where(s => s.OfficeId.HasValue && targetOfficeGuids.Contains(s.OfficeId.Value));
-
-                var slips = await slipsQuery.ToListAsync();
-
-                decimal opening = slips
-                    .Where(s => s.SlipType == "PartnerOpeningBalance")
-                    .SelectMany(s => s.Lines ?? new List<PartnerSlipLineEntity>())
-                    .Where(l => l.PartnerId == partner.Id)
-                    .Sum(l => l.DebitAmount - l.CreditAmount);
-
-                decimal revision = slips
-                    .Where(s => s.SlipType == "PartnerBalanceRevision")
-                    .SelectMany(s => s.Lines ?? new List<PartnerSlipLineEntity>())
-                    .Where(l => l.PartnerId == partner.Id)
-                    .Sum(l => l.DebitAmount - l.CreditAmount);
-
-                decimal resultingBalance = opening + revision + sales - salesReturn - purchases + purchaseReturn;
-
-                resultList.Add(new
+            var connStr = db.Database.GetConnectionString();
+            await using var conn = new NpgsqlConnection(connStr);
+            var result = await conn.QueryAsync(new CommandDefinition(
+                sql,
+                new
                 {
-                    PartnerId = partner.Id.ToString(),
-                    OfficeId = targetOfficeGuids.FirstOrDefault().ToString(),
-                    StartingBalance = opening,
-                    Opening = opening,
-                    Revision = revision,
-                    Transfer = 0m,
-                    Sales = sales,
-                    SalesReturn = salesReturn,
-                    Purchase = purchases,
-                    PurchaseReturn = purchaseReturn,
-                    Payment = 0m,
-                    Collection = 0m,
-                    ResultingBalance = resultingBalance
-                });
-            }
+                    singlePartner = singlePartnerGuid,
+                    offices = targetOfficeGuids,
+                    firstOffice = targetOfficeGuids.FirstOrDefault(),
+                    from = fUtc,
+                    till = tUtc
+                },
+                cancellationToken: ct));
 
-            return Results.Ok(resultList);
+            return Results.Ok(result);
         });
 
-        group.MapGet("/balances", async (MermerDbContext db) =>
-        {
-            return Results.Ok(new object[] { });
-        });
+        group.MapGet("/balances", () => Results.Ok(Array.Empty<object>()));
 
         // 4. СОХРАНЕНИЕ ПАРТНЕРА (POST / PUT)
         Func<HttpRequest, MermerDbContext, Task<IResult>> savePartnerHandler = async (request, db) =>
         {
             using var reader = new StreamReader(request.Body);
             var body = await reader.ReadToEndAsync();
-
             if (string.IsNullOrEmpty(body)) return Results.BadRequest("Empty body");
 
             using var doc = JsonDocument.Parse(body);
@@ -224,60 +238,50 @@ public static class PartnersEndpoints
         // 5. ФАСЕТЫ ДЛЯ PARTNER SLIPS
         group.MapGet("/slips/facets", async (HttpContext context, MermerDbContext db, CancellationToken ct) =>
         {
-            string? fields = context.Request.Query["fields"].ToString();
-            var fieldList = string.IsNullOrEmpty(fields)
-                ? new[] { "Date", "Group", "Tags" }
-                : fields.Split(',', StringSplitOptions.RemoveEmptyEntries)
-                        .Select(f => f.Trim())
-                        .ToArray();
+            var todayUtc = DateTime.UtcNow.Date;
+            var weekStart = todayUtc.AddDays(-7);
+            var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
 
-            var result = new Dictionary<string, Dictionary<string, int>>();
+            var countToday = await db.PartnerSlips.CountAsync(s => !s.IsDisabled && s.Date >= todayUtc, ct);
+            var countWeek = await db.PartnerSlips.CountAsync(s => !s.IsDisabled && s.Date >= weekStart, ct);
+            var countMonth = await db.PartnerSlips.CountAsync(s => !s.IsDisabled && s.Date >= monthStart, ct);
+            var countAll = await db.PartnerSlips.CountAsync(s => !s.IsDisabled, ct);
 
-            foreach (var field in fieldList)
+            var groups = await db.PartnerSlips.AsNoTracking()
+                .Where(x => !string.IsNullOrEmpty(x.Group) && !x.IsDisabled)
+                .GroupBy(x => x.Group!)
+                .Select(g => new { Key = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+
+            return Results.Ok(new Dictionary<string, object>
             {
-                if (field.Equals("Group", StringComparison.OrdinalIgnoreCase) || field.Equals("GroupNames", StringComparison.OrdinalIgnoreCase))
+                ["Group"] = groups,
+                ["Date"] = new Dictionary<string, int>
                 {
-                    var groups = await db.PartnerSlips
-                        .AsNoTracking()
-                        .Where(x => !string.IsNullOrEmpty(x.Group))
-                        .GroupBy(x => x.Group!)
-                        .Select(g => new { Key = g.Key, Count = g.Count() })
-                        .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
-
-                    result[field] = groups;
+                    { "#Today", countToday },
+                    { "#This Week", countWeek },
+                    { "#This Month", countMonth },
+                    { "#All Records", countAll }
                 }
-                else if (field.Equals("Tags", StringComparison.OrdinalIgnoreCase) || field.Equals("TagNames", StringComparison.OrdinalIgnoreCase))
-                {
-                    var allTags = await db.PartnerSlips
-                        .AsNoTracking()
-                        .Where(x => x.Tags != null && x.Tags.Length > 0)
-                        .Select(x => x.Tags)
-                        .ToListAsync(ct);
-
-                    var tagCounts = allTags
-                        .SelectMany(t => t!)
-                        .GroupBy(t => t)
-                        .ToDictionary(g => g.Key, g => g.Count());
-
-                    result[field] = tagCounts;
-                }
-                else
-                {
-                    result[field] = new Dictionary<string, int>();
-                }
-            }
-
-            return Results.Ok(result);
+            });
         })
         .WithName("PartnerSlipsGetFacets");
 
-        // 6. ПОДГРУЗКА PARTNER SLIPS
-        group.MapGet("/slips", async (MermerDbContext db) =>
+        // 6. ПОДГРУЗКА PARTNER SLIPS (С ПАГИНАЦИЕЙ)
+        group.MapGet("/slips", async (int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
+            int skip = offset.GetValueOrDefault(0);
+
             var slips = await db.PartnerSlips
-                .Include(s => s.Lines)
                 .AsNoTracking()
-                .ToListAsync();
+                .Where(s => !s.IsDisabled)
+                .OrderByDescending(s => s.Date)
+                .Skip(skip)
+                .Take(take)
+                .Include(s => s.Lines)
+                .AsSplitQuery()
+                .ToListAsync(ct);
 
             var result = slips.Select(s => new
             {
@@ -424,65 +428,40 @@ public static class PartnersEndpoints
             return Results.Content($"{{\"id\":\"{slipId}\",\"code\":\"{code}\"}}", "application/json");
         });
 
-        // 8. ФАСЕТЫ ДЛЯ PARTNER TRANSFERS (GroupNames, TagNames)
+        // 8. ФАСЕТЫ ДЛЯ PARTNER TRANSFERS
         group.MapGet("/transfers/facets", async (HttpContext context, MermerDbContext db, CancellationToken ct) =>
         {
-            string? fields = context.Request.Query["fields"].ToString();
-            var fieldList = string.IsNullOrEmpty(fields)
-                ? new[] { "Date", "Group", "Tags" }
-                : fields.Split(',', StringSplitOptions.RemoveEmptyEntries)
-                        .Select(f => f.Trim())
-                        .ToArray();
+            var groups = await db.PartnerTransfers
+                .AsNoTracking()
+                .Where(x => !string.IsNullOrEmpty(x.Group) && !x.IsDisabled)
+                .GroupBy(x => x.Group!)
+                .Select(g => new { Key = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
 
-            var result = new Dictionary<string, Dictionary<string, int>>();
-
-            foreach (var field in fieldList)
+            return Results.Ok(new Dictionary<string, object>
             {
-                if (field.Equals("Group", StringComparison.OrdinalIgnoreCase) || field.Equals("GroupNames", StringComparison.OrdinalIgnoreCase))
-                {
-                    var groups = await db.PartnerTransfers
-                        .AsNoTracking()
-                        .Where(x => !string.IsNullOrEmpty(x.Group))
-                        .GroupBy(x => x.Group!)
-                        .Select(g => new { Key = g.Key, Count = g.Count() })
-                        .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
-
-                    result[field] = groups;
-                }
-                else if (field.Equals("Tags", StringComparison.OrdinalIgnoreCase) || field.Equals("TagNames", StringComparison.OrdinalIgnoreCase))
-                {
-                    var allTags = await db.PartnerTransfers
-                        .AsNoTracking()
-                        .Where(x => x.Tags != null && x.Tags.Length > 0)
-                        .Select(x => x.Tags)
-                        .ToListAsync(ct);
-
-                    var tagCounts = allTags
-                        .SelectMany(t => t!)
-                        .GroupBy(t => t)
-                        .ToDictionary(g => g.Key, g => g.Count());
-
-                    result[field] = tagCounts;
-                }
-                else
-                {
-                    result[field] = new Dictionary<string, int>();
-                }
-            }
-
-            return Results.Ok(result);
+                ["Group"] = groups
+            });
         })
         .WithName("PartnerTransfersGetFacets");
 
-        // 9. ПОДГРУЗКА ПЕРЕВОДОВ PARTNER TRANSFERS
-        group.MapGet("/transfers", async (MermerDbContext db) =>
+        // 9. ПОДГРУЗКА ПЕРЕВОДОВ PARTNER TRANSFERS (С ПАГИНАЦИЕЙ И ПОЛНЫМ РАСЧЕТОМ КУРСОВ)
+        group.MapGet("/transfers", async (int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
-            var transfers = await db.PartnerTransfers
-                .Include(t => t.Lines)
-                .AsNoTracking()
-                .ToListAsync();
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
+            int skip = offset.GetValueOrDefault(0);
 
-            var allRates = await db.CurrencyRates.AsNoTracking().ToListAsync();
+            var transfers = await db.PartnerTransfers
+                .AsNoTracking()
+                .Where(t => !t.IsDisabled)
+                .OrderByDescending(t => t.Date)
+                .Skip(skip)
+                .Take(take)
+                .Include(t => t.Lines)
+                .AsSplitQuery()
+                .ToListAsync(ct);
+
+            var allRates = await db.CurrencyRates.AsNoTracking().ToListAsync(ct);
 
             var result = transfers.Select(t =>
             {
@@ -650,110 +629,96 @@ public static class PartnersEndpoints
             return Results.Content($"{{\"id\":\"{transferId}\",\"code\":\"{code}\"}}", "application/json");
         });
 
-        // 11. РЕЕСТР ДВИЖЕНИЙ ПО ПАРТНЕРАМ (PARTNERACTIONS)
-        group.MapGet("/actions", async (string? partnerId, DateTime? from, DateTime? till, string[]? officeIds, MermerDbContext db) =>
+        // 11. РЕЕСТР ДВИЖЕНИЙ ПО ПАРТНЕРАМ (БЫСТРАЯ SQL-ВЫБОРКА С ЛИМИТОМ)
+        group.MapGet("/actions", async (string? partnerId, DateTime? from, DateTime? till, int? limit, MermerDbContext db, CancellationToken ct) =>
         {
-            var actionsList = new List<PartnerActionDto>();
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 300;
+            DateTime fUtc = from?.ToUniversalTime() ?? DateTime.UtcNow.AddMonths(-1);
+            DateTime tUtc = till?.ToUniversalTime() ?? DateTime.UtcNow;
 
-            var invoicesQuery = db.Invoices.Include(i => i.Lines).AsNoTracking();
-            if (!string.IsNullOrEmpty(partnerId) && Guid.TryParse(partnerId, out var pGuid))
-                invoicesQuery = invoicesQuery.Where(i => i.PartnerId == pGuid);
-            if (from.HasValue) invoicesQuery = invoicesQuery.Where(i => i.Date >= from.Value.ToUniversalTime());
-            if (till.HasValue) invoicesQuery = invoicesQuery.Where(i => i.Date <= till.Value.ToUniversalTime());
+            Guid? pGuid = Guid.TryParse(partnerId, out var g) ? g : null;
 
-            var invoices = await invoicesQuery.ToListAsync();
+            const string sql = """
+                WITH raw_actions AS (
+                    -- Накладные
+                    SELECT 
+                        i.id::text           AS "TransactionId",
+                        i.code               AS "TransactionCode",
+                        i.invoice_type       AS "TransactionType",
+                        i.date               AS "TransactionDate",
+                        COALESCE(i.office_id::text, '') AS "ActionOfficeId",
+                        i.partner_id::text   AS "ActionPartnerId",
+                        CASE WHEN i.invoice_type IN ('Sales', 'PurchaseReturn') THEN (il.quantity * il.price) ELSE 0 END AS "ActionDebit",
+                        CASE WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN (il.quantity * il.price) ELSE 0 END AS "ActionCredit",
+                        i.user_name          AS "TransactionUserName",
+                        i.is_completed       AS "TransactionIsCompleted",
+                        i.is_disabled        AS "TransactionIsDisabled"
+                    FROM invoice_lines il
+                    JOIN invoices i ON i.id = il.invoice_id
+                    WHERE i.partner_id IS NOT NULL 
+                      AND i.is_completed = true 
+                      AND i.is_disabled = false
+                      AND (@partner::uuid IS NULL OR i.partner_id = @partner)
+                      AND i.date >= @from AND i.date <= @till
 
-            foreach (var inv in invoices)
-            {
-                decimal total = inv.Lines?.Sum(l => l.Quantity * l.Price) ?? 0m;
-                bool isSales = inv.InvoiceType == "Sales" || inv.InvoiceType == "PurchaseReturn";
+                    UNION ALL
 
-                actionsList.Add(new PartnerActionDto
-                {
-                    TransactionId = inv.Id.ToString(),
-                    TransactionCode = inv.Code ?? "DOC",
-                    TransactionType = inv.InvoiceType ?? "Sales",
-                    TransactionDate = inv.Date.DateTime,
-                    ActionOfficeId = inv.OfficeId?.ToString() ?? Guid.Empty.ToString(),
-                    ActionPartnerId = inv.PartnerId?.ToString() ?? string.Empty,
-                    ActionDebit = isSales ? total : 0m,
-                    ActionCredit = isSales ? 0m : total,
-                    ActionEffect = isSales ? total : -total,
-                    TransactionUserName = inv.UserName ?? "admin",
-                    TransactionIsCompleted = inv.IsCompleted,
-                    TransactionIsDisabled = inv.IsDisabled
-                });
-            }
+                    -- Акты сверки
+                    SELECT 
+                        ps.id::text          AS "TransactionId",
+                        ps.code              AS "TransactionCode",
+                        ps.slip_type         AS "TransactionType",
+                        ps.date              AS "TransactionDate",
+                        COALESCE(ps.office_id::text, '') AS "ActionOfficeId",
+                        psl.partner_id::text AS "ActionPartnerId",
+                        psl.debit_amount     AS "ActionDebit",
+                        psl.credit_amount    AS "ActionCredit",
+                        ps.user_name         AS "TransactionUserName",
+                        true                 AS "TransactionIsCompleted",
+                        ps.is_disabled       AS "TransactionIsDisabled"
+                    FROM partner_slip_lines psl
+                    JOIN partner_slips ps ON ps.id = psl.partner_slip_id
+                    WHERE psl.partner_id IS NOT NULL
+                      AND ps.is_disabled = false
+                      AND (@partner::uuid IS NULL OR psl.partner_id = @partner)
+                      AND ps.date >= @from AND ps.date <= @till
 
-            var slipsQuery = db.PartnerSlips.Include(s => s.Lines).AsNoTracking();
-            if (from.HasValue) slipsQuery = slipsQuery.Where(s => s.Date >= from.Value.ToUniversalTime());
-            if (till.HasValue) slipsQuery = slipsQuery.Where(s => s.Date <= till.Value.ToUniversalTime());
+                    UNION ALL
 
-            var slips = await slipsQuery.ToListAsync();
+                    -- Переводы
+                    SELECT 
+                        pt.id::text          AS "TransactionId",
+                        pt.code              AS "TransactionCode",
+                        'PartnerTransfer'    AS "TransactionType",
+                        pt.date              AS "TransactionDate",
+                        COALESCE(ptl.office_id::text, '') AS "ActionOfficeId",
+                        ptl.partner_id::text AS "ActionPartnerId",
+                        ptl.debit_amount     AS "ActionDebit",
+                        ptl.credit_amount    AS "ActionCredit",
+                        pt.user_name         AS "TransactionUserName",
+                        true                 AS "TransactionIsCompleted",
+                        pt.is_disabled       AS "TransactionIsDisabled"
+                    FROM partner_transfer_lines ptl
+                    JOIN partner_transfers pt ON pt.id = ptl.partner_transfer_id
+                    WHERE ptl.partner_id IS NOT NULL
+                      AND pt.is_disabled = false
+                      AND (@partner::uuid IS NULL OR ptl.partner_id = @partner)
+                      AND pt.date >= @from AND pt.date <= @till
+                )
+                SELECT 
+                    *,
+                    ("ActionDebit" - "ActionCredit")::numeric(18,4) AS "ActionEffect"
+                FROM raw_actions
+                ORDER BY "TransactionDate" DESC
+                LIMIT @take;
+                """;
 
-            foreach (var slip in slips)
-            {
-                if (slip.Lines == null) continue;
-
-                foreach (var line in slip.Lines)
-                {
-                    if (!string.IsNullOrEmpty(partnerId) && line.PartnerId.ToString() != partnerId)
-                        continue;
-
-                    actionsList.Add(new PartnerActionDto
-                    {
-                        TransactionId = slip.Id.ToString(),
-                        TransactionCode = slip.Code ?? "DOC",
-                        TransactionType = slip.SlipType ?? "PartnerOpeningBalance",
-                        TransactionDate = slip.Date,
-                        ActionOfficeId = slip.OfficeId?.ToString() ?? Guid.Empty.ToString(),
-                        ActionPartnerId = line.PartnerId?.ToString() ?? string.Empty,
-                        ActionDebit = line.DebitAmount,
-                        ActionCredit = line.CreditAmount,
-                        ActionEffect = line.DebitAmount - line.CreditAmount,
-                        TransactionUserName = "admin",
-                        TransactionIsCompleted = true,
-                        TransactionIsDisabled = slip.IsDisabled
-                    });
-                }
-            }
-
-            var transfersQuery = db.PartnerTransfers.Include(t => t.Lines).AsNoTracking();
-            if (from.HasValue) transfersQuery = transfersQuery.Where(t => t.Date >= from.Value.ToUniversalTime());
-            if (till.HasValue) transfersQuery = transfersQuery.Where(t => t.Date <= till.Value.ToUniversalTime());
-
-            var transfers = await transfersQuery.ToListAsync();
-
-            foreach (var transfer in transfers)
-            {
-                if (transfer.Lines == null) continue;
-
-                foreach (var line in transfer.Lines)
-                {
-                    if (!string.IsNullOrEmpty(partnerId) && line.PartnerId?.ToString() != partnerId)
-                        continue;
-
-                    actionsList.Add(new PartnerActionDto
-                    {
-                        TransactionId = transfer.Id.ToString(),
-                        TransactionCode = transfer.Code ?? "DOC",
-                        TransactionType = "PartnerTransfer",
-                        TransactionDate = transfer.Date,
-                        ActionOfficeId = line.OfficeId?.ToString() ?? Guid.Empty.ToString(),
-                        ActionPartnerId = line.PartnerId?.ToString() ?? string.Empty,
-                        ActionDebit = line.DebitAmount,
-                        ActionCredit = line.CreditAmount,
-                        ActionEffect = line.DebitAmount - line.CreditAmount,
-                        TransactionUserName = "admin",
-                        TransactionIsCompleted = true,
-                        TransactionIsDisabled = transfer.IsDisabled
-                    });
-                }
-            }
-
-            var sortedResult = actionsList
-                .OrderByDescending(x => x.TransactionDate)
-                .ToList();
+            var connStr = db.Database.GetConnectionString();
+            await using var conn = new NpgsqlConnection(connStr);
+            var result = await conn.QueryAsync<PartnerActionDto>(new CommandDefinition(
+                sql,
+                new { partner = pGuid, from = fUtc, till = tUtc, take },
+                cancellationToken: ct));
 
             var jsonOptions = new JsonSerializerOptions
             {
@@ -761,7 +726,7 @@ public static class PartnersEndpoints
                 ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles
             };
 
-            return Results.Json(sortedResult, jsonOptions);
+            return Results.Json(result, jsonOptions);
         });
     }
 
@@ -785,27 +750,8 @@ public static class PartnersEndpoints
                     var s = item.GetString();
                     if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
                 }
-                else if (item.ValueKind == JsonValueKind.Object)
-                {
-                    if (item.TryGetProperty("Text", out var t) || item.TryGetProperty("Value", out t) || item.TryGetProperty("Name", out t))
-                    {
-                        var s = t.GetString();
-                        if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
-                    }
-                }
             }
         }
-        else if (tagsProp.ValueKind == JsonValueKind.String)
-        {
-            var raw = tagsProp.GetString();
-            if (!string.IsNullOrWhiteSpace(raw))
-            {
-                list.AddRange(raw.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
-                                 .Select(x => x.Trim())
-                                 .Where(x => !string.IsNullOrWhiteSpace(x)));
-            }
-        }
-
         return list.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 

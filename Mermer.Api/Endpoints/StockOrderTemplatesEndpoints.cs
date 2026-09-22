@@ -20,13 +20,20 @@ public static class StockOrderTemplatesEndpoints
     {
         var group = app.MapGroup("/api/warehousing/order-templates").WithTags("StockOrderTemplates");
 
-        // 1. СПИСОК ШАБЛОНОВ
-        group.MapGet("/", async (MermerDbContext db, CancellationToken ct) =>
+        // 1. СПИСОК ШАБЛОНОВ (С ЛИМИТОМ)
+        group.MapGet("/", async (int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 500) : 100;
+            int skip = offset.GetValueOrDefault(0);
+
             var list = await db.StockOrderTemplates
-                .Include(t => t.Lines)
                 .AsNoTracking()
+                .Where(t => !t.IsDisabled)
                 .OrderBy(t => t.Name)
+                .Skip(skip)
+                .Take(take)
+                .Include(t => t.Lines)
+                .AsSplitQuery()
                 .ToListAsync(ct);
 
             return Results.Ok(list.Select(t => new
@@ -52,6 +59,7 @@ public static class StockOrderTemplatesEndpoints
 
             var t = await db.StockOrderTemplates
                 .Include(x => x.Lines)
+                .AsNoTracking()
                 .FirstOrDefaultAsync(x => x.Id == guid, ct);
 
             if (t == null) return Results.NotFound();
@@ -77,14 +85,14 @@ public static class StockOrderTemplatesEndpoints
         {
             var allGroups = await db.StockOrderTemplates
                 .AsNoTracking()
-                .Where(x => !string.IsNullOrEmpty(x.GroupName))
+                .Where(x => !string.IsNullOrEmpty(x.GroupName) && !x.IsDisabled)
                 .GroupBy(x => x.GroupName!)
                 .Select(g => new { Key = g.Key, Count = g.Count() })
                 .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
 
             var tagsList = await db.StockOrderTemplates
                 .AsNoTracking()
-                .Where(x => x.Tags != null && x.Tags.Length > 0)
+                .Where(x => x.Tags != null && x.Tags.Length > 0 && !x.IsDisabled)
                 .Select(x => x.Tags)
                 .ToListAsync(ct);
 
@@ -262,6 +270,19 @@ public static class StockOrderTemplatesEndpoints
                 return p.GetString();
         }
         return null;
+    }
+
+    private static decimal GetDecimalProp(JsonElement el, params string[] names)
+    {
+        foreach (var n in names)
+        {
+            if (TryGetPropCaseInsensitive(el, n, out var p))
+            {
+                if (p.ValueKind == JsonValueKind.Number) return p.GetDecimal();
+                if (p.ValueKind == JsonValueKind.String && decimal.TryParse(p.GetString(), out var v)) return v;
+            }
+        }
+        return 0m;
     }
 
     private static bool GetBoolProp(JsonElement el, params string[] names)
