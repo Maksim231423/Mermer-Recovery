@@ -265,9 +265,12 @@
               </dxlc:LayoutItem>
               <dxlc:LayoutItem Label="{Localize Type}">
                 <dxe:ComboBoxEdit EditValue="{Binding Details.BillType, UpdateSourceTrigger=PropertyChanged}"
-                                  IsReadOnly="{Binding CanChangeType, Converter={dxmvvm:BooleanNegationConverter}}"
-                                  AllowDefaultButton="{Binding CanChangeType}" ItemsSource="{Binding Types}"/>
-              </dxlc:LayoutItem>
+                                ValueMember="Value"
+                                DisplayMember="Text"
+                                IsReadOnly="{Binding CanChangeType, Converter={dxmvvm:BooleanNegationConverter}}"
+                                AllowDefaultButton="{Binding CanChangeType}"
+                                ItemsSource="{Binding Types}"/>
+                </dxlc:LayoutItem>
               <dxlc:LayoutItem Label="{Localize Status}">
                 <dxlc:LayoutGroup>
                   <dxe:CheckEdit Content="{Localize Completed}"

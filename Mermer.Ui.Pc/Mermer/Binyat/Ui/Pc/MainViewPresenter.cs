@@ -1,4 +1,5 @@
 ﻿using DevExpress.Xpf.Core;
+using DevExpress.Xpf.Grid;
 using DevExpress.Xpf.WindowsUI;
 using Mermer.Mvvm.Messages;
 using Mermer.Mvvm.ViewModels;
@@ -12,6 +13,8 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace Mermer.Ui.Pc
 {
@@ -37,21 +40,33 @@ namespace Mermer.Ui.Pc
 
             if (e.Item is FrameworkElement viewToKill)
             {
-                CloseTab(viewToKill);
+                CloseTab(viewToKill, "TabHeaderCross");
             }
         }
 
-        private static void CloseTab(FrameworkElement viewToKill)
+        private static void CloseTab(FrameworkElement viewToKill, string source)
         {
             if (viewToKill == null) return;
 
+            // 1. Моментально скрываем вкладку визуально
+            viewToKill.Visibility = Visibility.Collapsed;
+
+            // 2. Сразу удаляем вкладку из TabItems, НЕ ТРОГАЯ внутренности грида
             MainViewPresenter.TabItems.Remove(viewToKill);
 
-            if (viewToKill.DataContext is IDisposable disposable)
+            // 3. Отложенное уничтожение контекста через Dispatcher с минимальным приоритетом
+            Application.Current.Dispatcher.BeginInvoke(new Action(() =>
             {
-                disposable.Dispose();
-            }
-            viewToKill.DataContext = null;
+                try
+                {
+                    if (viewToKill.DataContext is IDisposable disposable)
+                    {
+                        disposable.Dispose();
+                    }
+                    viewToKill.DataContext = null;
+                }
+                catch { }
+            }), DispatcherPriority.ApplicationIdle);
         }
 
         public override void Present(FrameworkElement frameworkElement)
@@ -97,7 +112,7 @@ namespace Mermer.Ui.Pc
         {
             if (hint is MvxClosePresentationHint closeHint)
             {
-                Application.Current.Dispatcher.Invoke(() =>
+                Application.Current.Dispatcher.BeginInvoke(new Action(() =>
                 {
                     try
                     {
@@ -112,23 +127,31 @@ namespace Mermer.Ui.Pc
                         var viewToKill = MainViewPresenter.TabItems.FirstOrDefault(v => v.DataContext == closeHint.ViewModelToClose);
                         if (viewToKill != null)
                         {
-                            CloseTab(viewToKill);
+                            CloseTab(viewToKill, "CloseCommand");
+                        }
+                        else
+                        {
+                            if (_tabControl?.SelectedItem is FrameworkElement currentTab)
+                            {
+                                CloseTab(currentTab, "CurrentSelectedTabFallback");
+                            }
                         }
                     }
                     catch (Exception ex)
                     {
-                        MessageBox.Show("Ошибка закрытия вкладки: " + ex.Message);
+                        Console.WriteLine($"[CLOSE ERROR]: {ex.Message}");
                     }
-                });
+                }), DispatcherPriority.Normal);
+                return;
             }
-            else if (hint is MvxCloseAppPresentationHint)
+
+            if (hint is MvxCloseAppPresentationHint)
             {
                 Application.Current.MainWindow?.Close();
+                return;
             }
-            else
-            {
-                base.ChangePresentation(hint);
-            }
+
+            base.ChangePresentation(hint);
         }
 
         public override void Close(IMvxViewModel toClose)
@@ -139,6 +162,20 @@ namespace Mermer.Ui.Pc
         public bool CloseAll(MvxCloseAllPresentationHint hint)
         {
             return true;
+        }
+
+        private static T FindVisualChild<T>(DependencyObject parent) where T : DependencyObject
+        {
+            if (parent == null) return null;
+            int childrenCount = VisualTreeHelper.GetChildrenCount(parent);
+            for (int i = 0; i < childrenCount; i++)
+            {
+                var child = VisualTreeHelper.GetChild(parent, i);
+                if (child is T typed) return typed;
+                var found = FindVisualChild<T>(child);
+                if (found != null) return found;
+            }
+            return null;
         }
     }
 }

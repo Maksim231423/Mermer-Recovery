@@ -24,9 +24,18 @@ public partial class MainView : MvxWpfView
 {
     private HamburgerMenu _menu;
 
+    private System.Diagnostics.Stopwatch _renderSw;
+
     public MainView()
     {
+        _renderSw = System.Diagnostics.Stopwatch.StartNew();
         InitializeComponent();
+        Console.WriteLine($"[PERF UI] MainView InitializeComponent: {_renderSw.ElapsedMilliseconds} ms");
+
+        this.Loaded += (s, e) =>
+        {
+            Console.WriteLine($"[PERF UI] MainView Fully Loaded & Rendered: {_renderSw.ElapsedMilliseconds} ms");
+        };
     }
 
     private void VersionTextLoaded(object sender, RoutedEventArgs e)
@@ -45,7 +54,7 @@ public partial class MainView : MvxWpfView
         {
             dataContext.ShowPosCommand.Execute(null);
         }
-        await CreateDumbReport().ConfigureAwait(false);
+        // await CreateDumbReport().ConfigureAwait(false);
     }
 
     private Task CreateDumbReport()

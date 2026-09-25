@@ -19,6 +19,15 @@ namespace Mermer.Ui.Pc.Services
 
         public async Task<int> CountAsync(DateTime? startDate, DateTime? endDate, string partnerId, params string[] officeIds)
         {
+            try
+            {
+                var queryParams = BuildQuery(startDate, endDate, partnerId, officeIds);
+                string url = "/api/partners/actions/count" + (queryParams.Any() ? "?" + string.Join("&", queryParams) : "");
+                var res = await _restClient.GetAsync<CountResponse>(url);
+                if (res != null) return res.Count;
+            }
+            catch { }
+
             var items = await GetAsync(startDate, endDate, partnerId, officeIds);
             return items.Count();
         }
@@ -27,11 +36,7 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                var queryParams = new List<string>();
-                if (startDate.HasValue) queryParams.Add($"from={startDate.Value:yyyy-MM-ddTHH:mm:ss}");
-                if (endDate.HasValue) queryParams.Add($"till={endDate.Value:yyyy-MM-ddTHH:mm:ss}");
-                if (!string.IsNullOrEmpty(partnerId)) queryParams.Add($"partnerId={partnerId}");
-
+                var queryParams = BuildQuery(startDate, endDate, partnerId, officeIds);
                 string url = "/api/partners/actions" + (queryParams.Any() ? "?" + string.Join("&", queryParams) : "");
 
                 var remote = await _restClient.GetAsync<List<PartnerAction>>(url);
@@ -51,6 +56,29 @@ namespace Mermer.Ui.Pc.Services
         public Task<Dictionary<string, PartnerActionInfo[]>> GetByPartnersAsync(string officeId, params string[] partners)
         {
             return Task.FromResult(new Dictionary<string, PartnerActionInfo[]>());
+        }
+
+        private static List<string> BuildQuery(DateTime? startDate, DateTime? endDate, string partnerId, string[] officeIds)
+        {
+            var queryParams = new List<string>();
+            if (startDate.HasValue) queryParams.Add($"from={startDate.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
+            if (endDate.HasValue) queryParams.Add($"till={endDate.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
+            if (!string.IsNullOrEmpty(partnerId)) queryParams.Add($"partnerId={partnerId}");
+
+            if (officeIds != null && officeIds.Any())
+            {
+                foreach (var offId in officeIds.Where(o => !string.IsNullOrEmpty(o)))
+                {
+                    queryParams.Add($"officeId={offId}");
+                }
+            }
+
+            return queryParams;
+        }
+
+        private class CountResponse
+        {
+            public int Count { get; set; }
         }
     }
 }

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
@@ -14,6 +15,9 @@ namespace Mermer.Ui.Pc.Services
     {
         private readonly RestClient _restClient;
         private const string DocType = "Invoice";
+
+        // In-memory кэш единичных карточек
+        private static readonly ConcurrentDictionary<string, Invoice> _cardCache = new(StringComparer.OrdinalIgnoreCase);
 
         public ApiInvoicesRepository(RestClient restClient)
         {
@@ -40,7 +44,7 @@ namespace Mermer.Ui.Pc.Services
             return fallback;
         }
 
-        // --- IInvoicesRepository СРЕЗЫ ДАННЫХ ---
+        // --- IInvoicesRepository СРЕЗЫ ДАННЫХ (ПРЯМЫЕ И БЫСТРЫЕ ВЫЗОВЫ) ---
 
         public Task<IEnumerable<InvoiceInfo>> GetInfoAsync(DateTime from, DateTime till)
         {
@@ -51,8 +55,11 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var fromUtc = from.Kind == DateTimeKind.Utc ? from : from.ToUniversalTime();
+                var tillUtc = till.Kind == DateTimeKind.Utc ? till : till.ToUniversalTime();
+
+                var fromStr = fromUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var tillStr = tillUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
                 var url = $"/api/invoices?from={fromStr}&till={tillStr}";
                 if (!string.IsNullOrEmpty(displayCurrencyId)) url += $"&displayCurrencyId={displayCurrencyId}";
 
@@ -91,7 +98,6 @@ namespace Mermer.Ui.Pc.Services
 
         public async Task<IEnumerable<InvoicePaymentInfo>> GetPaymentInfoAsync(DateTime from, DateTime till, string officeId, string partnerId, string displayCurrencyId)
         {
-            // 1. SERVER: Пытаемся получить актуальные данные из API
             try
             {
                 var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ssZ");
@@ -119,7 +125,6 @@ namespace Mermer.Ui.Pc.Services
                             UserName = d.UserName
                         };
 
-                        // Передаем тотал и оплату через штатный механизм модели
                         info.UpdatePaymentInfo(new[]
                         {
                             new CRM.Models.PartnerActionInfo
@@ -135,54 +140,9 @@ namespace Mermer.Ui.Pc.Services
                     }).ToList();
                 }
             }
-            catch
-            {
-                // При ошибке связи с сервером переходим на локальный кэш
-            }
+            catch { }
 
-            // 2. OFFLINE-FIRST: Сбор данных из локального SQLite
-            var allLocal = LocalSqliteCache.GetAllDocuments<Invoice>(DocType) ?? new List<Invoice>();
-            var localFiltered = allLocal.Where(i => i.Date >= from && i.Date < till && !i.IsDisabled);
-
-            if (!string.IsNullOrEmpty(officeId))
-                localFiltered = localFiltered.Where(i => i.OfficeId == officeId);
-            if (!string.IsNullOrEmpty(partnerId))
-                localFiltered = localFiltered.Where(i => i.PartnerId == partnerId);
-
-            return localFiltered.Select(i =>
-            {
-                decimal subtotal = i.Lines?.Sum(l => l.Quantity * l.Price) ?? 0m;
-                decimal discounts = i.Discounts?.Sum(d => d.Type == InvoiceDiscountType.Percentage ? subtotal * d.Amount / 100 : d.Amount) ?? 0m;
-                decimal overheads = i.Overheads?.Sum(o => o.Amount) ?? 0m;
-                decimal grandTotal = subtotal - discounts + overheads;
-                decimal payments = i.Payments?.Sum(p => p.Amount) ?? 0m;
-
-                var info = new InvoicePaymentInfo
-                {
-                    Id = i.Id,
-                    Code = i.Code,
-                    Date = i.Date,
-                    DueDate = i.DueDate,
-                    InvoiceType = i.InvoiceType,
-                    IsCompleted = i.IsCompleted,
-                    PartnerId = i.PartnerId,
-                    OfficeId = i.OfficeId,
-                    UserName = i.UserName
-                };
-
-                info.UpdatePaymentInfo(new[]
-                {
-                    new CRM.Models.PartnerActionInfo
-                    {
-                        TransactionId = i.Id,
-                        TransactionDate = i.Date,
-                        ActionCredit = grandTotal,
-                        ActionDebit = payments
-                    }
-                });
-
-                return info;
-            }).ToList();
+            return Enumerable.Empty<InvoicePaymentInfo>();
         }
 
         private class InvoicePaymentInfoDto
@@ -204,16 +164,6 @@ namespace Mermer.Ui.Pc.Services
 
         public async Task<int> CountPaymentInfoAsync(DateTime from, DateTime till, string officeId = null, string partnerId = null)
         {
-            // OFFLINE
-            var allLocal = LocalSqliteCache.GetAllDocuments<Invoice>(DocType) ?? new List<Invoice>();
-            var localFiltered = allLocal.Where(i => i.Date >= from && i.Date < till && !i.IsDisabled);
-
-            if (!string.IsNullOrEmpty(officeId)) localFiltered = localFiltered.Where(i => i.OfficeId == officeId);
-            if (!string.IsNullOrEmpty(partnerId)) localFiltered = localFiltered.Where(i => i.PartnerId == partnerId);
-
-            int localCount = localFiltered.Count();
-
-            // SERVER
             try
             {
                 var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ssZ");
@@ -223,65 +173,66 @@ namespace Mermer.Ui.Pc.Services
                 if (!string.IsNullOrEmpty(partnerId)) url += $"&partnerId={partnerId}";
 
                 var res = await _restClient.GetAsync<CountResponse>(url);
-                if (res != null && res.Count > 0) return res.Count;
+                return res?.Count ?? 0;
             }
-            catch { }
-
-            return localCount;
+            catch
+            {
+                return 0;
+            }
         }
 
-        // --- БАЗОВЫЕ МЕТОДЫ ЧТЕНИЯ ---
+        // --- БАЗОВЫЕ МЕТОДЫ КАРТОЧЕК ---
 
         public async Task<IEnumerable<Invoice>> GetAllAsync()
         {
+            if (_cardCache.Count > 0)
+                return _cardCache.Values.ToList();
+
             var local = LocalSqliteCache.GetAllDocuments<Invoice>(DocType);
-
-            _ = Task.Run(async () =>
+            if (local != null)
             {
-                try
+                foreach (var inv in local)
                 {
-                    var unsynced = LocalSqliteCache.GetUnsyncedDocuments<Invoice>(DocType);
-                    foreach (var (id, inv) in unsynced)
-                    {
-                        try
-                        {
-                            await _restClient.PostAsync("/api/invoices", inv);
-                            LocalSqliteCache.SaveDocument(DocType, id, inv, isSynced: true);
-                        }
-                        catch { }
-                    }
-
-                    var remote = await _restClient.GetAsync<List<Invoice>>("/api/invoices");
-                    if (remote != null)
-                    {
-                        foreach (var inv in remote)
-                        {
-                            LocalSqliteCache.SaveDocument(DocType, inv.Id, inv, isSynced: true);
-                        }
-                    }
+                    if (!string.IsNullOrEmpty(inv?.Id)) _cardCache[inv.Id] = inv;
                 }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[Invoice Sync Error]: {ex.Message}");
-                }
-            });
+            }
 
-            return local;
+            return _cardCache.Values.ToList();
         }
 
         public async Task<Invoice> GetAsync(string id)
         {
             if (string.IsNullOrEmpty(id)) return null;
-            var all = await GetAllAsync();
-            return all.FirstOrDefault(i => string.Equals(i.Id, id, StringComparison.OrdinalIgnoreCase));
+
+            if (_cardCache.TryGetValue(id, out var cached))
+                return cached;
+
+            try
+            {
+                var inv = await _restClient.GetAsync<Invoice>($"/api/invoices/{id}");
+                if (inv != null)
+                {
+                    _cardCache[inv.Id] = inv;
+                    LocalSqliteCache.SaveDocument(DocType, inv.Id, inv, isSynced: true);
+                }
+                return inv;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         public async Task<IEnumerable<Invoice>> GetAsync(string[] ids)
         {
             if (ids == null || !ids.Any()) return Enumerable.Empty<Invoice>();
-            var all = await GetAllAsync();
-            var idSet = new HashSet<string>(ids, StringComparer.OrdinalIgnoreCase);
-            return all.Where(i => idSet.Contains(i.Id));
+            var result = new List<Invoice>();
+            foreach (var id in ids)
+            {
+                var item = await GetAsync(id);
+                if (item != null) result.Add(item);
+            }
+            return result;
         }
 
         public async Task<IEnumerable<Invoice>> GetAsync(params Expression<Func<Invoice, bool>>[] predicates)
@@ -310,34 +261,32 @@ namespace Mermer.Ui.Pc.Services
             bool isNew = string.IsNullOrEmpty(entity.Id) || entity.Id == Guid.Empty.ToString();
             if (isNew) entity.Id = Guid.NewGuid().ToString();
 
+            _cardCache[entity.Id] = entity;
             LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
 
-            try
+            _ = Task.Run(async () =>
             {
-                if (isNew)
-                    await _restClient.PostAsync("/api/invoices", entity);
-                else
-                    await _restClient.PutAsync($"/api/invoices/{entity.Id}", entity);
-
-                LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[Invoice Save Error]: {ex.Message}");
-            }
+                try
+                {
+                    if (isNew) await _restClient.PostAsync("/api/invoices", entity);
+                    else await _restClient.PutAsync($"/api/invoices/{entity.Id}", entity);
+                    LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
+                }
+                catch { }
+            });
         }
 
-        public async Task CreateAsync(Invoice entity) => await SaveAsync(entity);
-        public async Task UpdateAsync(Invoice entity) => await SaveAsync(entity);
+        public Task CreateAsync(Invoice entity) => SaveAsync(entity);
+        public Task UpdateAsync(Invoice entity) => SaveAsync(entity);
 
         public async Task DeleteAsync(string id)
         {
             if (string.IsNullOrEmpty(id)) return;
-            try
+            _cardCache.TryRemove(id, out _);
+            _ = Task.Run(async () =>
             {
-                await _restClient.DeleteAsync($"/api/invoices/{id}");
-            }
-            catch { }
+                try { await _restClient.DeleteAsync($"/api/invoices/{id}"); } catch { }
+            });
         }
 
         private class CountResponse

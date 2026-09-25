@@ -1,7 +1,7 @@
 ﻿-- ============================================================================
 -- Mermer ERP — PostgreSQL Database Schema
 -- Migration from Couchbase (NoSQL) to PostgreSQL (Relational)
--- Version: 1.8.1 | Core + Licensing (Optimized Indexes & Fixes)
+-- Version: 1.8.3 | Core + Licensing (Fully Verified & Fixed Indexes)
 -- ============================================================================
 
 -- Enable required extensions
@@ -204,6 +204,7 @@ CREATE TABLE partner_slips (
 
 CREATE INDEX idx_partner_slips_date ON partner_slips(date DESC);
 CREATE INDEX idx_partner_slips_office_date ON partner_slips(office_id, date DESC);
+CREATE INDEX idx_partner_slips_perf ON partner_slips(date, is_disabled);
 
 CREATE TABLE partner_slip_lines (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -234,6 +235,7 @@ CREATE TABLE partner_transfers (
 );
 
 CREATE INDEX idx_partner_transfers_date ON partner_transfers(date DESC);
+CREATE INDEX idx_partner_transfers_perf ON partner_transfers(date, is_disabled);
 
 CREATE TABLE partner_transfer_lines (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -249,21 +251,27 @@ CREATE TABLE partner_transfer_lines (
 CREATE INDEX idx_partner_transfer_lines_transfer_id ON partner_transfer_lines(partner_transfer_id);
 CREATE INDEX idx_partner_transfer_lines_partner_id ON partner_transfer_lines(partner_id);
 
--- Таблица взаиморасчетов перенесена сюда, строго до создания ее индексов
 CREATE TABLE IF NOT EXISTS partner_actions (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    partner_id      UUID NOT NULL REFERENCES partners(id) ON DELETE CASCADE,
-    office_id       UUID REFERENCES offices(id),
-    action_type     VARCHAR(20) NOT NULL CHECK (action_type IN ('Debit','Credit')),
-    amount          NUMERIC(18,4) NOT NULL DEFAULT 0,
-    currency_id     UUID REFERENCES currencies(id),
-    description     TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id                          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    transaction_id              UUID,
+    transaction_date            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    transaction_type            VARCHAR(100),
+    transaction_is_completed    BOOLEAN NOT NULL DEFAULT TRUE,
+    transaction_is_disabled     BOOLEAN NOT NULL DEFAULT FALSE,
+    action_partner_id           UUID REFERENCES partners(id) ON DELETE CASCADE,
+    action_office_id            UUID REFERENCES offices(id),
+    action_debit                NUMERIC(18,4) NOT NULL DEFAULT 0,
+    action_credit               NUMERIC(18,4) NOT NULL DEFAULT 0,
+    action_effect               NUMERIC(18,4) NOT NULL DEFAULT 0,
+    currency_id                 UUID REFERENCES currencies(id),
+    description                 TEXT,
+    created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_partner_actions_partner_id ON partner_actions(partner_id);
-CREATE INDEX idx_partner_actions_office_id  ON partner_actions(office_id);
-CREATE INDEX idx_partner_actions_partner_date ON partner_actions(partner_id, created_at DESC);
+CREATE INDEX idx_partner_actions_partner_id ON partner_actions(action_partner_id);
+CREATE INDEX idx_partner_actions_office_id  ON partner_actions(action_office_id);
+CREATE INDEX idx_partner_actions_partner_date ON partner_actions(action_partner_id, transaction_date DESC);
+CREATE INDEX idx_partner_actions_perf ON partner_actions(transaction_date);
 
 -- ============================================================================
 -- STOCK MANAGEMENT
@@ -296,7 +304,6 @@ CREATE INDEX IF NOT EXISTS ix_stocks_search_vector ON stocks USING GIN(search_ve
 CREATE INDEX IF NOT EXISTS ix_stocks_name_prefix ON stocks (LOWER(name) varchar_pattern_ops);
 CREATE INDEX IF NOT EXISTS ix_stocks_code_prefix ON stocks (LOWER(code) varchar_pattern_ops);
 
-
 CREATE TABLE stock_units (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     stock_id        UUID NOT NULL REFERENCES stocks(id) ON DELETE CASCADE,
@@ -310,10 +317,8 @@ CREATE TABLE stock_units (
 );
 
 CREATE INDEX idx_stock_units_stock_id ON stock_units(stock_id);
--- >>> ДОБАВЛЕНО СЮДА: быстрый поиск дефолтной единицы для CTE без LATERAL <<<
 CREATE INDEX IF NOT EXISTS idx_stock_units_default ON stock_units(stock_id) WHERE is_default = TRUE;
 
--- Stock Prices
 CREATE TABLE stock_prices (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     stock_id        UUID NOT NULL REFERENCES stocks(id) ON DELETE CASCADE,
@@ -326,8 +331,7 @@ CREATE TABLE stock_prices (
 
 CREATE INDEX idx_stock_prices_stock_id ON stock_prices(stock_id);
 CREATE INDEX idx_stock_prices_lookup ON stock_prices(stock_id, price_group, valid_from DESC);
--- >>> ДОБАВЛЕНО СЮДА: быстрый DISTINCT ON (stock_id) valid_from DESC <<<
-CREATE INDEX IF NOT EXISTS idx_stock_prices_distinct ON stock_prices(stock_id, valid_from DESC);, price_group, valid_from DESC);
+CREATE INDEX idx_stock_prices_distinct ON stock_prices(stock_id, valid_from DESC);
 
 CREATE TABLE stock_additional_prices (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -405,6 +409,7 @@ CREATE INDEX idx_stock_slips_date ON stock_slips(date DESC);
 CREATE INDEX idx_stock_slips_warehouse_id ON stock_slips(warehouse_id);
 CREATE INDEX idx_stock_slips_slip_type ON stock_slips(slip_type);
 CREATE INDEX idx_stock_slips_wh_date ON stock_slips(warehouse_id, date DESC);
+CREATE INDEX idx_stock_slips_perf ON stock_slips(date);
 
 CREATE TABLE stock_slip_lines (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -444,6 +449,7 @@ CREATE INDEX idx_stock_transfers_date ON stock_transfers(date DESC);
 CREATE INDEX idx_stock_transfers_wh ON stock_transfers(warehouse_id);
 CREATE INDEX idx_stock_transfers_dest_wh ON stock_transfers(destination_warehouse_id);
 CREATE INDEX idx_stock_transfers_wh_date ON stock_transfers(warehouse_id, date DESC);
+CREATE INDEX idx_stock_transfers_perf ON stock_transfers(date, is_disabled);
 
 CREATE TABLE stock_transfer_lines (
     id                      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -484,6 +490,7 @@ CREATE TABLE stock_revisions (
 CREATE INDEX idx_stock_revisions_date ON stock_revisions(date DESC);
 CREATE INDEX idx_stock_revisions_wh ON stock_revisions(warehouse_id);
 CREATE INDEX idx_stock_revisions_wh_date ON stock_revisions(warehouse_id, date DESC);
+CREATE INDEX idx_stock_revisions_perf ON stock_revisions(date, is_disabled);
 
 CREATE TABLE stock_revision_lines (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -524,6 +531,7 @@ CREATE INDEX idx_stock_orders_date ON stock_orders(date DESC);
 CREATE INDEX idx_stock_orders_warehouse ON stock_orders(warehouse_id);
 CREATE INDEX idx_stock_orders_partner ON stock_orders(partner_id);
 CREATE INDEX idx_stock_orders_wh_date ON stock_orders(warehouse_id, date DESC);
+CREATE INDEX idx_stock_orders_perf ON stock_orders(date, is_disabled);
 
 CREATE TABLE stock_order_lines (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -632,12 +640,12 @@ CREATE INDEX idx_invoices_partner_id ON invoices(partner_id);
 CREATE INDEX idx_invoices_warehouse_id ON invoices(warehouse_id);
 CREATE INDEX idx_invoices_type ON invoices(invoice_type);
 CREATE INDEX idx_invoices_code ON invoices(code);
--- Добавлен критичный составной индекс по филиалу и дате
 CREATE INDEX idx_invoices_office_date ON invoices(office_id, date DESC);
 CREATE INDEX idx_invoices_partner_date ON invoices(partner_id, date DESC);
 CREATE INDEX idx_invoices_type_date ON invoices(invoice_type, date DESC);
 CREATE INDEX idx_invoices_wh_date ON invoices(warehouse_id, date DESC);
 CREATE INDEX idx_invoices_active_date ON invoices(date DESC) WHERE is_disabled = FALSE;
+CREATE INDEX idx_invoices_perf ON invoices(date, is_disabled);
 
 CREATE TABLE invoice_lines (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -760,6 +768,7 @@ CREATE INDEX idx_funds_slips_date ON funds_slips(date DESC);
 CREATE INDEX idx_funds_slips_partner ON funds_slips(partner_id);
 CREATE INDEX idx_funds_slips_dep_date ON funds_slips(depository_id, date DESC);
 CREATE INDEX idx_funds_slips_office_date ON funds_slips(office_id, date DESC);
+CREATE INDEX idx_funds_slips_perf ON funds_slips(date, is_disabled);
 
 CREATE TABLE funds_slip_lines (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -792,6 +801,7 @@ CREATE TABLE funds_transfers (
 CREATE INDEX idx_funds_transfers_date ON funds_transfers(date DESC);
 CREATE INDEX idx_funds_transfers_from_dep ON funds_transfers(from_depository_id);
 CREATE INDEX idx_funds_transfers_to_dep ON funds_transfers(to_depository_id);
+CREATE INDEX idx_funds_transfers_perf ON funds_transfers(date, is_disabled);
 
 CREATE TABLE funds_transfer_lines (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -844,6 +854,7 @@ CREATE TABLE expense_slips (
 
 CREATE INDEX idx_expense_slips_date ON expense_slips(date DESC);
 CREATE INDEX idx_expense_slips_office_date ON expense_slips(office_id, date DESC);
+CREATE INDEX idx_expense_slips_perf ON expense_slips(date, is_disabled);
 
 CREATE TABLE expense_slip_lines (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -884,6 +895,7 @@ CREATE TABLE daily_funds_registery_lines (
 CREATE INDEX idx_daily_funds_reg_date ON daily_funds_registeries(date DESC);
 CREATE INDEX idx_daily_funds_reg_dep ON daily_funds_registeries(depository_id);
 CREATE INDEX idx_daily_funds_reg_lines_reg_id ON daily_funds_registery_lines(registery_id);
+CREATE INDEX idx_daily_funds_registeries_perf ON daily_funds_registeries(date, is_disabled);
 
 -- ============================================================================
 -- MATERIALIZED VIEW: Stock Search
@@ -944,6 +956,7 @@ BEGIN
           AND c.column_name = 'updated_at'
           AND t.table_type = 'BASE TABLE'
     LOOP
+        EXECUTE format('DROP TRIGGER IF EXISTS trg_%s_updated_at ON %I', tbl, tbl);
         EXECUTE format(
             'CREATE TRIGGER trg_%s_updated_at BEFORE UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION fn_update_timestamp()',
             tbl, tbl
@@ -951,3 +964,8 @@ BEGIN
     END LOOP;
 END;
 $$;
+
+-- ============================================================================
+-- OPTIMIZER STATS UPDATE
+-- ============================================================================
+ANALYZE;

@@ -29,7 +29,13 @@ public class TokenConverter : MarkupExtension, IValueConverter
         // Если запрашивает TextBlock в списке (нужна строка)
         if (targetType == typeof(string))
         {
-            return string.Join(", ", strings);
+            return strings.Count > 0 ? string.Join(", ", strings) : null;
+        }
+
+        // Если элементов нет — ОБЯЗАТЕЛЬНО возвращаем null, чтобы скрыть крестик очистки
+        if (strings.Count == 0)
+        {
+            return null;
         }
 
         // Если запрашивает редактор токенов (нужна коллекция List<object>)
@@ -38,6 +44,11 @@ public class TokenConverter : MarkupExtension, IValueConverter
 
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
     {
+        if (value == null)
+        {
+            return new List<string>();
+        }
+
         // Превращаем токены обратно в список строк для сохранения в базу
         if (value is IEnumerable<object> objectSource)
         {

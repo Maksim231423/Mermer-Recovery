@@ -5,6 +5,7 @@ using Mermer.Licensing.Client.Services;
 using Mermer.Ui.Core.Services;
 using Newtonsoft.Json;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -25,6 +26,13 @@ public class BinyatActivationService : IBinyatActivationService
         "Licenses"
     );
 
+    // =========================================================================
+    // КЭШ ДЛЯ УСТРАНЕНИЯ 4-СЕКУНДНОЙ ЗАДЕРЖКИ
+    // =========================================================================
+    private static string _cachedMachineId;
+    private static readonly ConcurrentDictionary<string, ActivationStatus> _statusCache = new();
+    private static readonly ConcurrentDictionary<string, List<ActivationResult>> _fileResultsCache = new();
+
     public BinyatActivationService(
         IActivationService activationService,
         IMachineIdProviderService machineIdProviderService)
@@ -38,13 +46,23 @@ public class BinyatActivationService : IBinyatActivationService
         }
     }
 
+    private async Task<string> GetCachedMachineIdAsync()
+    {
+        if (!string.IsNullOrEmpty(_cachedMachineId))
+            return _cachedMachineId;
+
+        _cachedMachineId = await _machineIdProviderService.GetUniqueIdAsync();
+        return _cachedMachineId;
+    }
+
     public async Task ActivateClientAsync(string licenseId, string note)
     {
         note = EscapeTooLongNotes(note);
-        string machineId = await _machineIdProviderService.GetUniqueIdAsync();
+        string machineId = await GetCachedMachineIdAsync();
         ActivationResult result = await _activationService.ActivateAsync(
             licenseId, machineId, "55ddc105-8f48-4f78-b214-aea448d2a370", note, new[] { "dc60017b-9b20-46ca-8b2e-646de9965a9e" });
         await StoreActivationResultAsync(machineId, result);
+        ClearMemoryCache();
     }
 
     public async Task ActivateServerAsync(string licenseId, string note)
@@ -54,6 +72,7 @@ public class BinyatActivationService : IBinyatActivationService
         ActivationResult result = await _activationService.ActivateAsync(
             licenseId, serverId, "55ddc105-8f48-4f78-b214-aea448d2a370", note, new[] { "9a953aa5-2fd9-418d-bcf7-fb5bd7d09553" });
         await StoreActivationResultAsync(serverId, result);
+        ClearMemoryCache();
     }
 
     public async Task ActivateSynchronizerAsync(string licenseId, string note)
@@ -63,14 +82,16 @@ public class BinyatActivationService : IBinyatActivationService
         ActivationResult result = await _activationService.ActivateAsync(
             licenseId, serverId, "55ddc105-8f48-4f78-b214-aea448d2a370", note, new[] { "6b1495a1-60aa-4420-9c30-94718c121c26" });
         await StoreActivationResultAsync(serverId, result);
+        ClearMemoryCache();
     }
 
     public async Task ReactivateClientAsync()
     {
-        string machineId = await _machineIdProviderService.GetUniqueIdAsync();
+        string machineId = await GetCachedMachineIdAsync();
         ActivationResult result = await _activationService.ReactivateAsync(
             machineId, "55ddc105-8f48-4f78-b214-aea448d2a370", new[] { "dc60017b-9b20-46ca-8b2e-646de9965a9e" });
         await StoreActivationResultAsync(machineId, result);
+        ClearMemoryCache();
     }
 
     public async Task ReactivateServerAsync()
@@ -79,6 +100,7 @@ public class BinyatActivationService : IBinyatActivationService
         ActivationResult result = await _activationService.ReactivateAsync(
             serverId, "55ddc105-8f48-4f78-b214-aea448d2a370", new[] { "9a953aa5-2fd9-418d-bcf7-fb5bd7d09553" });
         await StoreActivationResultAsync(serverId, result);
+        ClearMemoryCache();
     }
 
     public async Task ReactivateSynchronizerAsync()
@@ -87,13 +109,15 @@ public class BinyatActivationService : IBinyatActivationService
         ActivationResult result = await _activationService.ReactivateAsync(
             serverId, "55ddc105-8f48-4f78-b214-aea448d2a370", new[] { "6b1495a1-60aa-4420-9c30-94718c121c26" });
         await StoreActivationResultAsync(serverId, result);
+        ClearMemoryCache();
     }
 
     public async Task DeactivateClientAsync()
     {
-        string machineId = await _machineIdProviderService.GetUniqueIdAsync();
+        string machineId = await GetCachedMachineIdAsync();
         try { await _activationService.DeactivateAsync(machineId); } catch { }
         await DeleteActivationResultsAsync(machineId);
+        ClearMemoryCache();
     }
 
     public async Task DeactivateServerAsync()
@@ -101,6 +125,7 @@ public class BinyatActivationService : IBinyatActivationService
         string serverId = "local-server-node";
         try { await _activationService.DeactivateAsync(serverId); } catch { }
         await DeleteActivationResultsAsync(serverId);
+        ClearMemoryCache();
     }
 
     public async Task DeactivateSynchronizerAsync()
@@ -108,11 +133,15 @@ public class BinyatActivationService : IBinyatActivationService
         string serverId = "local-server-node";
         try { await _activationService.DeactivateAsync(serverId); } catch { }
         await DeleteActivationResultsAsync(serverId);
+        ClearMemoryCache();
     }
+
+    // --- МОМЕНТАЛЬНЫЕ ПРОВЕРКИ ИЗ ПАМЯТИ ---
 
     public async Task<ActivationStatus> GetClientActiveDatesAsync()
     {
-        return await GetActiveDatesAsync(await _machineIdProviderService.GetUniqueIdAsync(), "55ddc105-8f48-4f78-b214-aea448d2a370", "dc60017b-9b20-46ca-8b2e-646de9965a9e");
+        string mId = await GetCachedMachineIdAsync();
+        return await GetActiveDatesAsync(mId, "55ddc105-8f48-4f78-b214-aea448d2a370", "dc60017b-9b20-46ca-8b2e-646de9965a9e");
     }
 
     public async Task<ActivationStatus> GetServerActiveDatesAsync()
@@ -127,6 +156,12 @@ public class BinyatActivationService : IBinyatActivationService
 
     public async Task<ActivationStatus> GetActiveDatesAsync(string machineId, string applicationId, string applicationModuleId)
     {
+        string cacheKey = $"{machineId}_{applicationId}_{applicationModuleId}";
+        if (_statusCache.TryGetValue(cacheKey, out var cachedStatus))
+        {
+            return cachedStatus;
+        }
+
         var activationResults = await GetActivationResultsAsync(machineId);
         var dates = _activationService.GetActiveDates(machineId, applicationId, applicationModuleId, activationResults)
             .Select(x => new ActiveDate
@@ -135,22 +170,24 @@ public class BinyatActivationService : IBinyatActivationService
                 DateValidTill = x.DateValidTill
             }).ToList();
 
-        // Сравниваем только дату (без учета времени и сдвига часового пояса)
         var today = DateTime.Today;
         bool isActive = dates.Any(x =>
             x.DateValidFrom.Date <= today.AddDays(1) &&
             (!x.DateValidTill.HasValue || x.DateValidTill.Value.Date >= today));
 
-        return new ActivationStatus
+        var status = new ActivationStatus
         {
             IsActive = isActive,
             ActiveDates = dates
         };
-    } 
+
+        _statusCache[cacheKey] = status;
+        return status;
+    }
 
     public async Task ValidateClientActivationAsync()
     {
-        await ValidateActivationAsync(await _machineIdProviderService.GetUniqueIdAsync(), "55ddc105-8f48-4f78-b214-aea448d2a370", "dc60017b-9b20-46ca-8b2e-646de9965a9e");
+        await ValidateActivationAsync(await GetCachedMachineIdAsync(), "55ddc105-8f48-4f78-b214-aea448d2a370", "dc60017b-9b20-46ca-8b2e-646de9965a9e");
     }
 
     public async Task ValidateServerActivationAsync()
@@ -204,6 +241,11 @@ public class BinyatActivationService : IBinyatActivationService
 
     private Task<IEnumerable<ActivationResult>> GetActivationResultsAsync(string machineId)
     {
+        if (_fileResultsCache.TryGetValue(machineId, out var cachedResults))
+        {
+            return Task.FromResult<IEnumerable<ActivationResult>>(cachedResults);
+        }
+
         try
         {
             var filePath = GetFilePath(machineId);
@@ -223,6 +265,7 @@ public class BinyatActivationService : IBinyatActivationService
                         Signature = x.Signature
                     }).ToList();
 
+                    _fileResultsCache[machineId] = results;
                     return Task.FromResult<IEnumerable<ActivationResult>>(results);
                 }
             }
@@ -245,6 +288,12 @@ public class BinyatActivationService : IBinyatActivationService
         catch { }
 
         return Task.CompletedTask;
+    }
+
+    private static void ClearMemoryCache()
+    {
+        _statusCache.Clear();
+        _fileResultsCache.Clear();
     }
 
     private static string EscapeTooLongNotes(string note)

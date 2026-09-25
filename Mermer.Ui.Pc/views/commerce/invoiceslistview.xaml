@@ -59,7 +59,7 @@
                 </dxg:GridColumn>
                 <dxg:GridColumn FieldName="PartnerId" Header="{Localize Partner}" ColumnFilterMode="DisplayText">
                     <dxg:ColumnBase.EditSettings>
-                        <dxg:LookUpEditSettings DisplayMember="Fullname" 
+                        <dxg:LookUpEditSettings DisplayMember="Name" 
                                                 ValueMember="Id" 
                                                 ItemsSource="{Binding Partners.List}"
                                                 AutoComplete="True" 

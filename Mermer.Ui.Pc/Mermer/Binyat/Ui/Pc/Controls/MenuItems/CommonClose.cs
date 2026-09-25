@@ -10,13 +10,26 @@ public partial class CommonClose : AppBarButton
 
     private void CloseButton_Click(object sender, System.Windows.RoutedEventArgs e)
     {
-        // Получаем текущую ViewModel нашей формы
+        // 1. Находим View на экране
+        var parentView = FindParentView(this);
+
+        // 2. Если ViewModel умеет закрываться штатно:
         if (this.DataContext is Mermer.Mvvm.ViewModels.BaseViewModel viewModel)
         {
-            // Вызываем правильную команду закрытия из ViewModel (которая содержит проверку на IsDirty и белое окно)
             if (viewModel.CloseCommand != null && viewModel.CloseCommand.CanExecute(null))
             {
                 viewModel.CloseCommand.Execute(null);
+                return;
+            }
+        }
+
+        // 3. Если команда не сработала, закрываем вкладку напрямую через родительское View
+        if (parentView != null)
+        {
+            // Отправляем хинт презентеру закрыть этот конкретный View
+            if (parentView.DataContext is MvvmCross.Core.ViewModels.IMvxViewModel mvxVm)
+            {
+                MvvmCross.Platform.Mvx.Resolve<MvvmCross.Core.Navigation.IMvxNavigationService>()?.Close(mvxVm);
             }
         }
     }

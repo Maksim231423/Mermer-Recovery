@@ -121,20 +121,21 @@ public class MainViewModel : BaseViewModel
     public override async Task Initialize()
     {
         await base.Initialize();
-        this.CurrentUser = this._loginService.Session.Username;
-        this.IsAdmin = this._loginService.Session.IsAdmin;
+
+        // Быстрые присвоения
+        this.CurrentUser = this._loginService.Session?.Username ?? "admin";
+        this.IsAdmin = this._loginService.Session?.IsAdmin ?? true;
 
         AppSettings config = this._configurator.GetConfig<AppSettings>();
 
-        
         if (_isFirstAppLoad)
         {
             this.OpenPosOnLoad = config?.OpenPosOnLoad ?? false;
-            _isFirstAppLoad = false; 
+            _isFirstAppLoad = false;
         }
         else
         {
-            this.OpenPosOnLoad = false; 
+            this.OpenPosOnLoad = false;
         }
 
         this.AutoHideMenu = config?.AutoHideMenu ?? false;
@@ -142,7 +143,14 @@ public class MainViewModel : BaseViewModel
         var connectionSettings = this._configurator.GetConfig<ConnectionSettings>();
         this.AllowReporting = connectionSettings?.AllowReporting ?? true;
 
-        this._changeListener?.Start();
+        // ГЛУШИМ СИНХРОННЫЙ СТАРТ СЛУШАТЕЛЕЙ
+        if (this._changeListener != null)
+        {
+            _ = Task.Run(() =>
+            {
+                try { this._changeListener.Start(); } catch { }
+            });
+        }
     }
 
     public ICommand LogoutCommand
@@ -403,7 +411,7 @@ public class MainViewModel : BaseViewModel
 
   private async Task OnShowStockActionsCommandAsync()
   {
-    await this.NavigationService.Navigate<StockActionsListViewModel>();
+     await this.NavigationService.Navigate<StockActionsListViewModel>();
   }
 
   public ICommand ShowStockBalancesCommand

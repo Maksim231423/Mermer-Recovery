@@ -1,34 +1,43 @@
 ﻿using System;
 using System.Threading.Tasks;
-using Mermer.Http;
+using Mermer.Common.Settings;
+using Mermer.Services;
 using Mermer.StockManagement.Services;
 
 namespace Mermer.Ui.Pc.Services
 {
-    public class StockCodeDto
-    {
-        public string Code { get; set; }
-    }
-
     public class ApiStockCodeGenerator : IStockCodeGenerationService
     {
-        private readonly RestClient _restClient;
+        private readonly IConfigurator _configurator;
+        private static readonly object _syncLock = new object();
 
-        public ApiStockCodeGenerator(RestClient restClient)
+        public ApiStockCodeGenerator(IConfigurator configurator)
         {
-            _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
+            _configurator = configurator;
         }
 
-        public async Task<string> GetNextCode()
+        public Task<string> GetNextCode()
         {
-            try
+            lock (_syncLock)
             {
-                var dto = await _restClient.GetAsync<StockCodeDto>("/api/stocks/next-code");
-                return dto?.Code ?? "ST-000001";
-            }
-            catch
-            {
-                return "ST-000001";
+                AppSettings config = _configurator.GetConfig<AppSettings>() ?? new AppSettings();
+
+                int codeValue = config.LastStockCodeValue;
+                codeValue++;
+
+                // EAN-8: 2 цифры префикса + 5 цифр порядкового номера
+                string baseCode = $"{config.LocalCodePrefix:D2}{codeValue:D5}";
+                string checksum = EanChecksumHelper.CalculateChecksumDigit(baseCode);
+                string fullCode = baseCode + checksum;
+
+                config.LastStockCodeValue = codeValue;
+                try
+                {
+                    _configurator.SetConfig<AppSettings>(config);
+                }
+                catch { }
+
+                return Task.FromResult(fullCode);
             }
         }
     }

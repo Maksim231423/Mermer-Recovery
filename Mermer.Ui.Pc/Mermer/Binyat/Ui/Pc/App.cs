@@ -121,7 +121,7 @@ public partial class App : System.Windows.Application
         string fieldName = col.FieldName ?? string.Empty;
         string header = col.Header?.ToString() ?? string.Empty;
 
-        // 1. Форматирование курсов валют (2 знака после запятой)
+        // 1. Форматирование курсов валют
         if (fieldName.Equals("Multiplier", StringComparison.OrdinalIgnoreCase) ||
             fieldName.Equals("Divider", StringComparison.OrdinalIgnoreCase))
         {
@@ -133,14 +133,22 @@ public partial class App : System.Windows.Application
                 MaskType = MaskType.Numeric,
                 MaskUseAsDisplayFormat = true
             };
+            return;
         }
 
-        // 2. Колонка Author в журнале склада и документах
-        if (fieldName.Equals("Author", StringComparison.OrdinalIgnoreCase) ||
-            fieldName.Equals("TransactionAuthor", StringComparison.OrdinalIgnoreCase) ||
-            fieldName.Equals("TransactionUserName", StringComparison.OrdinalIgnoreCase) ||
-            header.Equals("Author", StringComparison.OrdinalIgnoreCase) ||
-            header.Equals("Автор", StringComparison.OrdinalIgnoreCase))
+        // 2. НЕ перебиваем привязку, если поле уже называется UserName (как в накладных)
+        if (fieldName.Equals("UserName", StringComparison.OrdinalIgnoreCase))
+        {
+            col.EditSettings = new TextEditSettings
+            {
+                NullText = "admin"
+            };
+            return;
+        }
+
+        // 3. Применяем TransactionUserName только там, где действительно поле складской проводки
+        if (fieldName.Equals("TransactionAuthor", StringComparison.OrdinalIgnoreCase) ||
+            fieldName.Equals("TransactionUserName", StringComparison.OrdinalIgnoreCase))
         {
             col.Binding = new System.Windows.Data.Binding("TransactionUserName")
             {

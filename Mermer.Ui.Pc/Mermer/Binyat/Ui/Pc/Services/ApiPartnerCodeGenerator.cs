@@ -1,45 +1,44 @@
 ﻿using System;
-using System.Net.Http;
-using System.Text.Json;
-using System.Threading;
 using System.Threading.Tasks;
+using Mermer.Common.Settings;
 using Mermer.CRM.Services;
+using Mermer.Services;
 
 namespace Mermer.Ui.Pc.Services
 {
     public class ApiPartnerCodeGenerator : IPartnerCodeGenerationService
     {
-        private readonly HttpClient _httpClient;
+        private readonly IConfigurator _configurator;
+        private static readonly object _syncLock = new object();
 
-        public ApiPartnerCodeGenerator(HttpClient httpClient)
+        public ApiPartnerCodeGenerator(IConfigurator configurator)
         {
-            _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+            _configurator = configurator;
         }
 
-        public async Task<string> GetNextCode()
+        public Task<string> GetNextCode()
         {
-            try
+            lock (_syncLock)
             {
-                // Жесткий таймаут 200 миллисекунд для моментального фолбэка в оффлайне
-                using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
-                var response = await _httpClient.GetAsync("/api/partners/next-code", cts.Token);
+                AppSettings config = _configurator.GetConfig<AppSettings>() ?? new AppSettings();
 
-                if (response.IsSuccessStatusCode)
+                int codeValue = config.LastPartnerCodeValue;
+                codeValue++;
+
+                // EAN-8: 2 цифры префикса + 5 цифр порядкового номера
+                string baseCode = $"{config.LocalCodePrefix:D2}{codeValue:D5}";
+                string checksum = EanChecksumHelper.CalculateChecksumDigit(baseCode);
+                string fullCode = baseCode + checksum;
+
+                config.LastPartnerCodeValue = codeValue;
+                try
                 {
-                    var responseString = await response.Content.ReadAsStringAsync();
-                    using var doc = JsonDocument.Parse(responseString);
-                    if (doc.RootElement.TryGetProperty("code", out var codeProp))
-                    {
-                        return codeProp.GetString();
-                    }
+                    _configurator.SetConfig<AppSettings>(config);
                 }
-            }
-            catch
-            {
-                // Сервер недоступен — мгновенно уходим в фолбэк
-            }
+                catch { }
 
-            return $"P-{DateTime.Now:yyMMddHHmmss}";
+                return Task.FromResult(fullCode);
+            }
         }
     }
 }

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
@@ -19,6 +20,9 @@ public class ApiDailyFundsRegisteriesRepository :
     private readonly RestClient _restClient;
     private const string DocType = "DailyFundsRegistery";
 
+    // In-memory кэш открытых карточек для моментального O(1) доступа
+    private static readonly ConcurrentDictionary<string, DailyFundsRegistery> _cardCache = new(StringComparer.OrdinalIgnoreCase);
+
     public ApiDailyFundsRegisteriesRepository(RestClient restClient)
     {
         _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
@@ -28,15 +32,15 @@ public class ApiDailyFundsRegisteriesRepository :
     {
         if (string.IsNullOrEmpty(id)) return null;
 
-        var allLocal = LocalSqliteCache.GetAllDocuments<DailyFundsRegistery>(DocType);
-        var local = allLocal?.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
-        if (local != null) return local;
+        if (_cardCache.TryGetValue(id, out var cached))
+            return cached;
 
         try
         {
             var remote = await _restClient.GetAsync<DailyFundsRegistery>($"/api/finance/registeries/{id}");
             if (remote != null)
             {
+                _cardCache[remote.Id] = remote;
                 LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                 return remote;
             }
@@ -49,32 +53,58 @@ public class ApiDailyFundsRegisteriesRepository :
     public async Task<IEnumerable<DailyFundsRegistery>> GetAsync(string[] ids)
     {
         if (ids == null || !ids.Any()) return Enumerable.Empty<DailyFundsRegistery>();
-        var all = await GetAllAsync();
-        var idSet = new HashSet<string>(ids, StringComparer.OrdinalIgnoreCase);
-        return all.Where(x => idSet.Contains(x.Id)).ToList();
+        var result = new List<DailyFundsRegistery>();
+        foreach (var id in ids)
+        {
+            var item = await GetAsync(id);
+            if (item != null) result.Add(item);
+        }
+        return result;
     }
 
-    // Обычный GetAsync для базовых интерфейсов
+    // --- БЫСТРАЯ ВЫБОРКА ПО ДАТАМ (БЕЗ ВЫГРУЗКИ ВСЕЙ БАЗЫ ИЗ SQLITE) ---
     public async Task<IEnumerable<DailyFundsRegistery>> GetAsync(params Expression<Func<DailyFundsRegistery, bool>>[] predicates)
     {
-        var all = await GetAllAsync();
-        var query = all.AsQueryable();
+        var (hasDates, from, till) = TryExtractDateRange(predicates);
 
-        if (predicates != null && predicates.Any())
+        // Если есть диапазон дат — берем срез напрямую с бэкенда
+        if (hasDates)
         {
-            foreach (var p in predicates.Where(x => x != null)) query = query.Where(p);
+            try
+            {
+                var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+                var remoteSlice = await _restClient.GetAsync<List<DailyFundsRegistery>>($"/api/finance/registeries?from={fromStr}&till={tillStr}");
+                if (remoteSlice != null)
+                {
+                    var query = remoteSlice.AsQueryable();
+                    if (predicates != null)
+                    {
+                        foreach (var p in predicates.Where(x => x != null)) query = query.Where(p);
+                    }
+                    return query.ToList();
+                }
+            }
+            catch { }
         }
 
-        return query.ToList();
+        // Иначе отдаем из кэша памяти
+        var all = await GetAllAsync();
+        var fallbackQuery = all.AsQueryable();
+        if (predicates != null)
+        {
+            foreach (var p in predicates.Where(x => x != null)) fallbackQuery = fallbackQuery.Where(p);
+        }
+        return fallbackQuery.ToList();
     }
 
-    // Специфичный метод для IDailyFundsRegisteriesRepository (возвращает DailyFundsRegisteryInfo)
+    // Реализация для интерфейса IDailyFundsRegisteriesRepository (маппинг в Info)
     async Task<IEnumerable<DailyFundsRegisteryInfo>> IDailyFundsRegisteriesRepository.GetAsync(params Expression<Func<DailyFundsRegistery, bool>>[] predicates)
     {
         var items = await GetAsync(predicates);
 
-        // Конвертируем в Info. Балансы (Computed) пока оставляем пустыми, они будут считаться на бэкенде.
-        var infos = items.Select(x => new DailyFundsRegisteryInfo
+        return items.Select(x => new DailyFundsRegisteryInfo
         {
             Id = x.Id,
             Code = x.Code,
@@ -90,55 +120,49 @@ public class ApiDailyFundsRegisteriesRepository :
             CurrencyConvertions = x.CurrencyConvertions,
             Computed = null
         }).ToList();
-
-        return infos;
     }
 
-    private async Task<IEnumerable<DailyFundsRegistery>> GetAllAsync()
+    // Мгновенный подсчет для боковых плиток дат (Today, This Week, This Month и т.д.)
+    public async Task<int> CountAsync(params Expression<Func<DailyFundsRegistery, bool>>[] predicates)
     {
-        _ = Task.Run(async () =>
+        var (hasDates, from, till) = TryExtractDateRange(predicates);
+
+        if (hasDates)
         {
             try
             {
-                var unsynced = LocalSqliteCache.GetUnsyncedDocuments<DailyFundsRegistery>(DocType);
-                if (unsynced != null)
-                {
-                    foreach (var item in unsynced)
-                    {
-                        await _restClient.PostAsync("/api/finance/registeries", item.entity);
-                        LocalSqliteCache.SaveDocument(DocType, item.id, item.entity, isSynced: true);
-                    }
-                }
+                var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+                var res = await _restClient.GetAsync<CountResponse>($"/api/finance/registeries/count?from={fromStr}&till={tillStr}");
+                if (res != null) return res.Count;
             }
             catch { }
-        });
+        }
 
-        var localItems = LocalSqliteCache.GetAllDocuments<DailyFundsRegistery>(DocType)?.ToList() ?? new List<DailyFundsRegistery>();
+        var items = await GetAsync(predicates);
+        return items.Count();
+    }
 
-        try
+    public async Task<IEnumerable<DailyFundsRegistery>> GetAllAsync()
+    {
+        if (_cardCache.Count > 0)
+            return _cardCache.Values.ToList();
+
+        var local = LocalSqliteCache.GetAllDocuments<DailyFundsRegistery>(DocType);
+        if (local != null)
         {
-            var remote = await _restClient.GetAsync<IEnumerable<DailyFundsRegistery>>("/api/finance/registeries");
-            if (remote != null && remote.Any())
+            foreach (var item in local)
             {
-                foreach (var item in remote)
-                {
-                    LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
-                }
-                return remote.ToList();
+                if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
             }
         }
-        catch { }
 
-        return localItems;
+        return _cardCache.Values.ToList();
     }
 
-    public async Task<int> CountAsync(params Expression<Func<DailyFundsRegistery, bool>>[] predicates)
-    {
-        return (await GetAsync(predicates)).Count();
-    }
-
-    public async Task CreateAsync(DailyFundsRegistery model) => await SaveAsync(model);
-    public async Task UpdateAsync(DailyFundsRegistery model) => await SaveAsync(model);
+    public Task CreateAsync(DailyFundsRegistery model) => SaveAsync(model);
+    public Task UpdateAsync(DailyFundsRegistery model) => SaveAsync(model);
 
     public async Task SaveAsync(DailyFundsRegistery model)
     {
@@ -147,29 +171,36 @@ public class ApiDailyFundsRegisteriesRepository :
         bool isNew = string.IsNullOrEmpty(model.Id) || model.Id == Guid.Empty.ToString();
         if (isNew) model.Id = Guid.NewGuid().ToString();
 
-        // 1. Локальный кэш
+        _cardCache[model.Id] = model;
         LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
 
-        // 2. Серверная синхронизация
-        try
+        _ = Task.Run(async () =>
         {
-            if (isNew)
-                await _restClient.PostAsync("/api/finance/registeries", model);
-            else
-                await _restClient.PutAsync($"/api/finance/registeries/{model.Id}", model);
+            try
+            {
+                if (isNew)
+                    await _restClient.PostAsync("/api/finance/registeries", model);
+                else
+                    await _restClient.PutAsync($"/api/finance/registeries/{model.Id}", model);
 
-            LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[DAILY REGISTERY SYNC ERROR]: {ex.Message}");
-        }
+                LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[DAILY REGISTERY SYNC ERROR]: {ex.Message}");
+            }
+        });
     }
 
     public async Task DeleteAsync(string id)
     {
         if (string.IsNullOrEmpty(id)) return;
-        try { await _restClient.DeleteAsync($"/api/finance/registeries/{id}"); } catch { }
+        _cardCache.TryRemove(id, out _);
+
+        _ = Task.Run(async () =>
+        {
+            try { await _restClient.DeleteAsync($"/api/finance/registeries/{id}"); } catch { }
+        });
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)
@@ -189,5 +220,69 @@ public class ApiDailyFundsRegisteriesRepository :
         catch { }
 
         return dict;
+    }
+
+    // --- ПАРСЕР ДАТ ИЗ ДЕРЕВА EXPRESSION (MvvmCross) ---
+    private static (bool HasDates, DateTime From, DateTime Till) TryExtractDateRange(Expression<Func<DailyFundsRegistery, bool>>[] predicates)
+    {
+        if (predicates == null || predicates.Length == 0)
+            return (false, default, default);
+
+        DateTime from = DateTime.MinValue;
+        DateTime till = DateTime.MaxValue;
+        bool found = false;
+
+        foreach (var pred in predicates.Where(p => p != null))
+        {
+            try
+            {
+                ExtractDatesFromExpression(pred.Body, ref from, ref till, ref found);
+            }
+            catch { }
+        }
+
+        return (found, from, till);
+    }
+
+    private static void ExtractDatesFromExpression(Expression expr, ref DateTime from, ref DateTime till, ref bool found)
+    {
+        if (expr is BinaryExpression bin)
+        {
+            if (bin.NodeType == ExpressionType.AndAlso || bin.NodeType == ExpressionType.And)
+            {
+                ExtractDatesFromExpression(bin.Left, ref from, ref till, ref found);
+                ExtractDatesFromExpression(bin.Right, ref from, ref till, ref found);
+                return;
+            }
+
+            if (bin.NodeType == ExpressionType.GreaterThanOrEqual || bin.NodeType == ExpressionType.GreaterThan)
+            {
+                var val = EvaluateExpression(bin.Right);
+                if (val is DateTime dt) { from = dt; found = true; }
+            }
+            else if (bin.NodeType == ExpressionType.LessThanOrEqual || bin.NodeType == ExpressionType.LessThan)
+            {
+                var val = EvaluateExpression(bin.Right);
+                if (val is DateTime dt) { till = dt; found = true; }
+            }
+        }
+    }
+
+    private static object EvaluateExpression(Expression expr)
+    {
+        if (expr is ConstantExpression ce) return ce.Value;
+        if (expr is MemberExpression me)
+        {
+            var target = EvaluateExpression(me.Expression);
+            if (me.Member is System.Reflection.FieldInfo fi) return fi.GetValue(target);
+            if (me.Member is System.Reflection.PropertyInfo pi) return pi.GetValue(target);
+        }
+        var lambda = Expression.Lambda(expr);
+        return lambda.Compile().DynamicInvoke();
+    }
+
+    private class CountResponse
+    {
+        public int Count { get; set; }
     }
 }

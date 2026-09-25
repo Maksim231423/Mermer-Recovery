@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
@@ -14,6 +15,8 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
     private readonly RestClient _restClient;
     private const string DocType = "ExpenseSlip";
 
+    private static readonly ConcurrentDictionary<string, ExpenseSlip> _cardCache = new(StringComparer.OrdinalIgnoreCase);
+
     public ApiExpenseSlipsRepository(RestClient restClient)
     {
         _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
@@ -23,15 +26,19 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
     {
         if (string.IsNullOrEmpty(id)) return null;
 
-        var allLocal = LocalSqliteCache.GetAllDocuments<ExpenseSlip>(DocType);
-        var local = allLocal?.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
-        if (local != null) return local;
+        if (_cardCache.TryGetValue(id, out var cached))
+            return cached;
+
+        await GetAllAsync();
+        if (_cardCache.TryGetValue(id, out cached))
+            return cached;
 
         try
         {
             var remote = await _restClient.GetAsync<ExpenseSlip>($"/api/spending/slips/{id}");
             if (remote != null)
             {
+                _cardCache[remote.Id] = remote;
                 LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                 return remote;
             }
@@ -44,80 +51,90 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
     public async Task<IEnumerable<ExpenseSlip>> GetAsync(string[] ids)
     {
         if (ids == null || !ids.Any()) return Enumerable.Empty<ExpenseSlip>();
-        var all = await GetAllAsync();
-        var idSet = new HashSet<string>(ids, StringComparer.OrdinalIgnoreCase);
-        return all.Where(x => idSet.Contains(x.Id)).ToList();
+        var result = new List<ExpenseSlip>();
+        foreach (var id in ids)
+        {
+            var item = await GetAsync(id);
+            if (item != null) result.Add(item);
+        }
+        return result;
     }
 
+    // --- БЫСТРАЯ ФИЛЬТРАЦИЯ ПО ДАТАМ (ПРЯМОЙ ВЫЗОВ СРЕЗА С СЕРВЕРА) ---
     public async Task<IEnumerable<ExpenseSlip>> GetAsync(params Expression<Func<ExpenseSlip, bool>>[] predicates)
     {
-        var all = await GetAllAsync();
-        var query = all.AsQueryable();
+        var (hasDates, from, till) = TryExtractDateRange(predicates);
 
-        if (predicates != null && predicates.Any())
-        {
-            foreach (var p in predicates.Where(x => x != null)) query = query.Where(p);
-        }
-
-        return query.ToList();
-    }
-
-    private async Task<IEnumerable<ExpenseSlip>> GetAllAsync()
-    {
-        // 1. Асинхронная синхронизация несинхронизированных документов в фоне
-        _ = Task.Run(async () =>
+        if (hasDates)
         {
             try
             {
-                var unsynced = LocalSqliteCache.GetUnsyncedDocuments<ExpenseSlip>(DocType);
-                if (unsynced != null && unsynced.Any())
+                var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+                var remoteSlice = await _restClient.GetAsync<List<ExpenseSlip>>($"/api/spending/slips?from={fromStr}&till={tillStr}");
+                if (remoteSlice != null)
                 {
-                    foreach (var item in unsynced)
+                    var query = remoteSlice.AsQueryable();
+                    if (predicates != null)
                     {
-                        await _restClient.PostAsync("/api/spending/slips", item.entity);
-                        LocalSqliteCache.SaveDocument(DocType, item.id, item.entity, isSynced: true);
+                        foreach (var p in predicates.Where(x => x != null)) query = query.Where(p);
                     }
+                    return query.ToList();
                 }
             }
             catch { }
-        });
-
-        // 2. Получаем данные с сервера
-        try
-        {
-            var remote = await _restClient.GetAsync<List<ExpenseSlip>>("/api/spending/slips");
-            if (remote != null && remote.Any())
-            {
-                // ОПТИМИЗАЦИЯ: Сохранение в локальный SQLite-кэш убираем из блокирующего пути UI в фоновый Task
-                _ = Task.Run(() =>
-                {
-                    try
-                    {
-                        foreach (var item in remote)
-                        {
-                            LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
-                        }
-                    }
-                    catch { }
-                });
-
-                return remote;
-            }
         }
-        catch { }
 
-        // Если сеть недоступна — отдаем локальный кэш
-        return LocalSqliteCache.GetAllDocuments<ExpenseSlip>(DocType)?.ToList() ?? new List<ExpenseSlip>();
+        var all = await GetAllAsync();
+        var fallbackQuery = all.AsQueryable();
+        if (predicates != null)
+        {
+            foreach (var p in predicates.Where(x => x != null)) fallbackQuery = fallbackQuery.Where(p);
+        }
+        return fallbackQuery.ToList();
     }
 
     public async Task<int> CountAsync(params Expression<Func<ExpenseSlip, bool>>[] predicates)
     {
-        return (await GetAsync(predicates)).Count();
+        var (hasDates, from, till) = TryExtractDateRange(predicates);
+
+        if (hasDates)
+        {
+            try
+            {
+                var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+                var res = await _restClient.GetAsync<CountResponse>($"/api/spending/slips/count?from={fromStr}&till={tillStr}");
+                if (res != null) return res.Count;
+            }
+            catch { }
+        }
+
+        var items = await GetAsync(predicates);
+        return items.Count();
     }
 
-    public async Task CreateAsync(ExpenseSlip model) => await SaveAsync(model);
+    public async Task<IEnumerable<ExpenseSlip>> GetAllAsync()
+    {
+        if (_cardCache.Count > 0)
+            return _cardCache.Values.ToList();
 
-    public async Task UpdateAsync(ExpenseSlip model) => await SaveAsync(model);
+        var local = LocalSqliteCache.GetAllDocuments<ExpenseSlip>(DocType);
+        if (local != null)
+        {
+            foreach (var item in local)
+            {
+                if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+            }
+        }
+
+        return _cardCache.Values.ToList();
+    }
+
+    public Task CreateAsync(ExpenseSlip model) => SaveAsync(model);
+    public Task UpdateAsync(ExpenseSlip model) => SaveAsync(model);
 
     public async Task SaveAsync(ExpenseSlip model)
     {
@@ -126,36 +143,36 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
         bool isNew = string.IsNullOrEmpty(model.Id) || model.Id == Guid.Empty.ToString();
         if (isNew) model.Id = Guid.NewGuid().ToString();
 
-        // 1. Сохраняем локально со статусом "не синхронизировано"
+        _cardCache[model.Id] = model;
         LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
 
-        try
+        _ = Task.Run(async () =>
         {
-            // 2. В зависимости от того, новый это документ или нет, вызываем POST или PUT
-            if (isNew)
-                await _restClient.PostAsync("/api/spending/slips", model);
-            else
-                await _restClient.PutAsync($"/api/spending/slips/{model.Id}", model);
+            try
+            {
+                if (isNew)
+                    await _restClient.PostAsync("/api/spending/slips", model);
+                else
+                    await _restClient.PutAsync($"/api/spending/slips/{model.Id}", model);
 
-            // 3. Отмечаем как "синхронизировано"
-            LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
-        }
-        catch (Exception ex)
-        {
-            System.Windows.MessageBox.Show(
-                $"Бэкенд отклонил синхронизацию.\nОшибка: {ex.Message}",
-                "Ошибка синхронизации",
-                System.Windows.MessageBoxButton.OK,
-                System.Windows.MessageBoxImage.Warning);
-
-            System.Diagnostics.Debug.WriteLine($"[EXPENSE SLIP SYNC ERROR]: {ex.Message}");
-        }
+                LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[EXPENSE SLIP SYNC ERROR]: {ex.Message}");
+            }
+        });
     }
 
     public async Task DeleteAsync(string id)
     {
         if (string.IsNullOrEmpty(id)) return;
-        try { await _restClient.DeleteAsync($"/api/spending/slips/{id}"); } catch { }
+        _cardCache.TryRemove(id, out _);
+
+        _ = Task.Run(async () =>
+        {
+            try { await _restClient.DeleteAsync($"/api/spending/slips/{id}"); } catch { }
+        });
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)
@@ -175,5 +192,69 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
         catch { }
 
         return dict;
+    }
+
+    // --- ПАРСЕР ДАТ ИЗ ВЫРАЖЕНИЙ MVVMCROSS ---
+    private static (bool HasDates, DateTime From, DateTime Till) TryExtractDateRange(Expression<Func<ExpenseSlip, bool>>[] predicates)
+    {
+        if (predicates == null || predicates.Length == 0)
+            return (false, default, default);
+
+        DateTime from = DateTime.MinValue;
+        DateTime till = DateTime.MaxValue;
+        bool found = false;
+
+        foreach (var pred in predicates.Where(p => p != null))
+        {
+            try
+            {
+                ExtractDatesFromExpression(pred.Body, ref from, ref till, ref found);
+            }
+            catch { }
+        }
+
+        return (found, from, till);
+    }
+
+    private static void ExtractDatesFromExpression(Expression expr, ref DateTime from, ref DateTime till, ref bool found)
+    {
+        if (expr is BinaryExpression bin)
+        {
+            if (bin.NodeType == ExpressionType.AndAlso || bin.NodeType == ExpressionType.And)
+            {
+                ExtractDatesFromExpression(bin.Left, ref from, ref till, ref found);
+                ExtractDatesFromExpression(bin.Right, ref from, ref till, ref found);
+                return;
+            }
+
+            if (bin.NodeType == ExpressionType.GreaterThanOrEqual || bin.NodeType == ExpressionType.GreaterThan)
+            {
+                var val = EvaluateExpression(bin.Right);
+                if (val is DateTime dt) { from = dt; found = true; }
+            }
+            else if (bin.NodeType == ExpressionType.LessThanOrEqual || bin.NodeType == ExpressionType.LessThan)
+            {
+                var val = EvaluateExpression(bin.Right);
+                if (val is DateTime dt) { till = dt; found = true; }
+            }
+        }
+    }
+
+    private static object EvaluateExpression(Expression expr)
+    {
+        if (expr is ConstantExpression ce) return ce.Value;
+        if (expr is MemberExpression me)
+        {
+            var target = EvaluateExpression(me.Expression);
+            if (me.Member is System.Reflection.FieldInfo fi) return fi.GetValue(target);
+            if (me.Member is System.Reflection.PropertyInfo pi) return pi.GetValue(target);
+        }
+        var lambda = Expression.Lambda(expr);
+        return lambda.Compile().DynamicInvoke();
+    }
+
+    private class CountResponse
+    {
+        public int Count { get; set; }
     }
 }

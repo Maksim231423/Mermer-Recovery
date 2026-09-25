@@ -23,13 +23,18 @@ namespace Mermer.Ui.Pc.Services
 
         protected override async Task<User> GetUser(string username, string password)
         {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
+                System.Diagnostics.Debug.WriteLine($"[AUTH HTTP] Sending POST /api/auth/login...");
+
                 var apiResponse = await _restClient.PostAsync<ApiLoginResponse>("/api/auth/login", new
                 {
                     Username = username,
                     Password = password
                 });
+
+                System.Diagnostics.Debug.WriteLine($"[AUTH HTTP] Received response in {sw.ElapsedMilliseconds} ms");
 
                 if (apiResponse == null)
                 {
@@ -47,7 +52,7 @@ namespace Mermer.Ui.Pc.Services
             }
             catch (Exception ex)
             {
-                // Выводим все детали исключения: сообщение, внутреннее исключение
+                System.Diagnostics.Debug.WriteLine($"[AUTH HTTP FAILED in {sw.ElapsedMilliseconds} ms]: {ex.Message}");
                 string detail = ex.InnerException != null ? $"{ex.Message} -> {ex.InnerException.Message}" : ex.Message;
                 throw new Exception($"[Auth Debug] {detail}", ex);
             }

@@ -83,85 +83,20 @@ public class LoginViewModel : BaseViewModel
     private async Task LoginAsync()
     {
         IsBusy = true;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            // Проверяем отдельно клиентскую и серверную лицензии
-            var clientStatus = await _activationService.GetClientActiveDatesAsync();
-            var serverStatus = await _activationService.GetServerActiveDatesAsync();
-
-            if (!clientStatus.IsActive && !serverStatus.IsActive)
-            {
-                UserInteractionService.ShowMessage(
-                    "Требуется активация",
-                    "Лицензии клиента и сервера не активны. Пожалуйста, активируйте оба модуля для продолжения."
-                );
-                await NavigationService.Navigate<ActivationViewModel>();
-                return;
-            }
-
-            if (!clientStatus.IsActive)
-            {
-                UserInteractionService.ShowMessage(
-                    "Лицензия клиента не активна",
-                    "Лицензия пользователя (клиента) не активирована или её срок действия истёк."
-                );
-                await NavigationService.Navigate<ActivationViewModel>();
-                return;
-            }
-
-            if (!serverStatus.IsActive)
-            {
-                UserInteractionService.ShowMessage(
-                    "Лицензия сервера не активна",
-                    "Лицензия сервера не активирована или её срок действия истёк."
-                );
-                await NavigationService.Navigate<ActivationViewModel>();
-                return;
-            }
-
-            // 1. Авторизуемся на сервере
+            Console.WriteLine("[PERF] 1. Calling LoginAsync...");
             await _loginService.LoginAsync(Username, Password);
+            Console.WriteLine($"[PERF] 2. LoginService finished in {sw.ElapsedMilliseconds} ms. Navigating to MainViewModel...");
 
-            // =====================================================================
-            // 2. ПРОГРЕВ СПРАВОЧНИКОВ ПРЯМО НА ЭКРАНЕ ВХОДА
-            // =====================================================================
-            try
-            {
-                var offices = Mvx.Resolve<Reference<Office>>();
-                var warehouses = Mvx.Resolve<Reference<Warehouse>>();
-                var depositories = Mvx.Resolve<Reference<Depository>>();
-                var partners = Mvx.Resolve<Reference<Partner>>();
-
-                // Скачиваем их параллельно, пока пользователь видит "Вход..."
-                await Task.WhenAll(
-                    offices.Initialize(),
-                    warehouses.Initialize(),
-                    depositories.Initialize(),
-                    partners.Initialize()
-                );
-            }
-            catch (Exception warmEx)
-            {
-                System.Diagnostics.Debug.WriteLine($"[Warmup Error]: {warmEx.Message}");
-            }
-
-            // 3. Переходим на главное окно — справочники уже в памяти!
+            sw.Restart();
             await NavigationService.Navigate<MainViewModel>();
-        }
-        catch (InvalidOperationException ex)
-        {
-            string details = ex.InnerException != null
-                ? $"{ex.Message}\n\nДетали: {ex.InnerException.Message}"
-                : ex.Message;
-
-            UserInteractionService.ShowMessage("Ошибка входа (InvalidOperation)", details);
+            Console.WriteLine($"[PERF] 3. Navigate to MainViewModel finished in {sw.ElapsedMilliseconds} ms");
         }
         catch (Exception ex)
         {
-            UserInteractionService.ShowExceptionMessage(
-                ex,
-                $"Критическая ошибка ({ex.GetType().Name})"
-            );
+            UserInteractionService.ShowExceptionMessage(ex);
         }
         finally
         {

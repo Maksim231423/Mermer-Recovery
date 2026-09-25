@@ -1,50 +1,68 @@
-﻿// Decompiled with JetBrains decompiler
-// Type: Mermer.Commerce.Models.InvoiceInfo
-// Assembly: Mermer, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
-// MVID: 19F85A6C-D40F-439D-9478-41F01000D67D
-// Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.dll
-
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 
-#nullable disable
 namespace Mermer.Commerce.Models;
 
 public class InvoiceInfo
 {
-  public string Id { get; set; }
+    public string Id { get; set; } = string.Empty;
 
-  public string Code { get; set; }
+    public string Code { get; set; } = string.Empty;
 
-  public string Type { get; set; }
+    public string Type { get; set; } = string.Empty;
 
-  public DateTime Date { get; set; }
+    public DateTime Date { get; set; }
 
-  public string UserId { get; set; }
+    public string UserId { get; set; } = string.Empty;
 
-  public string UserName { get; set; }
+    public string UserName { get; set; } = "admin";
 
-  public bool IsCash { get; set; }
+    public bool IsCash { get; set; }
 
-  public bool IsCompleted { get; set; }
+    public bool IsCompleted { get; set; }
 
-  public bool IsDisabled { get; set; }
+    public bool IsDisabled { get; set; }
 
-  public string Group { get; set; }
+    public string Group { get; set; } = string.Empty;
 
-  public IEnumerable<string> Tags { get; set; }
+    private IEnumerable<string> _tags = Enumerable.Empty<string>();
+    public IEnumerable<string> Tags
+    {
+        get => _tags ?? Enumerable.Empty<string>();
+        set => _tags = value ?? Enumerable.Empty<string>();
+    }
 
-  public string OfficeId { get; set; }
+    public string OfficeId { get; set; } = string.Empty;
 
-  public string WarehouseId { get; set; }
+    public string WarehouseId { get; set; } = string.Empty;
 
-  public string DepositoryId { get; set; }
+    public string DepositoryId { get; set; } = string.Empty;
 
-  public string PartnerId { get; set; }
+    public string PartnerId { get; set; } = string.Empty;
 
-  public Decimal ActionTotal { get; set; }
+    // Основные свойства, которые приходят из JSON и используются в XAML:
+    public decimal ActionTotal { get; set; }
 
-  public Decimal ActionDiscountsTotal { get; set; }
+    public decimal Total
+    {
+        get => ActionTotal;
+        set => ActionTotal = value;
+    }
 
-  public Decimal ActionGrandTotal { get; set; }
+    public decimal ActionDiscountsTotal { get; set; }
+
+    public decimal DiscountsTotal
+    {
+        get => ActionDiscountsTotal;
+        set => ActionDiscountsTotal = value;
+    }
+
+    public decimal ActionGrandTotal { get; set; }
+
+    public decimal GrandTotal
+    {
+        get => ActionGrandTotal;
+        set => ActionGrandTotal = value;
+    }
 }

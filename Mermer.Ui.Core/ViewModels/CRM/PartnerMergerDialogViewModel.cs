@@ -171,26 +171,34 @@ public class PartnerMergerDialogViewModel : DialogViewModel
     }
   }
 
-  public virtual async Task OnMergeAsync()
-  {
-    PartnerMergerDialogViewModel mergerDialogViewModel = this;
-    mergerDialogViewModel.IsBusy = true;
-    try
+    public virtual async Task OnMergeAsync()
     {
-      if (mergerDialogViewModel.List.Count <= 1)
-        throw new Exception(mergerDialogViewModel["Invalid Operation", Array.Empty<object>()], new Exception(mergerDialogViewModel["At least two items must be selected", Array.Empty<object>()]));
-      string partnerId = mergerDialogViewModel.List.Single<PartnerMerge>((Func<PartnerMerge, bool>) (x => x.IsMain)).PartnerId;
-      string[] array = mergerDialogViewModel.List.Where<PartnerMerge>((Func<PartnerMerge, bool>) (x => !x.IsMain)).Select<PartnerMerge, string>((Func<PartnerMerge, string>) (x => x.PartnerId)).Distinct<string>().ToArray<string>();
-      await mergerDialogViewModel._repository.MergeAsync(partnerId, array, mergerDialogViewModel.DisableMergedItems);
+        PartnerMergerDialogViewModel mergerDialogViewModel = this;
+        mergerDialogViewModel.IsBusy = true;
+        try
+        {
+            if (mergerDialogViewModel.List.Count <= 1)
+                throw new Exception(mergerDialogViewModel["Invalid Operation", Array.Empty<object>()], new Exception(mergerDialogViewModel["At least two items must be selected", Array.Empty<object>()]));
+
+            string partnerId = mergerDialogViewModel.List.Single<PartnerMerge>((Func<PartnerMerge, bool>)(x => x.IsMain)).PartnerId;
+            string[] array = mergerDialogViewModel.List.Where<PartnerMerge>((Func<PartnerMerge, bool>)(x => !x.IsMain)).Select<PartnerMerge, string>((Func<PartnerMerge, string>)(x => x.PartnerId)).Distinct<string>().ToArray<string>();
+
+            await mergerDialogViewModel._repository.MergeAsync(partnerId, array, mergerDialogViewModel.DisableMergedItems);
+
+            // Закрываем диалог слияния после успешной операции
+            await mergerDialogViewModel.NavigationService.Close(mergerDialogViewModel);
+        }
+        catch (InvalidOperationException ex)
+        {
+            mergerDialogViewModel.UserInteractionService.ShowMessage(mergerDialogViewModel["Invalid Operation", Array.Empty<object>()], mergerDialogViewModel["One item (only) must be selected as Main", Array.Empty<object>()]);
+        }
+        catch (Exception ex)
+        {
+            mergerDialogViewModel.UserInteractionService.ShowExceptionMessage(ex);
+        }
+        finally
+        {
+            mergerDialogViewModel.IsBusy = false;
+        }
     }
-    catch (InvalidOperationException ex)
-    {
-      mergerDialogViewModel.UserInteractionService.ShowMessage(mergerDialogViewModel["Invalid Operation", Array.Empty<object>()], mergerDialogViewModel["One item (only) must be selected as Main", Array.Empty<object>()]);
-    }
-    catch (Exception ex)
-    {
-      mergerDialogViewModel.UserInteractionService.ShowExceptionMessage(ex);
-    }
-    mergerDialogViewModel.IsBusy = false;
-  }
 }

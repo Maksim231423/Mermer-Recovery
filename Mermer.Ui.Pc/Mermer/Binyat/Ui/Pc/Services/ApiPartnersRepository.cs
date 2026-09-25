@@ -1,21 +1,28 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Threading.Tasks;
 using Mermer.CRM.Models;
+using Mermer.CRM.Services;
 using Mermer.Data.Storage;
 using Mermer.Http;
 
 namespace Mermer.Ui.Pc.Services;
 
-public class ApiPartnersRepository : IRepository<Partner>, IReadOnlyRepository<Partner>, IRepositoryWithFacets<Partner>
+public class ApiPartnersRepository :
+    IPartnersRepository,
+    IRepository<Partner>,
+    IReadOnlyRepository<Partner>,
+    IRepositoryWithFacets<Partner>
 {
     private readonly RestClient _restClient;
     private const string DocType = "Partner";
 
-    private List<Partner>? _ramCache;
-    private bool _isSyncing = false;
+    private static readonly ConcurrentDictionary<string, Partner> _cardCache = new(StringComparer.OrdinalIgnoreCase);
+    private static List<Partner> _memoryCache;
+    private static readonly object _syncLock = new();
 
     public ApiPartnersRepository(RestClient restClient)
     {
@@ -24,52 +31,78 @@ public class ApiPartnersRepository : IRepository<Partner>, IReadOnlyRepository<P
 
     public async Task<IEnumerable<Partner>> GetAllAsync()
     {
-        if (_ramCache == null)
+        lock (_syncLock)
         {
-            _ramCache = LocalSqliteCache.GetAllDocuments<Partner>(DocType) ?? new List<Partner>();
+            if (_memoryCache != null && _memoryCache.Count > 0)
+                return _memoryCache;
         }
 
-        if (!_isSyncing)
+        // 1. Быстрое чтение из локального SQLite
+        var local = LocalSqliteCache.GetAllDocuments<Partner>(DocType)?.ToList() ?? new List<Partner>();
+        if (local.Any())
         {
-            _isSyncing = true;
-            _ = Task.Run(async () =>
+            lock (_syncLock)
             {
-                try
+                _memoryCache = local.OrderBy(p => p.Name).ToList();
+                foreach (var p in local)
                 {
-                    var unsynced = LocalSqliteCache.GetUnsyncedDocuments<Partner>(DocType);
-                    if (unsynced != null)
-                    {
-                        foreach (var item in unsynced)
-                        {
-                            await _restClient.PutAsync($"/api/partners/{item.id}", item.entity);
-                            LocalSqliteCache.SaveDocument(DocType, item.id, item.entity, isSynced: true);
-                        }
-                    }
+                    if (!string.IsNullOrEmpty(p?.Id)) _cardCache[p.Id] = p;
+                }
+            }
+        }
 
-                    var remote = await _restClient.GetAsync<List<Partner>>("/api/partners");
-                    if (remote != null)
+        // 2. Если в локальной БД пусто — подгружаем с бэкенда
+        if (_memoryCache == null || _memoryCache.Count == 0)
+        {
+            try
+            {
+                var remote = await _restClient.GetAsync<List<Partner>>("/api/partners");
+                if (remote != null && remote.Any())
+                {
+                    lock (_syncLock)
                     {
+                        _memoryCache = remote.OrderBy(p => p.Name).ToList();
                         foreach (var p in remote)
                         {
-                            LocalSqliteCache.SaveDocument(DocType, p.Id, p, isSynced: true);
+                            if (!string.IsNullOrEmpty(p?.Id))
+                            {
+                                _cardCache[p.Id] = p;
+                                LocalSqliteCache.SaveDocument(DocType, p.Id, p, isSynced: true);
+                            }
                         }
-                        _ramCache = remote;
                     }
                 }
-                catch { }
-                finally { _isSyncing = false; }
-            });
+            }
+            catch { }
         }
 
-        return _ramCache;
+        return _memoryCache ?? Enumerable.Empty<Partner>();
     }
-
 
     public async Task<Partner> GetAsync(string id)
     {
         if (string.IsNullOrEmpty(id)) return null;
-        var all = await GetAllAsync();
-        return all.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));
+
+        if (_cardCache.TryGetValue(id, out var cached))
+            return cached;
+
+        await GetAllAsync();
+        if (_cardCache.TryGetValue(id, out cached))
+            return cached;
+
+        try
+        {
+            var remote = await _restClient.GetAsync<Partner>($"/api/partners/{id}");
+            if (remote != null)
+            {
+                _cardCache[remote.Id] = remote;
+                LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
+                return remote;
+            }
+        }
+        catch { }
+
+        return null;
     }
 
     public async Task<IEnumerable<Partner>> GetAsync(string[] ids)
@@ -77,7 +110,7 @@ public class ApiPartnersRepository : IRepository<Partner>, IReadOnlyRepository<P
         if (ids == null || !ids.Any()) return Enumerable.Empty<Partner>();
         var all = await GetAllAsync();
         var idSet = new HashSet<string>(ids, StringComparer.OrdinalIgnoreCase);
-        return all.Where(p => idSet.Contains(p.Id)).ToList();
+        return all.Where(p => idSet.Contains(p.Id)).OrderBy(p => p.Name).ToList();
     }
 
     public async Task<IEnumerable<Partner>> GetAsync(params Expression<Func<Partner, bool>>[] predicates)
@@ -91,14 +124,16 @@ public class ApiPartnersRepository : IRepository<Partner>, IReadOnlyRepository<P
                 query = query.Where(p);
             }
         }
-        return query.ToList();
+        return query.OrderBy(p => p.Name).ToList();
     }
 
     public async Task<int> CountAsync(params Expression<Func<Partner, bool>>[] predicates)
     {
-        var result = await GetAsync(predicates);
-        return result.Count();
+        return (await GetAsync(predicates)).Count();
     }
+
+    public Task CreateAsync(Partner entity) => SaveAsync(entity);
+    public Task UpdateAsync(Partner entity) => SaveAsync(entity);
 
     public async Task SaveAsync(Partner entity)
     {
@@ -106,40 +141,126 @@ public class ApiPartnersRepository : IRepository<Partner>, IReadOnlyRepository<P
         bool isNew = string.IsNullOrEmpty(entity.Id) || entity.Id == Guid.Empty.ToString();
         if (isNew) entity.Id = Guid.NewGuid().ToString();
 
+        _cardCache[entity.Id] = entity;
+        lock (_syncLock)
+        {
+            if (_memoryCache != null)
+            {
+                int idx = _memoryCache.FindIndex(x => x.Id == entity.Id);
+                if (idx >= 0) _memoryCache[idx] = entity;
+                else _memoryCache.Add(entity);
+                _memoryCache = _memoryCache.OrderBy(p => p.Name).ToList();
+            }
+        }
+
         LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
 
-        if (_ramCache != null)
+        _ = Task.Run(async () =>
         {
-            var existing = _ramCache.FirstOrDefault(x => x.Id == entity.Id);
-            if (existing != null) _ramCache.Remove(existing);
-            _ramCache.Add(entity);
-        }
-
-        try
-        {
-            if (isNew) await _restClient.PostAsync("/api/partners", entity);
-            else await _restClient.PutAsync($"/api/partners/{entity.Id}", entity);
-            LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
-        }
-        catch { }
+            try
+            {
+                if (isNew) await _restClient.PostAsync("/api/partners", entity);
+                else await _restClient.PutAsync($"/api/partners/{entity.Id}", entity);
+                LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[PARTNER SYNC ERROR]: {ex.Message}");
+            }
+        });
     }
-
-    public async Task CreateAsync(Partner entity) => await SaveAsync(entity);
-    public async Task UpdateAsync(Partner entity) => await SaveAsync(entity);
 
     public async Task DeleteAsync(string id)
     {
-        if (_ramCache != null)
+        if (string.IsNullOrEmpty(id)) return;
+
+        _cardCache.TryRemove(id, out _);
+        lock (_syncLock)
         {
-            var existing = _ramCache.FirstOrDefault(x => x.Id == id);
-            if (existing != null) _ramCache.Remove(existing);
+            _memoryCache?.RemoveAll(x => x.Id == id);
         }
-        try { await _restClient.DeleteAsync($"/api/partners/{id}"); } catch { }
+
+        _ = Task.Run(async () =>
+        {
+            try { await _restClient.DeleteAsync($"/api/partners/{id}"); } catch { }
+        });
+    }
+
+    public async Task MergeAsync(string mainItemId, string[] mergeItemIds, bool disableMergedItems)
+    {
+        if (string.IsNullOrEmpty(mainItemId) || mergeItemIds == null || !mergeItemIds.Any()) return;
+
+        try
+        {
+            var payload = new
+            {
+                MainItemId = mainItemId,
+                MergeItemIds = mergeItemIds,
+                DisableMergedItems = disableMergedItems
+            };
+
+            // 1. Отправляем команду слияния на бэкенд в PostgreSQL
+            await _restClient.PostAsync("/api/partners/merge", payload);
+
+            // 2. Если стояла галочка отключения дубликатов — обновляем статус в кэше и SQLite
+            if (disableMergedItems)
+            {
+                var mergeSet = new HashSet<string>(mergeItemIds, StringComparer.OrdinalIgnoreCase);
+
+                lock (_syncLock)
+                {
+                    if (_memoryCache != null)
+                    {
+                        foreach (var item in _memoryCache.Where(p => mergeSet.Contains(p.Id)))
+                        {
+                            item.IsDisabled = true;
+                            LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
+                        }
+                    }
+                }
+
+                foreach (var id in mergeItemIds)
+                {
+                    if (_cardCache.TryGetValue(id, out var cachedPartner))
+                    {
+                        cachedPartner.IsDisabled = true;
+                        LocalSqliteCache.SaveDocument(DocType, id, cachedPartner, isSynced: true);
+                    }
+                }
+            }
+
+            // 3. Запрашиваем свежий список с сервера и обновляем кэш
+            try
+            {
+                var remote = await _restClient.GetAsync<List<Partner>>("/api/partners");
+                if (remote != null && remote.Any())
+                {
+                    lock (_syncLock)
+                    {
+                        _memoryCache = remote.OrderBy(p => p.Name).ToList();
+                        foreach (var p in remote)
+                        {
+                            if (!string.IsNullOrEmpty(p?.Id))
+                            {
+                                _cardCache[p.Id] = p;
+                                LocalSqliteCache.SaveDocument(DocType, p.Id, p, isSynced: true);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[PARTNER MERGE ERROR]: {ex.Message}");
+            throw;
+        }
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)
     {
-        var result = new Dictionary<string, Dictionary<string, int>>();
+        var result = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
         if (fields != null)
         {
             foreach (var field in fields) result[field] = new Dictionary<string, int>();

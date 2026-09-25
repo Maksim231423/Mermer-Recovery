@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
@@ -14,6 +15,10 @@ public class ApiRolesRepository : IRepository<Role>
     private readonly RestClient _restClient;
     private const string DocType = "Role";
 
+    private static readonly ConcurrentDictionary<string, Role> _cardCache = new(StringComparer.OrdinalIgnoreCase);
+    private static List<Role> _rolesCache;
+    private static readonly object _syncLock = new();
+
     public ApiRolesRepository(RestClient restClient)
     {
         _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
@@ -23,18 +28,22 @@ public class ApiRolesRepository : IRepository<Role>
     {
         if (string.IsNullOrEmpty(id)) return null;
 
-        var allLocal = LocalSqliteCache.GetAllDocuments<Role>(DocType);
-        var local = allLocal?.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (_cardCache.TryGetValue(id, out var cached))
+            return cached;
 
-        if (local != null) return NormalizeAuthorizations(local);
+        await GetAllAsync();
+        if (_cardCache.TryGetValue(id, out cached))
+            return cached;
 
         try
         {
             var remote = await _restClient.GetAsync<Role>($"/api/roles/{id}");
             if (remote != null)
             {
-                LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
-                return NormalizeAuthorizations(remote);
+                var normalized = NormalizeAuthorizations(remote);
+                _cardCache[normalized.Id] = normalized;
+                LocalSqliteCache.SaveDocument(DocType, normalized.Id, normalized, isSynced: true);
+                return normalized;
             }
         }
         catch { }
@@ -66,43 +75,54 @@ public class ApiRolesRepository : IRepository<Role>
         return query.ToList();
     }
 
-    private async Task<IEnumerable<Role>> GetAllAsync()
+    public async Task<IEnumerable<Role>> GetAllAsync()
     {
-        _ = Task.Run(async () =>
+        lock (_syncLock)
+        {
+            if (_rolesCache != null && _rolesCache.Count > 0)
+                return _rolesCache;
+        }
+
+        // 1. Читаем из локального SQLite
+        var local = LocalSqliteCache.GetAllDocuments<Role>(DocType)?.ToList() ?? new List<Role>();
+        if (local.Any())
+        {
+            lock (_syncLock)
+            {
+                _rolesCache = local.Select(NormalizeAuthorizations).ToList();
+                foreach (var r in _rolesCache)
+                {
+                    if (!string.IsNullOrEmpty(r?.Id)) _cardCache[r.Id] = r;
+                }
+            }
+        }
+
+        // 2. Если в локальной БД пусто — подгружаем с API
+        if (_rolesCache == null || _rolesCache.Count == 0)
         {
             try
             {
-                var unsynced = LocalSqliteCache.GetUnsyncedDocuments<Role>(DocType);
-                if (unsynced != null)
+                var remote = await _restClient.GetAsync<List<Role>>("/api/roles");
+                if (remote != null && remote.Any())
                 {
-                    foreach (var item in unsynced)
+                    lock (_syncLock)
                     {
-                        var payload = CreatePayload(item.entity);
-                        await _restClient.PutAsync($"/api/roles/{item.id}", payload);
-                        LocalSqliteCache.SaveDocument(DocType, item.id, item.entity, isSynced: true);
+                        _rolesCache = remote.Select(NormalizeAuthorizations).ToList();
+                        foreach (var role in _rolesCache)
+                        {
+                            if (!string.IsNullOrEmpty(role?.Id))
+                            {
+                                _cardCache[role.Id] = role;
+                                LocalSqliteCache.SaveDocument(DocType, role.Id, role, isSynced: true);
+                            }
+                        }
                     }
                 }
             }
             catch { }
-        });
-
-        var localItems = LocalSqliteCache.GetAllDocuments<Role>(DocType)?.ToList() ?? new List<Role>();
-
-        try
-        {
-            var remote = await _restClient.GetAsync<IEnumerable<Role>>("/api/roles");
-            if (remote != null && remote.Any())
-            {
-                foreach (var role in remote)
-                {
-                    LocalSqliteCache.SaveDocument(DocType, role.Id, role, isSynced: true);
-                }
-                return remote.Select(NormalizeAuthorizations).ToList();
-            }
         }
-        catch { }
 
-        return localItems.Select(NormalizeAuthorizations).ToList();
+        return _rolesCache ?? Enumerable.Empty<Role>();
     }
 
     public async Task<int> CountAsync(params Expression<Func<Role, bool>>[] predicates)
@@ -110,50 +130,63 @@ public class ApiRolesRepository : IRepository<Role>
         return (await GetAsync(predicates)).Count();
     }
 
-    public async Task CreateAsync(Role model) => await SaveAsync(model, isNew: true);
-
-    public async Task UpdateAsync(Role model) => await SaveAsync(model, isNew: false);
+    public Task CreateAsync(Role model) => SaveAsync(model, isNew: true);
+    public Task UpdateAsync(Role model) => SaveAsync(model, isNew: false);
 
     private async Task SaveAsync(Role model, bool isNew)
     {
         if (model == null) return;
         if (string.IsNullOrEmpty(model.Id)) model.Id = Guid.NewGuid().ToString();
 
-        LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
+        var normalized = NormalizeAuthorizations(model);
+        _cardCache[normalized.Id] = normalized;
 
-        try
+        lock (_syncLock)
         {
-            var payload = CreatePayload(model);
-
-            if (isNew)
+            if (_rolesCache != null)
             {
-                await _restClient.PostAsync("/api/roles", payload);
+                int idx = _rolesCache.FindIndex(x => x.Id == normalized.Id);
+                if (idx >= 0) _rolesCache[idx] = normalized;
+                else _rolesCache.Add(normalized);
             }
-            else
-            {
-                await _restClient.PutAsync($"/api/roles/{model.Id}", payload);
-            }
-
-            LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
         }
-        catch (Exception ex)
+
+        LocalSqliteCache.SaveDocument(DocType, normalized.Id, normalized, isSynced: false);
+
+        _ = Task.Run(async () =>
         {
-            System.Diagnostics.Debug.WriteLine($"[ROLE SYNC WARNING]: {ex.Message}");
-        }
+            try
+            {
+                var payload = CreatePayload(normalized);
+                if (isNew) await _restClient.PostAsync("/api/roles", payload);
+                else await _restClient.PutAsync($"/api/roles/{normalized.Id}", payload);
+
+                LocalSqliteCache.SaveDocument(DocType, normalized.Id, normalized, isSynced: true);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ROLE SYNC WARNING]: {ex.Message}");
+            }
+        });
     }
 
     public async Task DeleteAsync(string id)
     {
         if (string.IsNullOrEmpty(id)) return;
-        try
+
+        _cardCache.TryRemove(id, out _);
+        lock (_syncLock)
         {
-            await _restClient.DeleteAsync($"/api/roles/{id}");
+            _rolesCache?.RemoveAll(x => x.Id == id);
         }
-        catch { }
+
+        _ = Task.Run(async () =>
+        {
+            try { await _restClient.DeleteAsync($"/api/roles/{id}"); } catch { }
+        });
     }
 
-    // Сохраняет старую логику Couchbase для совместимости биндингов XAML
-    private Role NormalizeAuthorizations(Role role)
+    private static Role NormalizeAuthorizations(Role role)
     {
         if (role?.Authorizations != null && role.Authorizations.Any())
         {
@@ -164,7 +197,7 @@ public class ApiRolesRepository : IRepository<Role>
         return role;
     }
 
-    private object CreatePayload(Role model)
+    private static object CreatePayload(Role model)
     {
         return new
         {

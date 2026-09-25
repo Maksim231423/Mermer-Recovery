@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
@@ -14,6 +15,10 @@ public class ApiExpensesRepository : IRepositoryWithFacets<Expense>, IRepository
     private readonly RestClient _restClient;
     private const string DocType = "Expense";
 
+    private static readonly ConcurrentDictionary<string, Expense> _cardCache = new(StringComparer.OrdinalIgnoreCase);
+    private static List<Expense> _memoryCache;
+    private static readonly object _syncLock = new();
+
     public ApiExpensesRepository(RestClient restClient)
     {
         _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
@@ -23,15 +28,19 @@ public class ApiExpensesRepository : IRepositoryWithFacets<Expense>, IRepository
     {
         if (string.IsNullOrEmpty(id)) return null;
 
-        var allLocal = LocalSqliteCache.GetAllDocuments<Expense>(DocType);
-        var local = allLocal?.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
-        if (local != null) return local;
+        if (_cardCache.TryGetValue(id, out var cached))
+            return cached;
+
+        await GetAllAsync();
+        if (_cardCache.TryGetValue(id, out cached))
+            return cached;
 
         try
         {
             var remote = await _restClient.GetAsync<Expense>($"/api/expenses/{id}");
             if (remote != null)
             {
+                _cardCache[remote.Id] = remote;
                 LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                 return remote;
             }
@@ -65,45 +74,54 @@ public class ApiExpensesRepository : IRepositoryWithFacets<Expense>, IRepository
         return query.ToList();
     }
 
-    private async Task<IEnumerable<Expense>> GetAllAsync()
+    public async Task<IEnumerable<Expense>> GetAllAsync()
     {
-        // 1. Досылаем неотправленные расходы
-        _ = Task.Run(async () =>
+        lock (_syncLock)
+        {
+            if (_memoryCache != null && _memoryCache.Count > 0)
+                return _memoryCache;
+        }
+
+        // 1. Читаем из локального SQLite
+        var local = LocalSqliteCache.GetAllDocuments<Expense>(DocType)?.ToList() ?? new List<Expense>();
+        if (local.Any())
+        {
+            lock (_syncLock)
+            {
+                _memoryCache = local;
+                foreach (var exp in local)
+                {
+                    if (!string.IsNullOrEmpty(exp?.Id)) _cardCache[exp.Id] = exp;
+                }
+            }
+        }
+
+        // 2. Если локально пусто — запрашиваем API
+        if (_memoryCache == null || _memoryCache.Count == 0)
         {
             try
             {
-                var unsynced = LocalSqliteCache.GetUnsyncedDocuments<Expense>(DocType);
-                if (unsynced != null)
+                var remote = await _restClient.GetAsync<List<Expense>>("/api/expenses");
+                if (remote != null && remote.Any())
                 {
-                    foreach (var item in unsynced)
+                    lock (_syncLock)
                     {
-                        await _restClient.PostAsync("/api/expenses", item.entity);
-                        LocalSqliteCache.SaveDocument(DocType, item.id, item.entity, isSynced: true);
+                        _memoryCache = remote;
+                        foreach (var exp in remote)
+                        {
+                            if (!string.IsNullOrEmpty(exp?.Id))
+                            {
+                                _cardCache[exp.Id] = exp;
+                                LocalSqliteCache.SaveDocument(DocType, exp.Id, exp, isSynced: true);
+                            }
+                        }
                     }
                 }
             }
             catch { }
-        });
-
-        // 2. Отдаем локальный кэш
-        var local = LocalSqliteCache.GetAllDocuments<Expense>(DocType)?.ToList() ?? new List<Expense>();
-
-        // 3. Скачиваем свежие с бэкенда
-        try
-        {
-            var remote = await _restClient.GetAsync<IEnumerable<Expense>>("/api/expenses");
-            if (remote != null && remote.Any())
-            {
-                foreach (var exp in remote)
-                {
-                    LocalSqliteCache.SaveDocument(DocType, exp.Id, exp, isSynced: true);
-                }
-                return remote.ToList();
-            }
         }
-        catch { }
 
-        return local;
+        return _memoryCache ?? Enumerable.Empty<Expense>();
     }
 
     public async Task<int> CountAsync(params Expression<Func<Expense, bool>>[] predicates)
@@ -111,36 +129,55 @@ public class ApiExpensesRepository : IRepositoryWithFacets<Expense>, IRepository
         return (await GetAsync(predicates)).Count();
     }
 
-    public async Task CreateAsync(Expense model) => await SaveAsync(model);
-
-    public async Task UpdateAsync(Expense model) => await SaveAsync(model);
+    public Task CreateAsync(Expense model) => SaveAsync(model);
+    public Task UpdateAsync(Expense model) => SaveAsync(model);
 
     public async Task SaveAsync(Expense model)
     {
         if (model == null) return;
         if (string.IsNullOrEmpty(model.Id)) model.Id = Guid.NewGuid().ToString();
 
+        _cardCache[model.Id] = model;
+        lock (_syncLock)
+        {
+            if (_memoryCache != null)
+            {
+                int idx = _memoryCache.FindIndex(x => x.Id == model.Id);
+                if (idx >= 0) _memoryCache[idx] = model;
+                else _memoryCache.Add(model);
+            }
+        }
+
         LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
 
-        try
+        _ = Task.Run(async () =>
         {
-            await _restClient.PostAsync("/api/expenses", model);
-            LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[EXPENSE SYNC ERROR]: {ex.Message}");
-        }
+            try
+            {
+                await _restClient.PostAsync("/api/expenses", model);
+                LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[EXPENSE SYNC ERROR]: {ex.Message}");
+            }
+        });
     }
 
     public async Task DeleteAsync(string id)
     {
         if (string.IsNullOrEmpty(id)) return;
-        try
+
+        _cardCache.TryRemove(id, out _);
+        lock (_syncLock)
         {
-            await _restClient.DeleteAsync($"/api/expenses/{id}");
+            _memoryCache?.RemoveAll(x => x.Id == id);
         }
-        catch { }
+
+        _ = Task.Run(async () =>
+        {
+            try { await _restClient.DeleteAsync($"/api/expenses/{id}"); } catch { }
+        });
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)

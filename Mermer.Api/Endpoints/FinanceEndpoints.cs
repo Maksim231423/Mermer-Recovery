@@ -108,7 +108,7 @@ public static class FinanceEndpoints
                         s.UserName,
                         s.IsCompleted,
                         s.IsDisabled,
-                        Group = string.IsNullOrWhiteSpace(s.Group) ? "Общие" : s.Group,
+                        Group = s.Group ?? string.Empty,
                         Tags = s.Tags != null ? s.Tags.ToList() : new List<string>(),
                         Description = s.Description ?? string.Empty,
                         Total = s.TotalAmount,
@@ -363,8 +363,18 @@ public static class FinanceEndpoints
         financeGroup.MapPost("/slips", saveSlipHandler);
         financeGroup.MapPut("/slips/{id}", saveSlipHandler);
 
-        financeGroup.MapGet("/slips/facets", async (HttpContext context, MermerDbContext db, CancellationToken ct) =>
+        financeGroup.MapGet("/slips/facets", async (string? fields, MermerDbContext db, CancellationToken ct) =>
         {
+            var connStr = db.Database.GetConnectionString()!;
+
+            // 1. Если запрос пришел из карточки документа за подсказками полей (GroupNames / TagNames)
+            if (!string.IsNullOrEmpty(fields))
+            {
+                var facets = await FacetsHelper.GetEntityFacetsAsync(connStr, "funds_slips", fields, ct);
+                return Results.Ok(facets);
+            }
+
+            // 2. Если запрос пришел из журнала списка документов (нужны счетчики дат и группы)
             var todayUtc = DateTime.UtcNow.Date;
             var weekStart = todayUtc.AddDays(-7);
             var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -374,22 +384,20 @@ public static class FinanceEndpoints
             var countMonth = await db.FundsSlips.CountAsync(s => !s.IsDisabled && s.Date >= monthStart, ct);
             var countAll = await db.FundsSlips.CountAsync(s => !s.IsDisabled, ct);
 
-            var groups = await db.FundsSlips.AsNoTracking()
-                .Where(x => !string.IsNullOrEmpty(x.Group) && !x.IsDisabled)
-                .GroupBy(x => x.Group!)
-                .Select(g => new { Key = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+            var entityFacets = await FacetsHelper.GetEntityFacetsAsync(connStr, "funds_slips", "GroupNames,TagNames,Group,Tags", ct);
+            var groups = entityFacets.TryGetValue("Group", out var g) ? g : new Dictionary<string, int>();
 
             return Results.Ok(new Dictionary<string, object>
             {
                 ["Group"] = groups,
+                ["GroupNames"] = groups,
                 ["Date"] = new Dictionary<string, int>
-                {
-                    { "#Today", countToday },
-                    { "#This Week", countWeek },
-                    { "#This Month", countMonth },
-                    { "#All Records", countAll }
-                }
+        {
+            { "#Today", countToday },
+            { "#This Week", countWeek },
+            { "#This Month", countMonth },
+            { "#All Records", countAll }
+        }
             });
         });
 
@@ -463,6 +471,13 @@ public static class FinanceEndpoints
             return Results.Ok(new { code = $"DOC-{DateTime.UtcNow:yyMMdd}{(count + 1):D4}" });
         });
 
+        billsGroup.MapGet("/facets", async (string? fields, MermerDbContext db, CancellationToken ct) =>
+        {
+            var connStr = db.Database.GetConnectionString()!;
+            var facets = await FacetsHelper.GetEntityFacetsAsync(connStr, "funds_slips", fields, ct);
+            return Results.Ok(facets);
+        });
+
         billsGroup.MapGet("/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
         {
             if (!Guid.TryParse(id, out var guid)) return Results.NotFound();
@@ -519,6 +534,14 @@ public static class FinanceEndpoints
         // 6. РОУТЫ FUNDS TRANSFERS С ПАГИНАЦИЕЙ
         // =========================================================================
         var transferGroup = routes.MapGroup("/api/finance/transfers").WithTags("FundsTransfers");
+
+        transferGroup.MapGet("/facets", async (string? fields, MermerDbContext db, CancellationToken ct) =>
+        {
+            var connStr = db.Database.GetConnectionString()!;
+            var facets = await FacetsHelper.GetEntityFacetsAsync(connStr, "funds_transfers", fields, ct);
+            return Results.Ok(facets);
+        });
+
         transferGroup.MapGet("", async (DateTime? from, DateTime? till, string? sourceDepositoryId, string? destinationDepositoryId, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;

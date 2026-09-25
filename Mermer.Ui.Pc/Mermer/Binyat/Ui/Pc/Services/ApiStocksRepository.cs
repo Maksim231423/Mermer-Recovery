@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
@@ -15,9 +16,9 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
     private readonly RestClient _restClient;
     private const string DocType = "Stock";
 
-    // RAM-кэш для мгновенной отдачи справочника (0 миллисекунд)
-    private List<Stock>? _ramCache;
-    private bool _isSyncing = false;
+    private static readonly ConcurrentDictionary<string, Stock> _cardCache = new(StringComparer.OrdinalIgnoreCase);
+    private static List<Stock> _memoryCache;
+    private static readonly object _syncLock = new();
 
     public ApiStocksRepository(RestClient restClient)
     {
@@ -26,56 +27,78 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
 
     public async Task<IEnumerable<Stock>> GetAllAsync()
     {
-        // 1. Читаем из SQLite ТОЛЬКО один раз (или если кэш сброшен)
-        if (_ramCache == null)
+        lock (_syncLock)
         {
-            _ramCache = LocalSqliteCache.GetAllDocuments<Stock>(DocType)?.ToList() ?? new List<Stock>();
+            if (_memoryCache != null && _memoryCache.Count > 0)
+                return _memoryCache;
         }
 
-        // 2. Фоновое обновление с сервера (без блокировки UI)
-        if (!_isSyncing)
+        // 1. Быстрое чтение из локального SQLite
+        var local = LocalSqliteCache.GetAllDocuments<Stock>(DocType)?.ToList() ?? new List<Stock>();
+        if (local.Any())
         {
-            _isSyncing = true;
-            _ = Task.Run(async () =>
+            lock (_syncLock)
             {
-                try
+                _memoryCache = local.OrderBy(s => s.Name).ToList();
+                foreach (var s in local)
                 {
-                    // Досылаем локальные
-                    var unsynced = LocalSqliteCache.GetUnsyncedDocuments<Stock>(DocType);
-                    if (unsynced != null)
-                    {
-                        foreach (var item in unsynced)
-                        {
-                            await _restClient.PutAsync($"/api/stocks/{item.id}", item.entity);
-                            LocalSqliteCache.SaveDocument(DocType, item.id, item.entity, isSynced: true);
-                        }
-                    }
+                    if (!string.IsNullOrEmpty(s?.Id)) _cardCache[s.Id] = s;
+                }
+            }
+        }
 
-                    // Получаем новые
-                    var remote = await _restClient.GetAsync<List<Stock>>("/api/stocks");
-                    if (remote != null)
+        // 2. Если локально пусто — запрашиваем API
+        if (_memoryCache == null || _memoryCache.Count == 0)
+        {
+            try
+            {
+                var remote = await _restClient.GetAsync<List<Stock>>("/api/stocks");
+                if (remote != null && remote.Any())
+                {
+                    lock (_syncLock)
                     {
+                        _memoryCache = remote.OrderBy(s => s.Name).ToList();
                         foreach (var s in remote)
                         {
-                            LocalSqliteCache.SaveDocument(DocType, s.Id, s, isSynced: true);
+                            if (!string.IsNullOrEmpty(s?.Id))
+                            {
+                                _cardCache[s.Id] = s;
+                                LocalSqliteCache.SaveDocument(DocType, s.Id, s, isSynced: true);
+                            }
                         }
-                        // Тихая подмена RAM-кэша новыми данными
-                        _ramCache = remote;
                     }
                 }
-                catch { }
-                finally { _isSyncing = false; }
-            });
+            }
+            catch { }
         }
 
-        return _ramCache;
+        return _memoryCache ?? Enumerable.Empty<Stock>();
     }
 
     public async Task<Stock> GetAsync(string id)
     {
         if (string.IsNullOrEmpty(id)) return null;
-        var all = await GetAllAsync();
-        return all.FirstOrDefault(s => string.Equals(s.Id, id, StringComparison.OrdinalIgnoreCase));
+
+        if (_cardCache.TryGetValue(id, out var cached))
+            return cached;
+
+        await GetAllAsync();
+        if (_cardCache.TryGetValue(id, out cached))
+            return cached;
+
+        try
+        {
+            var remote = await _restClient.GetAsync<Stock>($"/api/stocks/{id}");
+            if (remote != null)
+            {
+                _cardCache[remote.Id] = remote;
+                LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
+                return remote;
+            }
+        }
+        catch { }
+
+        return null;
     }
 
     public async Task<IEnumerable<Stock>> GetAsync(string[] ids)
@@ -83,7 +106,7 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
         if (ids == null || !ids.Any()) return Enumerable.Empty<Stock>();
         var all = await GetAllAsync();
         var idSet = new HashSet<string>(ids, StringComparer.OrdinalIgnoreCase);
-        return all.Where(s => idSet.Contains(s.Id)).ToList();
+        return all.Where(s => idSet.Contains(s.Id)).OrderBy(s => s.Name).ToList();
     }
 
     public async Task<IEnumerable<Stock>> GetListAsync(params string[] ids) => await GetAsync(ids);
@@ -99,14 +122,16 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
                 query = query.Where(p);
             }
         }
-        return query.ToList();
+        return query.OrderBy(s => s.Name).ToList();
     }
 
     public async Task<int> CountAsync(params Expression<Func<Stock, bool>>[] predicates)
     {
-        var result = await GetAsync(predicates);
-        return result.Count();
+        return (await GetAsync(predicates)).Count();
     }
+
+    public Task CreateAsync(Stock entity) => SaveAsync(entity);
+    public Task UpdateAsync(Stock entity) => SaveAsync(entity);
 
     public async Task SaveAsync(Stock entity)
     {
@@ -114,46 +139,71 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
         bool isNew = string.IsNullOrEmpty(entity.Id) || entity.Id == Guid.Empty.ToString();
         if (isNew) entity.Id = Guid.NewGuid().ToString();
 
+        _cardCache[entity.Id] = entity;
+        lock (_syncLock)
+        {
+            if (_memoryCache != null)
+            {
+                int idx = _memoryCache.FindIndex(x => x.Id == entity.Id);
+                if (idx >= 0) _memoryCache[idx] = entity;
+                else _memoryCache.Add(entity);
+                _memoryCache = _memoryCache.OrderBy(s => s.Name).ToList();
+            }
+        }
+
         LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
 
-        // Мгновенно обновляем RAM-кэш, чтобы UI обновился сразу
-        if (_ramCache != null)
+        _ = Task.Run(async () =>
         {
-            var existing = _ramCache.FirstOrDefault(x => x.Id == entity.Id);
-            if (existing != null) _ramCache.Remove(existing);
-            _ramCache.Add(entity);
-        }
-
-        try
-        {
-            if (isNew) await _restClient.PostAsync("/api/stocks", entity);
-            else await _restClient.PutAsync($"/api/stocks/{entity.Id}", entity);
-            LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
-        }
-        catch { }
+            try
+            {
+                if (isNew) await _restClient.PostAsync("/api/stocks", entity);
+                else await _restClient.PutAsync($"/api/stocks/{entity.Id}", entity);
+                LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[STOCK SYNC ERROR]: {ex.Message}");
+            }
+        });
     }
-
-    public async Task CreateAsync(Stock entity) => await SaveAsync(entity);
-    public async Task UpdateAsync(Stock entity) => await SaveAsync(entity);
 
     public async Task DeleteAsync(string id)
     {
-        if (_ramCache != null)
+        if (string.IsNullOrEmpty(id)) return;
+
+        _cardCache.TryRemove(id, out _);
+        lock (_syncLock)
         {
-            var existing = _ramCache.FirstOrDefault(x => x.Id == id);
-            if (existing != null) _ramCache.Remove(existing);
+            _memoryCache?.RemoveAll(x => x.Id == id);
         }
-        try { await _restClient.DeleteAsync($"/api/stocks/{id}"); } catch { }
+
+        _ = Task.Run(async () =>
+        {
+            try { await _restClient.DeleteAsync($"/api/stocks/{id}"); } catch { }
+        });
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)
     {
-        var result = new Dictionary<string, Dictionary<string, int>>();
+        var result = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
         if (fields != null)
         {
             foreach (var field in fields) result[field] = new Dictionary<string, int>();
         }
-        return await Task.FromResult(result);
+
+        try
+        {
+            var fieldsParam = fields != null && fields.Length > 0 ? string.Join(",", fields) : "";
+            var apiResult = await _restClient.GetAsync<Dictionary<string, Dictionary<string, int>>>($"/api/stocks/facets?fields={fieldsParam}");
+            if (apiResult != null)
+            {
+                foreach (var kvp in apiResult) result[kvp.Key] = kvp.Value;
+            }
+        }
+        catch { }
+
+        return result;
     }
 
     public async Task<IEnumerable<StockInfo>> GetInfoAsync(params string[] stockIds)
@@ -201,6 +251,8 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
 
     public async Task MergeAsync(string mainStockId, string[] mergeStockIds, bool disableMergedItems)
     {
+        if (string.IsNullOrEmpty(mainStockId) || mergeStockIds == null || !mergeStockIds.Any()) return;
+
         try
         {
             await _restClient.PostAsync("/api/stocks/merge", new
@@ -209,6 +261,13 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
                 MergeStockIds = mergeStockIds,
                 DisableMergedItems = disableMergedItems
             });
+
+            lock (_syncLock)
+            {
+                _memoryCache = null;
+            }
+            _cardCache.Clear();
+            await GetAllAsync();
         }
         catch { }
     }
