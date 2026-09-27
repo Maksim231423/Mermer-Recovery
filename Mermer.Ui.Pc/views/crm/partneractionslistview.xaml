@@ -97,7 +97,6 @@
               </dxg:GridColumn.CellTemplate>
             </dxg:GridColumn>
             <dxg:GridColumn FieldName="TransactionGroup" Visible="false" Header="{Localize Group}"/>
-            <dxg:GridColumn FieldName="TransactionGroup" Visible="false" Header="{Localize Group}"/>
           </dxg:GridControlBand>
           <dxg:GridControlBand Header="{Localize Action}">
                         <dxg:GridColumn FieldName="ActionOfficeId" Header="{Localize Office}" ColumnFilterMode="DisplayText">

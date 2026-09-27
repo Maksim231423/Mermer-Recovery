@@ -731,13 +731,19 @@ public static class PartnersEndpoints
         });
 
 
-        // ПОДСЧЕТ КОЛИЧЕСТВА ДВИЖЕНИЙ ДЛЯ ПЛИТОК ДАТ (УСТРАНЯЕТ 404 И ФРИЗ НА 2 СЕК)
-        group.MapGet("/actions/count", async (string? partnerId, DateTime? from, DateTime? till, MermerDbContext db, CancellationToken ct) =>
+        // ПОДСЧЕТ КОЛИЧЕСТВА ДВИЖЕНИЙ ДЛЯ ПЛИТОК ДАТ
+        group.MapGet("/actions/count", async (string? partnerId, DateTime? from, DateTime? till, [Microsoft.AspNetCore.Mvc.FromQuery(Name = "officeId")] string[]? officeId, MermerDbContext db, CancellationToken ct) =>
         {
             DateTime fUtc = from?.ToUniversalTime() ?? DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
             DateTime tUtc = till?.ToUniversalTime() ?? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
             Guid? pGuid = Guid.TryParse(partnerId, out var g) ? g : null;
+
+            var targetOfficeGuids = officeId?
+                .Select(x => Guid.TryParse(x, out var og) ? (Guid?)og : null)
+                .Where(x => x.HasValue)
+                .Select(x => x!.Value)
+                .ToArray() ?? Array.Empty<Guid>();
 
             const string sql = """
                 SELECT 
@@ -745,9 +751,9 @@ public static class PartnersEndpoints
                         SELECT COUNT(*)
                         FROM invoices i
                         WHERE i.partner_id IS NOT NULL 
-                          AND i.is_completed = true 
                           AND i.is_disabled = false
                           AND (@partner::uuid IS NULL OR i.partner_id = @partner)
+                          AND (cardinality(@offices::uuid[]) = 0 OR i.office_id = ANY(@offices))
                           AND i.date >= @from AND i.date <= @till
                     )
                     +
@@ -758,6 +764,7 @@ public static class PartnersEndpoints
                         WHERE psl.partner_id IS NOT NULL
                           AND ps.is_disabled = false
                           AND (@partner::uuid IS NULL OR psl.partner_id = @partner)
+                          AND (cardinality(@offices::uuid[]) = 0 OR ps.office_id = ANY(@offices))
                           AND ps.date >= @from AND ps.date <= @till
                     )
                     +
@@ -768,6 +775,7 @@ public static class PartnersEndpoints
                         WHERE ptl.partner_id IS NOT NULL
                           AND pt.is_disabled = false
                           AND (@partner::uuid IS NULL OR ptl.partner_id = @partner)
+                          AND (cardinality(@offices::uuid[]) = 0 OR ptl.office_id = ANY(@offices))
                           AND pt.date >= @from AND pt.date <= @till
                     ) AS "Count";
                 """;
@@ -776,20 +784,27 @@ public static class PartnersEndpoints
             await using var conn = new NpgsqlConnection(connStr);
             var totalCount = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
                 sql,
-                new { partner = pGuid, from = fUtc, till = tUtc },
+                new { partner = pGuid, offices = targetOfficeGuids, from = fUtc, till = tUtc },
                 cancellationToken: ct));
 
             return Results.Ok(new { count = totalCount });
         });
 
         // 12. РЕЕСТР ДВИЖЕНИЙ ПО ПАРТНЕРАМ
-        group.MapGet("/actions", async (string? partnerId, DateTime? from, DateTime? till, int? limit, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/actions", async (string? partnerId, DateTime? from, DateTime? till, [Microsoft.AspNetCore.Mvc.FromQuery(Name = "officeId")] string[]? officeId, int? limit, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 300;
-            DateTime fUtc = from?.ToUniversalTime() ?? DateTime.UtcNow.AddMonths(-1);
-            DateTime tUtc = till?.ToUniversalTime() ?? DateTime.UtcNow;
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 5000) : 1000;
+            // Если from не задан — берем за всё время (с 2000 года), а не за последний месяц!
+            DateTime fUtc = from?.ToUniversalTime() ?? DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+            DateTime tUtc = till?.ToUniversalTime() ?? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
             Guid? pGuid = Guid.TryParse(partnerId, out var g) ? g : null;
+
+            var targetOfficeGuids = officeId?
+                .Select(x => Guid.TryParse(x, out var og) ? (Guid?)og : null)
+                .Where(x => x.HasValue)
+                .Select(x => x!.Value)
+                .ToArray() ?? Array.Empty<Guid>();
 
             const string sql = """
                 WITH filtered_invoices AS (
@@ -797,9 +812,9 @@ public static class PartnersEndpoints
                         i.id, i.code, i.invoice_type, i.date, i.office_id, i.partner_id, i.user_name, i.is_completed, i.is_disabled
                     FROM invoices i
                     WHERE i.partner_id IS NOT NULL 
-                      AND i.is_completed = true 
                       AND i.is_disabled = false
                       AND (@partner::uuid IS NULL OR i.partner_id = @partner)
+                      AND (cardinality(@offices::uuid[]) = 0 OR i.office_id = ANY(@offices))
                       AND i.date >= @from AND i.date <= @till
                     ORDER BY i.date DESC
                     LIMIT @take
@@ -842,6 +857,7 @@ public static class PartnersEndpoints
                     WHERE psl.partner_id IS NOT NULL
                       AND ps.is_disabled = false
                       AND (@partner::uuid IS NULL OR psl.partner_id = @partner)
+                      AND (cardinality(@offices::uuid[]) = 0 OR ps.office_id = ANY(@offices))
                       AND ps.date >= @from AND ps.date <= @till
 
                     UNION ALL
@@ -863,11 +879,15 @@ public static class PartnersEndpoints
                     WHERE ptl.partner_id IS NOT NULL
                       AND pt.is_disabled = false
                       AND (@partner::uuid IS NULL OR ptl.partner_id = @partner)
+                      AND (cardinality(@offices::uuid[]) = 0 OR ptl.office_id = ANY(@offices))
                       AND pt.date >= @from AND pt.date <= @till
                 )
                 SELECT 
                     *,
-                    ("ActionDebit" - "ActionCredit")::numeric(18,4) AS "ActionEffect"
+                    ("ActionDebit" - "ActionCredit")::numeric(18,4) AS "ActionEffect",
+                    ("ActionDebit" - "ActionCredit")::numeric(18,4) AS "ActionEffectInCustomCurrency",
+                    '' AS "TransactionGroup",
+                    ARRAY[]::text[] AS "TransactionTags"
                 FROM raw_actions
                 ORDER BY "TransactionDate" DESC
                 LIMIT @take;
@@ -877,7 +897,7 @@ public static class PartnersEndpoints
             await using var conn = new NpgsqlConnection(connStr);
             var result = await conn.QueryAsync<PartnerActionDto>(new CommandDefinition(
                 sql,
-                new { partner = pGuid, from = fUtc, till = tUtc, take },
+                new { partner = pGuid, offices = targetOfficeGuids, from = fUtc, till = tUtc, take },
                 cancellationToken: ct));
 
             var jsonOptions = new JsonSerializerOptions
@@ -971,7 +991,10 @@ public static class PartnersEndpoints
         public decimal ActionDebit { get; set; }
         public decimal ActionCredit { get; set; }
         public decimal ActionEffect { get; set; }
+        public decimal ActionEffectInCustomCurrency { get; set; } // Добавлено!
         public string TransactionUserName { get; set; } = null!;
+        public string TransactionGroup { get; set; } = string.Empty; // Добавлено!
+        public string[]? TransactionTags { get; set; } // Добавлено!
         public bool TransactionIsCompleted { get; set; }
         public bool TransactionIsDisabled { get; set; }
     }

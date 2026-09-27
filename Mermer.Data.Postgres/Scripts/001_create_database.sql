@@ -646,6 +646,8 @@ CREATE INDEX idx_invoices_type_date ON invoices(invoice_type, date DESC);
 CREATE INDEX idx_invoices_wh_date ON invoices(warehouse_id, date DESC);
 CREATE INDEX idx_invoices_active_date ON invoices(date DESC) WHERE is_disabled = FALSE;
 CREATE INDEX idx_invoices_perf ON invoices(date, is_disabled);
+CREATE INDEX IF NOT EXISTS idx_invoices_date_completed ON invoices (date) WHERE is_disabled = false;
+CREATE INDEX IF NOT EXISTS idx_invoices_date_range ON invoices (date) WHERE is_disabled = false;
 
 CREATE TABLE invoice_lines (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

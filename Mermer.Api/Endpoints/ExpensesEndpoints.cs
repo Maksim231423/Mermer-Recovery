@@ -28,7 +28,6 @@ public static class ExpensesEndpoints
 
             var expenses = await db.Expenses
                 .AsNoTracking()
-                .Where(e => !e.IsDisabled)
                 .OrderBy(e => e.Name)
                 .Skip(skip)
                 .Take(take)

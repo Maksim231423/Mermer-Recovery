@@ -161,7 +161,12 @@ public static class EnterpriseEndpoints
                     string? validFromStr = GetStringProperty(rateJson, "validFrom", "ValidFrom", "rateValidFrom", "RateValidFrom");
                     if (!string.IsNullOrEmpty(validFromStr) && DateTime.TryParse(validFromStr, out var parsedDate))
                     {
-                        validFrom = parsedDate.Date;
+                        var utcDate = parsedDate.ToUniversalTime();
+                        validFrom = DateTime.SpecifyKind(utcDate.Date, DateTimeKind.Utc);
+                    }
+                    else
+                    {
+                        validFrom = DateTime.SpecifyKind(validFrom, DateTimeKind.Utc);
                     }
 
                     incomingRates.Add(new CurrencyRateEntity

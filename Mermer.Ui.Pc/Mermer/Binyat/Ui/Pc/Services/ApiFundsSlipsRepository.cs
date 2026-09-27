@@ -61,56 +61,69 @@ public class ApiFundsSlipsRepository : IRepositoryWithFacets<FundsSlip>, IReposi
         return result;
     }
 
-    // --- БЫСТРАЯ ФИЛЬТРАЦИЯ ПО ДАТАМ (ПРЯМОЙ СРЕЗ С СЕРВЕРА) ---
+    // --- ПОЛУЧЕНИЕ СПИСКА (С ФИЛЬТРОМ ИЛИ ЗА ВСЁ ВРЕМЯ) ---
     public async Task<IEnumerable<FundsSlip>> GetAsync(params Expression<Func<FundsSlip, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
 
-        if (hasDates)
+        try
         {
-            try
+            string url = "/api/finance/slips";
+            if (hasDates)
             {
                 var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
                 var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-
-                var remoteSlice = await _restClient.GetAsync<List<FundsSlip>>($"/api/finance/slips?from={fromStr}&till={tillStr}");
-                if (remoteSlice != null)
-                {
-                    var query = remoteSlice.AsQueryable();
-                    if (predicates != null)
-                    {
-                        foreach (var p in predicates.Where(x => x != null)) query = query.Where(p);
-                    }
-                    return query.ToList();
-                }
+                url += $"?from={fromStr}&till={tillStr}";
             }
-            catch { }
+
+            var remoteSlice = await _restClient.GetAsync<List<FundsSlip>>(url);
+            if (remoteSlice != null)
+            {
+                var query = remoteSlice.AsQueryable();
+                if (predicates != null)
+                {
+                    foreach (var p in predicates.Where(x => x != null))
+                        query = query.Where(p);
+                }
+                return query.ToList();
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[FundsSlips GetAsync Error]: {ex.Message}");
         }
 
         var all = await GetAllAsync();
         var fallbackQuery = all.AsQueryable();
         if (predicates != null)
         {
-            foreach (var p in predicates.Where(x => x != null)) fallbackQuery = fallbackQuery.Where(p);
+            foreach (var p in predicates.Where(x => x != null))
+                fallbackQuery = fallbackQuery.Where(p);
         }
         return fallbackQuery.ToList();
     }
 
+    // --- ПОДСЧЕТ КОЛИЧЕСТВА ДЛЯ ПЛИТОК ДАТ ---
     public async Task<int> CountAsync(params Expression<Func<FundsSlip, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
 
-        if (hasDates)
+        try
         {
-            try
+            string url = "/api/finance/slips/count";
+            if (hasDates)
             {
                 var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
                 var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-
-                var res = await _restClient.GetAsync<CountResponse>($"/api/finance/slips/count?from={fromStr}&till={tillStr}");
-                if (res != null) return res.Count;
+                url += $"?from={fromStr}&till={tillStr}";
             }
-            catch { }
+
+            var res = await _restClient.GetAsync<CountResponse>(url);
+            if (res != null) return res.Count;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[FundsSlips CountAsync Error]: {ex.Message}");
         }
 
         var items = await GetAsync(predicates);

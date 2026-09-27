@@ -35,8 +35,8 @@ public static class FinanceEndpoints
                 int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
                 int skip = offset.GetValueOrDefault(0);
 
-                var startDate = EnsureUtc(from ?? DateTime.UtcNow.AddMonths(-3));
-                var endDate = EnsureUtc(till ?? DateTime.UtcNow);
+                var startDate = from.HasValue ? from.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+                var endDate = till.HasValue ? till.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
                 var query = db.FundsSlips
                     .AsNoTracking()
@@ -363,26 +363,59 @@ public static class FinanceEndpoints
         financeGroup.MapPost("/slips", saveSlipHandler);
         financeGroup.MapPut("/slips/{id}", saveSlipHandler);
 
+        // 4.1. ПОДСЧЕТ ДЛЯ ПЛИТОК ДАТ (И ДЛЯ ALL RECORDS)
+        financeGroup.MapGet("/slips/count", async (DateTime? from, DateTime? till, string? depositoryId, MermerDbContext db, CancellationToken ct) =>
+        {
+            var query = db.FundsSlips.AsNoTracking().Where(s => !s.IsDisabled);
+
+            // Фильтруем типы актов кассы
+            query = query.Where(s => s.FundsSlipType != null &&
+                                     (s.FundsSlipType.ToLower().Contains("opening") ||
+                                      s.FundsSlipType.ToLower().Contains("revision")));
+
+            if (from.HasValue && from.Value.Year > 2000)
+            {
+                var fUtc = from.Value.ToUniversalTime();
+                query = query.Where(s => s.Date >= fUtc);
+            }
+
+            if (till.HasValue && till.Value.Year < 2099)
+            {
+                var tUtc = till.Value.ToUniversalTime();
+                query = query.Where(s => s.Date <= tUtc);
+            }
+
+            if (Guid.TryParse(depositoryId, out var depGuid))
+            {
+                query = query.Where(s => s.DepositoryId == depGuid);
+            }
+
+            var count = await query.CountAsync(ct);
+            return Results.Ok(new { count });
+        });
+
         financeGroup.MapGet("/slips/facets", async (string? fields, MermerDbContext db, CancellationToken ct) =>
         {
             var connStr = db.Database.GetConnectionString()!;
 
-            // 1. Если запрос пришел из карточки документа за подсказками полей (GroupNames / TagNames)
             if (!string.IsNullOrEmpty(fields))
             {
                 var facets = await FacetsHelper.GetEntityFacetsAsync(connStr, "funds_slips", fields, ct);
                 return Results.Ok(facets);
             }
 
-            // 2. Если запрос пришел из журнала списка документов (нужны счетчики дат и группы)
             var todayUtc = DateTime.UtcNow.Date;
             var weekStart = todayUtc.AddDays(-7);
             var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
 
-            var countToday = await db.FundsSlips.CountAsync(s => !s.IsDisabled && s.Date >= todayUtc, ct);
-            var countWeek = await db.FundsSlips.CountAsync(s => !s.IsDisabled && s.Date >= weekStart, ct);
-            var countMonth = await db.FundsSlips.CountAsync(s => !s.IsDisabled && s.Date >= monthStart, ct);
-            var countAll = await db.FundsSlips.CountAsync(s => !s.IsDisabled, ct);
+            // Базовый запрос с фильтром именно актов кассы
+            var baseQuery = db.FundsSlips.AsNoTracking().Where(s => !s.IsDisabled && s.FundsSlipType != null &&
+                (s.FundsSlipType.ToLower().Contains("opening") || s.FundsSlipType.ToLower().Contains("revision")));
+
+            var countToday = await baseQuery.CountAsync(s => s.Date >= todayUtc, ct);
+            var countWeek = await baseQuery.CountAsync(s => s.Date >= weekStart, ct);
+            var countMonth = await baseQuery.CountAsync(s => s.Date >= monthStart, ct);
+            var countAll = await baseQuery.CountAsync(ct);
 
             var entityFacets = await FacetsHelper.GetEntityFacetsAsync(connStr, "funds_slips", "GroupNames,TagNames,Group,Tags", ct);
             var groups = entityFacets.TryGetValue("Group", out var g) ? g : new Dictionary<string, int>();
@@ -392,12 +425,12 @@ public static class FinanceEndpoints
                 ["Group"] = groups,
                 ["GroupNames"] = groups,
                 ["Date"] = new Dictionary<string, int>
-        {
-            { "#Today", countToday },
-            { "#This Week", countWeek },
-            { "#This Month", countMonth },
-            { "#All Records", countAll }
-        }
+                {
+                    { "#Today", countToday },
+                    { "#This Week", countWeek },
+                    { "#This Month", countMonth },
+                    { "#All Records", countAll }
+                }
             });
         });
 

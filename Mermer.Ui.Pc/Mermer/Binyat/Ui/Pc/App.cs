@@ -53,6 +53,10 @@ public partial class App : System.Windows.Application
     {
         if (_setupComplete) return;
 
+        // Устанавливаем тему до инициализации окон и MvvmCross
+        DevExpress.Xpf.Core.ApplicationThemeHelper.ApplicationThemeName = "HybridApp";
+        DXGridDataController.DisableThreadingProblemsDetection = true;
+
         LoadMvxAssemblyResources();
 
         if (this.MainWindow == null)
@@ -77,9 +81,6 @@ public partial class App : System.Windows.Application
         Mvx.Resolve<IMvxAppStart>().Start();
 
         _setupComplete = true;
-
-        DevExpress.Xpf.Core.ApplicationThemeHelper.ApplicationThemeName = "HybridApp";
-        DXGridDataController.DisableThreadingProblemsDetection = true;
 
         this.MainWindow.Show();
     }

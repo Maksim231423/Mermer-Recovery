@@ -4,5 +4,5 @@
                xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
                xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
                xmlns:dxnav="http://schemas.devexpress.com/winfx/2008/xaml/navigation"
-               Style="{StaticResource FilterStyle}" ItemsSource="{Binding Filters}"
-               SelectedItem="{Binding SelectedFilter}"/>
+               Style="{StaticResource FilterStyle}" 
+               ItemsSource="{Binding Filters}"/>

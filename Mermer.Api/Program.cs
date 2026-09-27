@@ -5,6 +5,10 @@ using Microsoft.OpenApi.Models;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
+
+// РАЗРЕШАЕТ Npgsql АВТОМАТИЧЕСКИ ПРЕОБРАЗОВЫВАТЬ DateTime (Local/Unspecified) В UTC
+AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.WebHost.UseUrls("http://*:5050");
