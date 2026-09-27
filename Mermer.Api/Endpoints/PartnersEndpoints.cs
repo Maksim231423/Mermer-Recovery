@@ -345,6 +345,34 @@ public static class PartnersEndpoints
         })
         .WithName("PartnerSlipsGetFacets");
 
+        // 6.1. ПОДСЧЕТ КОЛИЧЕСТВА ДЛЯ ПЛИТОК ДАТ (ИСПРАВЛЯЕТ ОШИБКУ 405)
+        group.MapGet("/slips/count", async (DateTime? from, DateTime? till, MermerDbContext db, CancellationToken ct) =>
+        {
+            var query = db.PartnerSlips.AsNoTracking().Where(s => !s.IsDisabled);
+
+            if (from.HasValue && from.Value.Year > 2000)
+            {
+                var fUtc = from.Value.ToUniversalTime();
+                query = query.Where(s => s.Date >= fUtc);
+            }
+
+            if (till.HasValue && till.Value.Year < 2099)
+            {
+                var tUtc = till.Value.ToUniversalTime();
+                query = query.Where(s => s.Date <= tUtc);
+            }
+
+            var count = await query.CountAsync(ct);
+            return Results.Ok(new { count });
+        });
+
+        // 6.2. ГЕНЕРАЦИЯ СЛЕДУЮЩЕГО НОМЕРА
+        group.MapGet("/slips/next-code", async (MermerDbContext db, CancellationToken ct) =>
+        {
+            var count = await db.PartnerSlips.CountAsync(ct);
+            return Results.Ok(new { code = $"DOC-{DateTime.UtcNow:yyMMdd}{(count + 1):D4}" });
+        });
+
         // 7. ПОДГРУЗКА PARTNER SLIPS (С ПАГИНАЦИЕЙ)
         group.MapGet("/slips", async (int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
@@ -401,8 +429,8 @@ public static class PartnersEndpoints
             return Results.Json(result, jsonOptions);
         });
 
-        // 8. СОХРАНЕНИЕ PARTNER SLIPS
-        group.MapPost("/slips", async (HttpRequest request, MermerDbContext db) =>
+        // 8. СОХРАНЕНИЕ PARTNER SLIPS (POST И PUT БЕЗ 404)
+        Func<HttpRequest, MermerDbContext, Task<IResult>> saveSlipHandler = async (request, db) =>
         {
             using var reader = new StreamReader(request.Body);
             var body = await reader.ReadToEndAsync();
@@ -504,7 +532,10 @@ public static class PartnersEndpoints
             }
 
             return Results.Content($"{{\"id\":\"{slipId}\",\"code\":\"{code}\"}}", "application/json");
-        });
+        };
+
+        group.MapPost("/slips", saveSlipHandler);
+        group.MapPut("/slips/{id}", saveSlipHandler);
 
         // 9. ФАСЕТЫ ДЛЯ PARTNER TRANSFERS
         group.MapGet("/transfers/facets", async (string? fields, MermerDbContext db, CancellationToken ct) =>
@@ -699,6 +730,58 @@ public static class PartnersEndpoints
             return Results.Content($"{{\"id\":\"{transferId}\",\"code\":\"{code}\"}}", "application/json");
         });
 
+
+        // ПОДСЧЕТ КОЛИЧЕСТВА ДВИЖЕНИЙ ДЛЯ ПЛИТОК ДАТ (УСТРАНЯЕТ 404 И ФРИЗ НА 2 СЕК)
+        group.MapGet("/actions/count", async (string? partnerId, DateTime? from, DateTime? till, MermerDbContext db, CancellationToken ct) =>
+        {
+            DateTime fUtc = from?.ToUniversalTime() ?? DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+            DateTime tUtc = till?.ToUniversalTime() ?? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+
+            Guid? pGuid = Guid.TryParse(partnerId, out var g) ? g : null;
+
+            const string sql = """
+                SELECT 
+                    (
+                        SELECT COUNT(*)
+                        FROM invoices i
+                        WHERE i.partner_id IS NOT NULL 
+                          AND i.is_completed = true 
+                          AND i.is_disabled = false
+                          AND (@partner::uuid IS NULL OR i.partner_id = @partner)
+                          AND i.date >= @from AND i.date <= @till
+                    )
+                    +
+                    (
+                        SELECT COUNT(*)
+                        FROM partner_slip_lines psl
+                        JOIN partner_slips ps ON ps.id = psl.partner_slip_id
+                        WHERE psl.partner_id IS NOT NULL
+                          AND ps.is_disabled = false
+                          AND (@partner::uuid IS NULL OR psl.partner_id = @partner)
+                          AND ps.date >= @from AND ps.date <= @till
+                    )
+                    +
+                    (
+                        SELECT COUNT(*)
+                        FROM partner_transfer_lines ptl
+                        JOIN partner_transfers pt ON pt.id = ptl.partner_transfer_id
+                        WHERE ptl.partner_id IS NOT NULL
+                          AND pt.is_disabled = false
+                          AND (@partner::uuid IS NULL OR ptl.partner_id = @partner)
+                          AND pt.date >= @from AND pt.date <= @till
+                    ) AS "Count";
+                """;
+
+            var connStr = db.Database.GetConnectionString();
+            await using var conn = new NpgsqlConnection(connStr);
+            var totalCount = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
+                sql,
+                new { partner = pGuid, from = fUtc, till = tUtc },
+                cancellationToken: ct));
+
+            return Results.Ok(new { count = totalCount });
+        });
+
         // 12. РЕЕСТР ДВИЖЕНИЙ ПО ПАРТНЕРАМ
         group.MapGet("/actions", async (string? partnerId, DateTime? from, DateTime? till, int? limit, MermerDbContext db, CancellationToken ct) =>
         {
@@ -709,26 +792,36 @@ public static class PartnersEndpoints
             Guid? pGuid = Guid.TryParse(partnerId, out var g) ? g : null;
 
             const string sql = """
-                WITH raw_actions AS (
+                WITH filtered_invoices AS (
                     SELECT 
-                        i.id::text           AS "TransactionId",
-                        i.code               AS "TransactionCode",
-                        i.invoice_type       AS "TransactionType",
-                        i.date               AS "TransactionDate",
-                        COALESCE(i.office_id::text, '') AS "ActionOfficeId",
-                        i.partner_id::text   AS "ActionPartnerId",
-                        CASE WHEN i.invoice_type IN ('Sales', 'PurchaseReturn') THEN (il.quantity * il.price) ELSE 0 END AS "ActionDebit",
-                        CASE WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN (il.quantity * il.price) ELSE 0 END AS "ActionCredit",
-                        i.user_name          AS "TransactionUserName",
-                        i.is_completed       AS "TransactionIsCompleted",
-                        i.is_disabled        AS "TransactionIsDisabled"
-                    FROM invoice_lines il
-                    JOIN invoices i ON i.id = il.invoice_id
+                        i.id, i.code, i.invoice_type, i.date, i.office_id, i.partner_id, i.user_name, i.is_completed, i.is_disabled
+                    FROM invoices i
                     WHERE i.partner_id IS NOT NULL 
                       AND i.is_completed = true 
                       AND i.is_disabled = false
                       AND (@partner::uuid IS NULL OR i.partner_id = @partner)
                       AND i.date >= @from AND i.date <= @till
+                    ORDER BY i.date DESC
+                    LIMIT @take
+                ),
+                raw_actions AS (
+                    SELECT 
+                        fi.id::text           AS "TransactionId",
+                        fi.code               AS "TransactionCode",
+                        fi.invoice_type       AS "TransactionType",
+                        fi.date               AS "TransactionDate",
+                        COALESCE(fi.office_id::text, '') AS "ActionOfficeId",
+                        fi.partner_id::text   AS "ActionPartnerId",
+                        CASE WHEN fi.invoice_type IN ('Sales', 'PurchaseReturn') 
+                             THEN COALESCE((SELECT SUM(il.quantity * il.price) FROM invoice_lines il WHERE il.invoice_id = fi.id), 0) 
+                             ELSE 0 END AS "ActionDebit",
+                        CASE WHEN fi.invoice_type IN ('Purchase', 'SalesReturn') 
+                             THEN COALESCE((SELECT SUM(il.quantity * il.price) FROM invoice_lines il WHERE il.invoice_id = fi.id), 0) 
+                             ELSE 0 END AS "ActionCredit",
+                        fi.user_name          AS "TransactionUserName",
+                        fi.is_completed       AS "TransactionIsCompleted",
+                        fi.is_disabled        AS "TransactionIsDisabled"
+                    FROM filtered_invoices fi
 
                     UNION ALL
 

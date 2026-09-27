@@ -17,6 +17,9 @@ public class ApiPartnerSlipsRepository : IRepositoryWithFacets<PartnerSlip>, IRe
 
     private static readonly ConcurrentDictionary<string, PartnerSlip> _cardCache = new(StringComparer.OrdinalIgnoreCase);
 
+    // Множество ID, которые прямо сейчас находятся в процессе отправки на сервер
+    private static readonly ConcurrentDictionary<string, byte> _inFlightSync = new(StringComparer.OrdinalIgnoreCase);
+
     public ApiPartnerSlipsRepository(RestClient restClient)
     {
         _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
@@ -29,38 +32,18 @@ public class ApiPartnerSlipsRepository : IRepositoryWithFacets<PartnerSlip>, IRe
         if (_cardCache.TryGetValue(id, out var cached))
             return cached;
 
-        await GetAllAsync();
-        if (_cardCache.TryGetValue(id, out cached))
-            return cached;
-
-        try
-        {
-            var remote = await _restClient.GetAsync<PartnerSlip>($"/api/partners/slips/{id}");
-            if (remote != null)
-            {
-                _cardCache[remote.Id] = remote;
-                LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
-                return remote;
-            }
-        }
-        catch { }
-
-        return null;
+        var all = await GetAllAsync();
+        return all.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
     }
 
     public async Task<IEnumerable<PartnerSlip>> GetAsync(string[] ids)
     {
         if (ids == null || !ids.Any()) return Enumerable.Empty<PartnerSlip>();
-        var result = new List<PartnerSlip>();
-        foreach (var id in ids)
-        {
-            var item = await GetAsync(id);
-            if (item != null) result.Add(item);
-        }
-        return result;
+        var all = await GetAllAsync();
+        var idSet = new HashSet<string>(ids, StringComparer.OrdinalIgnoreCase);
+        return all.Where(x => idSet.Contains(x.Id)).ToList();
     }
 
-    // --- БЫСТРАЯ ВЫБОРКА ПО ДАТАМ (ПРЯМОЙ ЗАПРОС СРЕЗА) ---
     public async Task<IEnumerable<PartnerSlip>> GetAsync(params Expression<Func<PartnerSlip, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
@@ -75,6 +58,11 @@ public class ApiPartnerSlipsRepository : IRepositoryWithFacets<PartnerSlip>, IRe
                 var remoteSlice = await _restClient.GetAsync<List<PartnerSlip>>($"/api/partners/slips?from={fromStr}&till={tillStr}");
                 if (remoteSlice != null)
                 {
+                    foreach (var item in remoteSlice)
+                    {
+                        if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+                    }
+
                     var query = remoteSlice.AsQueryable();
                     if (predicates != null)
                     {
@@ -99,9 +87,9 @@ public class ApiPartnerSlipsRepository : IRepositoryWithFacets<PartnerSlip>, IRe
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
 
-        if (hasDates)
+        try
         {
-            try
+            if (hasDates)
             {
                 var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
                 var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
@@ -109,26 +97,59 @@ public class ApiPartnerSlipsRepository : IRepositoryWithFacets<PartnerSlip>, IRe
                 var res = await _restClient.GetAsync<CountResponse>($"/api/partners/slips/count?from={fromStr}&till={tillStr}");
                 if (res != null) return res.Count;
             }
-            catch { }
+            else
+            {
+                var res = await _restClient.GetAsync<CountResponse>("/api/partners/slips/count");
+                if (res != null) return res.Count;
+            }
         }
+        catch { }
 
-        var items = await GetAsync(predicates);
-        return items.Count();
+        var result = await GetAsync(predicates);
+        return result?.Count() ?? 0;
     }
 
     public async Task<IEnumerable<PartnerSlip>> GetAllAsync()
     {
+        // Фоновая досылка только тех документов, которые НЕ отправляются прямо сейчас
+        _ = Task.Run(SyncPendingAsync);
+
         if (_cardCache.Count > 0)
             return _cardCache.Values.ToList();
 
         var local = LocalSqliteCache.GetAllDocuments<PartnerSlip>(DocType);
-        if (local != null)
+        if (local != null && local.Any())
         {
             foreach (var item in local)
             {
-                if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+                if (!string.IsNullOrEmpty(item?.Id))
+                    _cardCache[item.Id] = item;
+            }
+            return _cardCache.Values.ToList();
+        }
+
+        try
+        {
+            var remote = await _restClient.GetAsync<List<PartnerSlip>>("/api/partners/slips");
+            if (remote != null && remote.Any())
+            {
+                foreach (var item in remote)
+                {
+                    if (!string.IsNullOrEmpty(item?.Id))
+                        _cardCache[item.Id] = item;
+                }
+
+                _ = Task.Run(() =>
+                {
+                    foreach (var item in remote)
+                    {
+                        if (!string.IsNullOrEmpty(item?.Id))
+                            LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
+                    }
+                });
             }
         }
+        catch { }
 
         return _cardCache.Values.ToList();
     }
@@ -139,29 +160,61 @@ public class ApiPartnerSlipsRepository : IRepositoryWithFacets<PartnerSlip>, IRe
     public async Task SaveAsync(PartnerSlip model)
     {
         if (model == null) return;
-
-        bool isNew = string.IsNullOrEmpty(model.Id) || model.Id == Guid.Empty.ToString();
-        if (isNew) model.Id = Guid.NewGuid().ToString();
+        if (string.IsNullOrEmpty(model.Id)) model.Id = Guid.NewGuid().ToString();
 
         _cardCache[model.Id] = model;
+
+        // Фиксируем документ в SQLite
         LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
+
+        // Помечаем, что данный ID взят в обработку отправки
+        if (!_inFlightSync.TryAdd(model.Id, 0))
+            return;
 
         _ = Task.Run(async () =>
         {
             try
             {
-                if (isNew)
-                    await _restClient.PostAsync("/api/partners/slips", model);
-                else
-                    await _restClient.PutAsync($"/api/partners/slips/{model.Id}", model);
-
+                await _restClient.PostAsync("/api/partners/slips", model);
                 LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[PARTNER SLIP SYNC ERROR]: {ex.Message}");
             }
+            finally
+            {
+                _inFlightSync.TryRemove(model.Id, out _);
+            }
         });
+    }
+
+    private async Task SyncPendingAsync()
+    {
+        try
+        {
+            var unsynced = LocalSqliteCache.GetUnsyncedDocuments<PartnerSlip>(DocType);
+            if (unsynced == null || !unsynced.Any()) return;
+
+            foreach (var item in unsynced)
+            {
+                // Если документ уже отправляется прямо сейчас — пропускаем его
+                if (!_inFlightSync.TryAdd(item.id, 0))
+                    continue;
+
+                try
+                {
+                    await _restClient.PostAsync("/api/partners/slips", item.entity);
+                    LocalSqliteCache.SaveDocument(DocType, item.id, item.entity, isSynced: true);
+                }
+                catch { }
+                finally
+                {
+                    _inFlightSync.TryRemove(item.id, out _);
+                }
+            }
+        }
+        catch { }
     }
 
     public async Task DeleteAsync(string id)
@@ -197,7 +250,6 @@ public class ApiPartnerSlipsRepository : IRepositoryWithFacets<PartnerSlip>, IRe
         return dict;
     }
 
-    // --- ПАРСЕР ДАТ ИЗ EXPRESSION-ДЕРЕВА MVVMCROSS ---
     private static (bool HasDates, DateTime From, DateTime Till) TryExtractDateRange(Expression<Func<PartnerSlip, bool>>[] predicates)
     {
         if (predicates == null || predicates.Length == 0)

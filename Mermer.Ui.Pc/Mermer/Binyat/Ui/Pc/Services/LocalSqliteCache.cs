@@ -12,7 +12,7 @@ namespace Mermer.Ui.Pc.Services
         private static string DbPath => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "mermer_local.db");
 
         // BusyTimeout=5000 заставляет SQLite ждать до 5 сек вместо выброса ошибки locked
-        public static string ConnectionString => $"Data Source={DbPath};Version=3;Journal Mode=WAL;BusyTimeout=5000;Pooling=True;";
+        public static string ConnectionString => $"Data Source={DbPath};Version=3;";
 
         public static void InitializeDatabase()
         {

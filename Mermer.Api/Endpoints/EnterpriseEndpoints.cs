@@ -17,41 +17,59 @@ namespace Mermer.Api.Endpoints;
 
 public static class EnterpriseEndpoints
 {
+    // ==========================================
+    // СТАТИЧЕСКИЙ IN-MEMORY КЭШ СПРАВОЧНИКОВ
+    // ==========================================
+    private static object? _cachedOffices;
+    private static object? _cachedWarehouses;
+    private static object? _cachedCurrencies;
+
     public static void MapEnterpriseEndpoints(this IEndpointRouteBuilder routes)
     {
         var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
 
-        // Обработчик получения офисов
-        async Task<IResult> GetOffices(MermerDbContext db)
+        // Обработчик получения офисов (с кэшированием)
+        async Task<IResult> GetOffices(MermerDbContext db, CancellationToken ct)
         {
-            var offices = await db.Offices.AsNoTracking().Where(o => !o.IsDisabled).ToListAsync();
-            var result = offices.Select(o => new { Id = o.Id.ToString(), Name = o.Name, IsDisabled = o.IsDisabled });
-            return Results.Json(result, jsonOptions);
+            if (_cachedOffices != null)
+                return Results.Json(_cachedOffices, jsonOptions);
+
+            var offices = await db.Offices.AsNoTracking().Where(o => !o.IsDisabled).ToListAsync(ct);
+            _cachedOffices = offices.Select(o => new { Id = o.Id.ToString(), Name = o.Name, IsDisabled = o.IsDisabled }).ToList();
+
+            return Results.Json(_cachedOffices, jsonOptions);
         }
 
         routes.MapGet("/api/enterprise/offices", GetOffices).WithTags("Enterprise");
         routes.MapGet("/api/offices", GetOffices).WithTags("Enterprise");
 
-        // Обработчик получения складов (поддерживаем оба маршрута)
-        async Task<IResult> GetWarehouses(MermerDbContext db)
+        // Обработчик получения складов (с кэшированием)
+        async Task<IResult> GetWarehouses(MermerDbContext db, CancellationToken ct)
         {
-            var warehouses = await db.Warehouses.AsNoTracking().Where(w => !w.IsDisabled).ToListAsync();
-            var result = warehouses.Select(w => new
+            if (_cachedWarehouses != null)
+                return Results.Json(_cachedWarehouses, jsonOptions);
+
+            var warehouses = await db.Warehouses.AsNoTracking().Where(w => !w.IsDisabled).ToListAsync(ct);
+            _cachedWarehouses = warehouses.Select(w => new
             {
                 Id = w.Id.ToString(),
                 Name = w.Name,
                 OfficeId = w.OfficeId.HasValue ? w.OfficeId.Value.ToString() : null,
                 IsDisabled = w.IsDisabled
-            });
-            return Results.Json(result, jsonOptions);
+            }).ToList();
+
+            return Results.Json(_cachedWarehouses, jsonOptions);
         }
 
         routes.MapGet("/api/enterprise/warehouses", GetWarehouses).WithTags("Enterprise");
         routes.MapGet("/api/warehouses", GetWarehouses).WithTags("Enterprise");
 
-        // Валюты: список
+        // Валюты: список (с кэшированием)
         routes.MapGet("/api/currencies", async (MermerDbContext db, CancellationToken ct) =>
         {
+            if (_cachedCurrencies != null)
+                return Results.Json(_cachedCurrencies, jsonOptions);
+
             var currencies = await db.Currencies.Include(c => c.Rates).AsNoTracking().ToListAsync(ct);
             var result = currencies.Select(c => new
             {
@@ -69,8 +87,10 @@ public static class EnterpriseEndpoints
                     Multiplier = r.Multiplier,
                     Divider = r.Divider
                 }).ToList() : new List<object>()
-            });
-            return Results.Json(result, jsonOptions);
+            }).ToList();
+
+            _cachedCurrencies = result;
+            return Results.Json(_cachedCurrencies, jsonOptions);
         }).WithTags("Enterprise");
 
         // Валюты: по ID
@@ -194,6 +214,10 @@ public static class EnterpriseEndpoints
             }
 
             await db.SaveChangesAsync();
+
+            // Инвалидация кэша валют при изменении/добавлении
+            _cachedCurrencies = null;
+
             return Results.Json(new { Id = currencyId.ToString(), Name = name }, jsonOptions);
         };
 
