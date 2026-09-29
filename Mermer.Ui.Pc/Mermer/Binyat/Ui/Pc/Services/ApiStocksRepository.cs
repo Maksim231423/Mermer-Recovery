@@ -33,7 +33,7 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
                 return _memoryCache;
         }
 
-        // 1. Быстрое чтение из локального SQLite
+        // 1. Быстрое чтение из локального SQLite (не отсекаем IsDisabled, чтобы работали стили зачеркивания)
         var local = LocalSqliteCache.GetAllDocuments<Stock>(DocType)?.ToList() ?? new List<Stock>();
         if (local.Any())
         {
@@ -47,18 +47,18 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
             }
         }
 
-        // 2. Если локально пусто — запрашиваем API
+        // 2. Если кэш пуст — подгружаем с бэкенда
         if (_memoryCache == null || _memoryCache.Count == 0)
         {
             try
             {
-                var remote = await _restClient.GetAsync<List<Stock>>("/api/stocks");
+                var remote = await _restClient.GetAsync<List<Stock>>("/api/stocks?limit=10000");
                 if (remote != null && remote.Any())
                 {
                     lock (_syncLock)
                     {
                         _memoryCache = remote.OrderBy(s => s.Name).ToList();
-                        foreach (var s in remote)
+                        foreach (var s in _memoryCache)
                         {
                             if (!string.IsNullOrEmpty(s?.Id))
                             {
@@ -189,7 +189,7 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
         var result = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
         if (fields != null)
         {
-            foreach (var field in fields) result[field] = new Dictionary<string, int>();
+            foreach (var field in fields) result[field] = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         }
 
         try
@@ -198,10 +198,24 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
             var apiResult = await _restClient.GetAsync<Dictionary<string, Dictionary<string, int>>>($"/api/stocks/facets?fields={fieldsParam}");
             if (apiResult != null)
             {
-                foreach (var kvp in apiResult) result[kvp.Key] = kvp.Value;
+                foreach (var kvp in apiResult) result[kvp.Key] = new Dictionary<string, int>(kvp.Value, StringComparer.OrdinalIgnoreCase);
             }
         }
         catch { }
+
+        // Fallback для PriceGroupNames
+        if (result.ContainsKey("PriceGroupNames") && result["PriceGroupNames"].Count == 0)
+        {
+            var all = await GetAllAsync();
+            var priceGroups = all
+                .Where(s => s.AdditionalPrices != null)
+                .SelectMany(s => s.AdditionalPrices)
+                .Where(p => !string.IsNullOrWhiteSpace(p?.Group))
+                .GroupBy(p => p.Group.Trim(), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+
+            result["PriceGroupNames"] = priceGroups;
+        }
 
         return result;
     }
@@ -232,20 +246,48 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
     {
         var all = await GetAllAsync();
 
-        return all.Select(stock => new StockInfo
+        return all.Select(stock =>
         {
-            Id = stock.Id,
-            Code = stock.Code,
-            Name = stock.Name,
-            ShortName = stock.ShortName,
-            Unit = stock.Unit,
-            Price = stock.Price,
-            CurrencyId = stock.CurrencyId,
-            Type = stock.Type,
-            Group = stock.Group,
-            Tags = stock.Tags?.ToList(),
-            Barcodes = stock.Barcodes?.ToList(),
-            IsDisabled = stock.IsDisabled
+            decimal addPrice = 0m;
+            string addPriceCurrency = null;
+
+            if (!string.IsNullOrEmpty(additionalPriceGroup) && stock.AdditionalPrices != null && stock.AdditionalPrices.Any())
+            {
+                var matched = stock.AdditionalPrices
+                    .Where(p => string.Equals(p.Group, additionalPriceGroup, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(p => p.ValidFrom)
+                    .FirstOrDefault();
+
+                if (matched != null)
+                {
+                    addPrice = matched.Price;
+                    addPriceCurrency = matched.CurrencyId ?? stock.CurrencyId;
+                }
+            }
+
+            if (addPrice == 0m && !string.IsNullOrEmpty(additionalPriceCurrencyId))
+            {
+                addPrice = stock.Price;
+                addPriceCurrency = additionalPriceCurrencyId;
+            }
+
+            return new StockInfo
+            {
+                Id = stock.Id,
+                Code = stock.Code,
+                Name = stock.Name,
+                ShortName = stock.ShortName,
+                Unit = stock.Unit,
+                Price = stock.Price,
+                CurrencyId = stock.CurrencyId,
+                AdditionalPrice = addPrice,
+                AdditionalPriceCurrencyId = addPriceCurrency,
+                Type = stock.Type,
+                Group = stock.Group,
+                Tags = stock.Tags?.ToList(),
+                Barcodes = stock.Barcodes?.ToList(),
+                IsDisabled = stock.IsDisabled
+            };
         }).ToList();
     }
 
@@ -255,20 +297,69 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
 
         try
         {
-            await _restClient.PostAsync("/api/stocks/merge", new
+            var payload = new
             {
                 MainStockId = mainStockId,
                 MergeStockIds = mergeStockIds,
                 DisableMergedItems = disableMergedItems
-            });
+            };
 
+            // 1. Отправляем запрос на сервер
+            await _restClient.PostAsync("/api/stocks/merge", payload);
+
+            var mergeSet = new HashSet<string>(mergeStockIds, StringComparer.OrdinalIgnoreCase);
+
+            // 2. Мгновенно обновляем флаг в оперативной памяти и локальном SQLite
             lock (_syncLock)
             {
-                _memoryCache = null;
+                if (_memoryCache != null)
+                {
+                    foreach (var s in _memoryCache.Where(x => mergeSet.Contains(x.Id)))
+                    {
+                        s.IsDisabled = disableMergedItems;
+                        LocalSqliteCache.SaveDocument(DocType, s.Id, s, isSynced: true);
+                    }
+                }
             }
-            _cardCache.Clear();
-            await GetAllAsync();
+
+            foreach (var id in mergeStockIds)
+            {
+                if (_cardCache.TryGetValue(id, out var s))
+                {
+                    s.IsDisabled = disableMergedItems;
+                    LocalSqliteCache.SaveDocument(DocType, id, s, isSynced: true);
+                }
+            }
+
+            // 3. Сбрасываем кэш в фоне, не блокируя UI
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var remote = await _restClient.GetAsync<List<Stock>>("/api/stocks?limit=10000");
+                    if (remote != null && remote.Any())
+                    {
+                        lock (_syncLock)
+                        {
+                            _memoryCache = remote.OrderBy(x => x.Name).ToList();
+                            foreach (var s in _memoryCache)
+                            {
+                                if (!string.IsNullOrEmpty(s?.Id))
+                                {
+                                    _cardCache[s.Id] = s;
+                                    LocalSqliteCache.SaveDocument(DocType, s.Id, s, isSynced: true);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { }
+            });
         }
-        catch { }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[STOCK MERGE ERROR]: {ex.Message}");
+            throw;
+        }
     }
 }

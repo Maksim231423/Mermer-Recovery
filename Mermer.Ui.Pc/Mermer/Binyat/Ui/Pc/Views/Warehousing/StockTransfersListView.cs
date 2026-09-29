@@ -17,19 +17,16 @@ public partial class StockTransfersListView : MvxWpfView
 
     private void StockTransfersListView_Loaded(object sender, RoutedEventArgs e)
     {
-        // Безопасно ищем внутреннюю TableView в нашем кастомном GridControl
         if (GridControl != null && GridControl.View is TableView tableView)
         {
-            // Очищаем старые кастомные условия (если они вдруг были добавлены ранее)
             var existingCondition = tableView.FormatConditions
-                .FirstOrDefault(x => x.Expression == "[ActionReceivedTotal] == 0");
+                .FirstOrDefault(x => x.Expression == "[ActionReceivedTotal] < [ActionTotal] And [IsDisabled] = False");
 
             if (existingCondition == null)
             {
-                // Добавляем правило подсветки строк непосредственно через C#
                 tableView.FormatConditions.Add(new FormatCondition
                 {
-                    Expression = "[ActionReceivedTotal] == 0",
+                    Expression = "[ActionReceivedTotal] < [ActionTotal] And [IsDisabled] = False",
                     ApplyToRow = true,
                     PredefinedFormatName = "LightRedFillWithDarkRedText"
                 });

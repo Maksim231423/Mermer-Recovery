@@ -21,31 +21,25 @@ public static class StocksEndpoints
     {
         var group = app.MapGroup("/api/stocks").WithTags("Stocks");
 
-        // 1. СПИСОК ТОВАРОВ (БЫСТРАЯ ВЫБОРКА ДЛЯ АВТОКОМПЛИТА)
-        group.MapGet("/", async (int? limit, int? offset, string? search, MermerDbContext db, CancellationToken ct) =>
+        // 1. СПИСОК ТОВАРОВ (БЕЗ ЖЕСТКОГО ОГРАНИЧЕНИЯ В 100 ШТУК)
+        group.MapGet("/", async (int? limit, int? offset, string? search, bool? includeDisabled, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 500) : 100;
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 10000) : 5000;
             int skip = offset.GetValueOrDefault(0);
 
-            var query = db.Stocks
-                .AsNoTracking()
-                .Where(s => !s.IsDisabled);
+            var query = db.Stocks.AsNoTracking();
+
+            // По умолчанию отдаем все записи (включая IsDisabled), чтобы UI применял стиль зачеркивания
+            if (includeDisabled.HasValue && !includeDisabled.Value)
+            {
+                query = query.Where(s => !s.IsDisabled);
+            }
 
             if (!string.IsNullOrWhiteSpace(search))
             {
                 string term = search.Trim();
-                if (term.Length <= 2)
-                {
-                    // Для 1-2 букв ищем по префиксу (мгновенно по B-Tree индексу)
-                    query = query.Where(s => EF.Functions.ILike(s.Name, $"{term}%") ||
-                                             (s.Code != null && EF.Functions.ILike(s.Code, $"{term}%")));
-                }
-                else
-                {
-                    // Для длинных слов ищем подстроку
-                    query = query.Where(s => EF.Functions.ILike(s.Name, $"%{term}%") ||
-                                             (s.Code != null && EF.Functions.ILike(s.Code, $"%{term}%")));
-                }
+                query = query.Where(s => EF.Functions.ILike(s.Name, $"%{term}%") ||
+                                         (s.Code != null && EF.Functions.ILike(s.Code, $"%{term}%")));
             }
 
             var list = await query
@@ -182,57 +176,44 @@ public static class StocksEndpoints
         // 5. ФАСЕТЫ (GroupNames, TagNames, PriceGroupNames)
         group.MapGet("/facets", async (HttpContext context, MermerDbContext db, CancellationToken ct) =>
         {
-            string? fields = context.Request.Query["fields"].ToString();
-            var fieldList = string.IsNullOrEmpty(fields)
-                ? new[] { "Group", "Tags", "PriceGroupNames" }
-                : fields.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var result = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
 
-            var result = new Dictionary<string, Dictionary<string, int>>();
+            // 1. Группы цен из stock_prices
+            var priceGroups = await db.StockPrices
+                .AsNoTracking()
+                .Where(x => !string.IsNullOrEmpty(x.PriceGroup))
+                .GroupBy(x => x.PriceGroup!)
+                .Select(g => new { Key = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
 
-            foreach (var field in fieldList)
-            {
-                if (field.Equals("Group", StringComparison.OrdinalIgnoreCase) || field.Equals("GroupNames", StringComparison.OrdinalIgnoreCase))
-                {
-                    var groups = await db.Stocks
-                        .AsNoTracking()
-                        .Where(x => !string.IsNullOrEmpty(x.Group))
-                        .GroupBy(x => x.Group!)
-                        .Select(g => new { Key = g.Key, Count = g.Count() })
-                        .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+            result["PriceGroupNames"] = priceGroups;
 
-                    result[field] = groups;
-                }
-                else if (field.Equals("Tags", StringComparison.OrdinalIgnoreCase) || field.Equals("TagNames", StringComparison.OrdinalIgnoreCase))
-                {
-                    var allTags = await db.Stocks
-                        .AsNoTracking()
-                        .Where(x => x.Tags != null && x.Tags.Length > 0)
-                        .Select(x => x.Tags)
-                        .ToListAsync(ct);
+            // 2. Группы товаров
+            var groups = await db.Stocks
+                .AsNoTracking()
+                .Where(x => !string.IsNullOrEmpty(x.Group) && !x.IsDisabled)
+                .GroupBy(x => x.Group!)
+                .Select(g => new { Key = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
 
-                    var tagCounts = allTags
-                        .SelectMany(t => t!)
-                        .GroupBy(t => t)
-                        .ToDictionary(g => g.Key, g => g.Count());
+            result["Group"] = groups;
+            result["GroupNames"] = groups;
 
-                    result[field] = tagCounts;
-                }
-                else if (field.Equals("PriceGroupNames", StringComparison.OrdinalIgnoreCase))
-                {
-                    var priceGroups = await db.StockPrices
-                        .AsNoTracking()
-                        .Where(x => !string.IsNullOrEmpty(x.PriceGroup))
-                        .GroupBy(x => x.PriceGroup!)
-                        .Select(g => new { Key = g.Key, Count = g.Count() })
-                        .ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+            // 3. Теги
+            var allTags = await db.Stocks
+                .AsNoTracking()
+                .Where(x => x.Tags != null && x.Tags.Length > 0 && !x.IsDisabled)
+                .Select(x => x.Tags)
+                .ToListAsync(ct);
 
-                    result[field] = priceGroups;
-                }
-                else
-                {
-                    result[field] = new Dictionary<string, int>();
-                }
-            }
+            var tagCounts = allTags
+                .SelectMany(t => t!)
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .GroupBy(t => t.Trim(), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.Count());
+
+            result["Tags"] = tagCounts;
+            result["TagNames"] = tagCounts;
 
             return Results.Ok(result);
         })
@@ -481,6 +462,96 @@ public static class StocksEndpoints
             return Results.NoContent();
         })
         .WithName("StocksDelete");
+
+        // 9. СЛИЯНИЕ ТОВАРОВ (STOCK MERGE)
+        group.MapPost("/merge", async (HttpRequest request, MermerDbContext db, CancellationToken ct) =>
+        {
+            using var reader = new StreamReader(request.Body);
+            var body = await reader.ReadToEndAsync();
+            if (string.IsNullOrEmpty(body)) return Results.BadRequest("Empty body");
+
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+
+            string? mainIdStr = GetStringProp(root, "MainStockId", "mainStockId");
+            if (!Guid.TryParse(mainIdStr, out var mainStockId))
+                return Results.BadRequest("Invalid MainStockId");
+
+            var mergeStockIds = new List<Guid>();
+            if (TryGetPropCaseInsensitive(root, "MergeStockIds", out var idsProp) && idsProp.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in idsProp.EnumerateArray())
+                {
+                    if (Guid.TryParse(el.GetString(), out var g) && g != mainStockId)
+                        mergeStockIds.Add(g);
+                }
+            }
+
+            if (!mergeStockIds.Any()) return Results.Ok(new { success = true, count = 0 });
+
+            // Если флаг не передали явно — считаем true (поведение по умолчанию для слияния)
+            bool disableMerged = true;
+            if (TryGetPropCaseInsensitive(root, "DisableMergedItems", out var disProp) ||
+                TryGetPropCaseInsensitive(root, "disableMergedItems", out disProp))
+            {
+                if (disProp.ValueKind == JsonValueKind.False) disableMerged = false;
+            }
+
+            var mainStock = await db.Stocks.FirstOrDefaultAsync(s => s.Id == mainStockId, ct);
+            if (mainStock == null) return Results.NotFound("Main stock not found");
+
+            var duplicateStocks = await db.Stocks.Where(s => mergeStockIds.Contains(s.Id)).ToListAsync(ct);
+
+            // 1. Объединяем штрихкоды и теги в основной товар
+            var allBarcodes = (mainStock.Barcodes ?? Array.Empty<string>()).ToList();
+            var allTags = (mainStock.Tags ?? Array.Empty<string>()).ToList();
+
+            foreach (var d in duplicateStocks)
+            {
+                if (d.Barcodes != null) allBarcodes.AddRange(d.Barcodes);
+                if (d.Tags != null) allTags.AddRange(d.Tags);
+
+                if (disableMerged)
+                {
+                    d.IsDisabled = true;
+                    d.UpdatedAt = DateTime.UtcNow;
+                }
+            }
+
+            mainStock.Barcodes = allBarcodes.Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            mainStock.Tags = allTags.Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            mainStock.UpdatedAt = DateTime.UtcNow;
+
+            // Сначала фиксируем изменения сущностей в EF
+            await db.SaveChangesAsync(ct);
+
+            // 2. Затем перенаправляем ссылки в документах прямым SQL (без дедлоков)
+            var mergeArray = mergeStockIds.ToArray();
+
+            await db.Database.ExecuteSqlRawAsync(
+                @"UPDATE stock_slip_lines SET stock_id = {0} WHERE stock_id = ANY({1})",
+                mainStockId, mergeArray);
+
+            await db.Database.ExecuteSqlRawAsync(
+                @"UPDATE stock_transfer_lines SET stock_id = {0} WHERE stock_id = ANY({1})",
+                mainStockId, mergeArray);
+
+            await db.Database.ExecuteSqlRawAsync(
+                @"UPDATE invoice_lines SET stock_id = {0} WHERE stock_id = ANY({1})",
+                mainStockId, mergeArray);
+
+            try
+            {
+                await db.Database.ExecuteSqlRawAsync(
+                    @"UPDATE stock_order_lines SET stock_id = {0} WHERE stock_id = ANY({1})",
+                    mainStockId, mergeArray);
+            }
+            catch { }
+
+            return Results.Ok(new { success = true, mergedCount = mergeStockIds.Count });
+        })
+        .WithName("StocksMerge");
+
 
         return app;
     }

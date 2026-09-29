@@ -30,37 +30,33 @@
     <ctrl:StyledGridControl x:Name="GridControl" PrintButton="{Binding ElementName=PrintButton, Mode=OneWay}"
                             FilterButton="{Binding ElementName=FilterButton, Mode=OneWay}"
                             SearchControl="{Binding ElementName=SearchControl, Mode=OneWay}">
-      <dxg:GridControl.Columns>
-        <dxg:GridColumn FieldName="Date" SortOrder="Ascending" Header="{Localize Date}">
-          <dxg:ColumnBase.EditSettings>
-            <dxe:DateEditSettings DisplayFormat="g"/>
-          </dxg:ColumnBase.EditSettings>
-        </dxg:GridColumn>
-        <dxg:GridColumn FieldName="Code" Header="{Localize Code}"/>
-        <dxg:GridColumn FieldName="DepositoryId" Header="{Localize Depository}">
-          <dxg:ColumnBase.EditSettings>
-            <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Depositories.List}"/>
-          </dxg:ColumnBase.EditSettings>
-        </dxg:GridColumn>
-        <dxg:GridColumn FieldName="ActionTotal" Style="{StaticResource AmountDisplayFormat}" Header="{Localize Total}"/>
-        <dxg:GridColumn FieldName="IsCompleted" Width="50" Header="{Localize Completed}"/>
-        <dxg:GridColumn FieldName="IsDisabled" Width="50" Header="{Localize Deleted}"/>
-        <dxg:GridColumn FieldName="UserName" Header="{Localize Author}"/>
-                <!-- Колонка с тегами -->
-                <dxg:GridColumn FieldName="Tags" Header="{Localize Tags}" Width="150">
-                    <dxg:GridColumn.CellTemplate>
-                        <DataTemplate>
-                            <TextBlock Text="{Binding RowData.Row.Tags, Converter={cnv:TokenConverter}}"
-                         VerticalAlignment="Center"
-                         Margin="4,0"
-                         TextTrimming="CharacterEllipsis"/>
-                        </DataTemplate>
-                    </dxg:GridColumn.CellTemplate>
+            <dxg:GridControl.Columns>
+                <dxg:GridColumn FieldName="Date" SortOrder="Ascending" Header="{Localize Date}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxe:DateEditSettings DisplayFormat="g"/>
+                    </dxg:ColumnBase.EditSettings>
                 </dxg:GridColumn>
-
-                <!-- Колонка с группой -->
+                <dxg:GridColumn FieldName="Code" Header="{Localize Code}"/>
+                <dxg:GridColumn FieldName="DepositoryId" Header="{Localize Depository}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Depositories.List}"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="ActionTotal" Style="{StaticResource AmountDisplayFormat}" Header="{Localize Total}"/>
+                <dxg:GridColumn FieldName="IsCompleted" Width="50" Header="{Localize Completed}"/>
+                <dxg:GridColumn FieldName="IsDisabled" Width="50" Header="{Localize Deleted}"/>
+                <dxg:GridColumn FieldName="UserName" Header="{Localize Author}"/>
+                <dxg:GridColumn Binding="{Binding Tags, Converter={cnv:TokenConverter}}" Header="{Localize Tags}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxg:LookUpEditSettings>
+                            <dxe:BaseEditSettings.StyleSettings>
+                                <dxg:TokenLookUpEditStyleSettings/>
+                            </dxe:BaseEditSettings.StyleSettings>
+                        </dxg:LookUpEditSettings>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
                 <dxg:GridColumn FieldName="Group" GroupIndex="0" Header="{Localize Group}"/>
             </dxg:GridControl.Columns>
-    </ctrl:StyledGridControl>
+        </ctrl:StyledGridControl>
   </DockPanel>
 </mvx:MvxWpfView>

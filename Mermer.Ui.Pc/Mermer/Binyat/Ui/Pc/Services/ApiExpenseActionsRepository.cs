@@ -52,13 +52,13 @@ public class ApiExpenseActionsRepository : IExpenseActionsRepository
 
         if (startDate.HasValue) queryParams.Add($"from={startDate.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
         if (endDate.HasValue) queryParams.Add($"till={endDate.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
-        if (!string.IsNullOrEmpty(expenseId) && expenseId != "null") queryParams.Add($"expenseId={expenseId}");
+        if (!string.IsNullOrEmpty(expenseId) && expenseId != "null") queryParams.Add($"expenseId={expenseId.Trim()}");
 
         if (depositoryIds != null && depositoryIds.Any())
         {
             foreach (var depId in depositoryIds.Where(d => !string.IsNullOrEmpty(d)))
             {
-                queryParams.Add($"depositoryId={depId}");
+                queryParams.Add($"depositoryId={depId.Trim()}");
             }
         }
 

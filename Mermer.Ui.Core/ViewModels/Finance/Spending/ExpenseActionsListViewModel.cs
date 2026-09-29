@@ -50,12 +50,15 @@ public class ExpenseActionsListViewModel : ListViewModelBaseWithFilterDate<Expen
         get => this._selectedDepositoryIds;
         set
         {
-            if (this.SetProperty<List<object>>(ref this._selectedDepositoryIds, value, nameof(SelectedDepositoryIds)))
+            if (this._selectedDepositoryIds != null && value != null && this._selectedDepositoryIds.SequenceEqual(value))
+                return;
+
+            if (!this.SetProperty<List<object>>(ref this._selectedDepositoryIds, value, nameof(SelectedDepositoryIds)))
+                return;
+
+            if (_loaded && !this.IsBusy)
             {
-                if (_loaded && !this.IsBusy)
-                {
-                    Task.Run(async () => await this.LoadByDateAsync(false));
-                }
+                this.Initialize();
             }
         }
     }
@@ -64,12 +67,14 @@ public class ExpenseActionsListViewModel : ListViewModelBaseWithFilterDate<Expen
     {
         get
         {
-            if (this.SelectedDepositoryIds == null || !this.SelectedDepositoryIds.Any())
-                return Array.Empty<string>();
+            var list = this.SelectedDepositoryIds;
+            if (list == null || !list.Any()) return Array.Empty<string>();
 
-            return this.SelectedDepositoryIds
-                .Select(x => x?.ToString())
-                .Where(x => !string.IsNullOrEmpty(x))
+            return list
+                .SelectMany(x => (x?.ToString() ?? string.Empty).Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                .Select(x => x.Trim())
+                .Where(x => !string.IsNullOrEmpty(x) && Guid.TryParse(x, out _))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
     }
@@ -79,12 +84,12 @@ public class ExpenseActionsListViewModel : ListViewModelBaseWithFilterDate<Expen
         get => this._expenseId;
         set
         {
-            if (this.SetProperty<string>(ref this._expenseId, value, nameof(ExpenseId)))
+            if (!this.SetProperty<string>(ref this._expenseId, value, nameof(ExpenseId)))
+                return;
+
+            if (_loaded && !this.IsBusy)
             {
-                if (_loaded && !this.IsBusy)
-                {
-                    Task.Run(async () => await this.LoadByDateAsync(false));
-                }
+                this.Initialize();
             }
         }
     }
@@ -104,13 +109,13 @@ public class ExpenseActionsListViewModel : ListViewModelBaseWithFilterDate<Expen
             }
         }
 
-        _loaded = true;
-
         await Task.WhenAll(
             base.PreLoad(),
             Expenses.Initialize(),
             Depositories.Initialize()
         );
+
+        _loaded = true;
     }
 
     protected override Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)

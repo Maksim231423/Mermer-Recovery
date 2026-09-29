@@ -423,7 +423,33 @@ public static class StockSlipsEndpoints
             return Results.Ok();
         });
 
-        // --- ФАСЕТЫ ---
+        // --- 1. БЫСТРЫЙ ПОДСЧЕТ ДЛЯ ПЛИТОК ДАТ ---
+        group.MapGet("/slips/count", async (DateTime? from, DateTime? till, string? warehouseId, MermerDbContext db, CancellationToken ct) =>
+        {
+            var query = db.StockSlips.AsNoTracking();
+
+            if (from.HasValue && from.Value.Year > 2000)
+            {
+                var fUtc = DateTime.SpecifyKind(from.Value, DateTimeKind.Utc);
+                query = query.Where(s => s.Date >= fUtc);
+            }
+
+            if (till.HasValue && till.Value.Year < 2099)
+            {
+                var tUtc = DateTime.SpecifyKind(till.Value, DateTimeKind.Utc);
+                query = query.Where(s => s.Date <= tUtc);
+            }
+
+            if (Guid.TryParse(warehouseId, out var wGuid))
+            {
+                query = query.Where(s => s.WarehouseId == wGuid);
+            }
+
+            var count = await query.CountAsync(ct);
+            return Results.Ok(new { count });
+        });
+
+        // --- 2. ФАСЕТЫ (БЕЗ IsDisabled) ---
         group.MapGet("/slips/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
             string? fields = ctx.Request.Query["fields"].ToString();
@@ -433,7 +459,7 @@ public static class StockSlipsEndpoints
                         .Select(f => f.Trim())
                         .ToArray();
 
-            var result = new Dictionary<string, Dictionary<string, int>>();
+            var result = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var field in fieldList)
             {
@@ -458,23 +484,37 @@ public static class StockSlipsEndpoints
 
                     var tagCounts = allTags
                         .SelectMany(t => t!)
-                        .GroupBy(t => t)
+                        .Where(t => !string.IsNullOrWhiteSpace(t))
+                        .GroupBy(t => t.Trim(), StringComparer.OrdinalIgnoreCase)
                         .ToDictionary(g => g.Key, g => g.Count());
 
                     result[field] = tagCounts;
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var now = DateTime.Now.Date;
-                    var slips = await db.StockSlips.AsNoTracking().Select(s => s.Date).ToListAsync(ct);
-                    var localDates = slips.Select(d => d.ToLocalTime().Date).ToList();
+                    var now = DateTime.UtcNow.Date;
+                    var slips = await db.StockSlips
+                        .AsNoTracking()
+                        .Select(s => s.Date)
+                        .ToListAsync(ct);
+
+                    var dates = slips.Select(d => d.UtcDateTime.Date).ToList();
+
+                    int countAll = dates.Count;
+                    int countToday = dates.Count(d => d == now);
+                    int countWeek = dates.Count(d => d >= now.AddDays(-7));
+                    int countMonth = dates.Count(d => d.Month == now.Month && d.Year == now.Year);
+                    int countYear = dates.Count(d => d.Year == now.Year);
 
                     var dateFacets = new Dictionary<string, int>
                     {
-                        { "#Today", localDates.Count(d => d == now) },
-                        { "#This Week", localDates.Count(d => d >= now.AddDays(-7)) },
-                        { "#This Month", localDates.Count(d => d.Month == now.Month && d.Year == now.Year) },
-                        { "#All Records", localDates.Count }
+                        { "#Today", countToday },
+                        { "#This Week", countWeek },
+                        { "#This Month", countMonth },
+                        { "#This Year", countYear },
+                        { "#All Records", countAll },
+                        { "#All", countAll },
+                        { "", countAll }
                     };
                     result[field] = dateFacets;
                 }

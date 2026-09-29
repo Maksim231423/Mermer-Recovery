@@ -67,6 +67,7 @@
                                 SearchControl="{Binding ElementName=SearchControl, Mode=OneWay}"
                                 IsEnabled="{Binding IsBusy, Converter={dxmvvm:BooleanNegationConverter}}">
           <dxg:GridControl.Columns>
+              <dxg:GridColumn FieldName="IsDisabled" Visible="False"/>
             <dxg:GridColumn FieldName="Code" SortOrder="Ascending" Header="{Localize Code}"/>
             <dxg:GridColumn FieldName="Name" SortOrder="Ascending" Width="700" Header="{Localize Name}"/>
             <dxg:GridColumn FieldName="ShortName" Header="{Localize ShortName}"/>

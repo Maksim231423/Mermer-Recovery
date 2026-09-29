@@ -62,32 +62,43 @@ public class ApiStockTransfersRepository : IRepositoryWithFacets<StockTransfer>,
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
 
-        if (hasDates)
+        try
         {
-            try
-            {
-                var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string url = "/api/warehousing/transfers";
+            var queryParams = new List<string>();
 
-                var remoteSlice = await _restClient.GetAsync<List<StockTransfer>>($"/api/warehousing/transfers?from={fromStr}&till={tillStr}");
-                if (remoteSlice != null)
-                {
-                    var query = remoteSlice.AsQueryable();
-                    if (predicates != null)
-                    {
-                        foreach (var p in predicates.Where(x => x != null)) query = query.Where(p);
-                    }
-                    return query.ToList();
-                }
+            if (hasDates)
+            {
+                if (from > new DateTime(2000, 1, 1))
+                    queryParams.Add($"from={from.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
+
+                if (till < new DateTime(2099, 1, 1))
+                    queryParams.Add($"till={till.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
             }
-            catch { }
+
+            if (queryParams.Any())
+                url += "?" + string.Join("&", queryParams);
+
+            var remoteSlice = await _restClient.GetAsync<List<StockTransfer>>(url);
+            if (remoteSlice != null)
+            {
+                var query = remoteSlice.AsQueryable();
+                if (predicates != null)
+                {
+                    foreach (var p in predicates.Where(x => x != null))
+                        query = query.Where(p);
+                }
+                return query.ToList();
+            }
         }
+        catch { }
 
         var all = await GetAllAsync();
         var fallbackQuery = all.AsQueryable();
         if (predicates != null)
         {
-            foreach (var p in predicates.Where(x => x != null)) fallbackQuery = fallbackQuery.Where(p);
+            foreach (var p in predicates.Where(x => x != null))
+                fallbackQuery = fallbackQuery.Where(p);
         }
         return fallbackQuery.ToList();
     }
@@ -96,21 +107,34 @@ public class ApiStockTransfersRepository : IRepositoryWithFacets<StockTransfer>,
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
 
-        if (hasDates)
+        try
         {
-            try
+            var queryParams = new List<string>();
+
+            if (hasDates)
             {
-                var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                if (from > new DateTime(2000, 1, 1))
+                    queryParams.Add($"from={from.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
 
-                var res = await _restClient.GetAsync<CountResponse>($"/api/warehousing/transfers/count?from={fromStr}&till={tillStr}");
-                if (res != null) return res.Count;
+                if (till < new DateTime(2099, 1, 1))
+                    queryParams.Add($"till={till.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
             }
-            catch { }
-        }
 
-        var items = await GetAsync(predicates);
-        return items.Count();
+            string q = queryParams.Any() ? "?" + string.Join("&", queryParams) : "";
+
+            var res = await _restClient.GetAsync<CountResponse>($"/api/warehousing/transfers/count{q}");
+            if (res != null) return res.Count;
+        }
+        catch { }
+
+        try
+        {
+            var remote = await _restClient.GetAsync<List<StockTransfer>>("/api/warehousing/transfers");
+            if (remote != null) return remote.Count;
+        }
+        catch { }
+
+        return 0;
     }
 
     public async Task<IEnumerable<StockTransfer>> GetAllAsync()

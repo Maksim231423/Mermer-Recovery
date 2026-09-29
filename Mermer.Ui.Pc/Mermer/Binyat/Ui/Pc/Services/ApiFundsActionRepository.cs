@@ -58,7 +58,7 @@ public class ApiFundsActionRepository : IFundsActionsRepository
         {
             foreach (var depId in depositoryIds.Where(d => !string.IsNullOrEmpty(d)))
             {
-                queryParams.Add($"depositoryId={depId}");
+                queryParams.Add($"depositoryId={depId.Trim()}");
             }
         }
 

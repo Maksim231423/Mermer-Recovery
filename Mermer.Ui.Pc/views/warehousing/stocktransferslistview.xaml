@@ -31,61 +31,45 @@
                             FilterButton="{Binding ElementName=FilterButton, Mode=OneWay}"
                             SearchControl="{Binding ElementName=SearchControl, Mode=OneWay}">
             <dxg:GridControl.Columns>
-        <dxg:GridColumn FieldName="Date" SortOrder="Ascending" Header="{Localize Date}">
-          <dxg:ColumnBase.EditSettings>
-            <dxe:DateEditSettings DisplayFormat="g"/>
-          </dxg:ColumnBase.EditSettings>
-        </dxg:GridColumn>
-        <dxg:GridColumn FieldName="Code" Header="{Localize Code}"/>
-        <dxg:GridColumn FieldName="WarehouseId" Header="{Localize 'Source Warehouse'}">
-          <dxg:ColumnBase.EditSettings>
-            <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Warehouses.List}"/>
-          </dxg:ColumnBase.EditSettings>
-        </dxg:GridColumn>
-        <dxg:GridColumn FieldName="DestinationWarehouseId" Header="{Localize 'Destination Warehouse'}">
-          <dxg:ColumnBase.EditSettings>
-            <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Warehouses.List}"/>
-          </dxg:ColumnBase.EditSettings>
-        </dxg:GridColumn>
-        <dxg:GridColumn FieldName="ActionTotal" Style="{StaticResource AmountDisplayFormat}"
+                <dxg:GridColumn FieldName="Date" SortOrder="Ascending" Header="{Localize Date}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxe:DateEditSettings DisplayFormat="g"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="Code" Header="{Localize Code}"/>
+                <dxg:GridColumn FieldName="WarehouseId" Header="{Localize 'Source Warehouse'}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Warehouses.List}"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="DestinationWarehouseId" Header="{Localize 'Destination Warehouse'}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Warehouses.List}"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="ActionTotal" Style="{StaticResource AmountDisplayFormat}"
                         Header="{Localize 'Sent Total'}"/>
-        <dxg:GridColumn FieldName="ActionReceivedTotal" Style="{StaticResource AmountDisplayFormat}"
+                <dxg:GridColumn FieldName="ActionReceivedTotal" Style="{StaticResource AmountDisplayFormat}"
                         Header="{Localize 'Received Total'}"/>
-        <dxg:GridColumn FieldName="IsConflicted" Width="50" Header="{Localize Conflicted}"/>
-        <dxg:GridColumn FieldName="IsCompleted" Width="50" Header="{Localize Completed}"/>
-        <dxg:GridColumn FieldName="IsDisabled" Width="50" Header="{Localize Deleted}"/>
-        <dxg:GridColumn FieldName="UserName" Header="{Localize Author}"/>
-       <!-- Колонка с тегами через CellTemplate -->
-        <dxg:GridColumn FieldName="Tags" Header="{Localize Tags}" Width="150">
-          <dxg:GridColumn.CellTemplate>
-            <DataTemplate>
-              <TextBlock Text="{Binding RowData.Row.Tags, Converter={cnv:TokenConverter}}"
+                <dxg:GridColumn FieldName="IsConflicted" Width="50" Header="{Localize Conflicted}"/>
+                <dxg:GridColumn FieldName="IsCompleted" Width="50" Header="{Localize Completed}"/>
+                <dxg:GridColumn FieldName="IsDisabled" Width="50" Header="{Localize Deleted}"/>
+                <dxg:GridColumn FieldName="UserName" Header="{Localize Author}"/>
+                <!-- Колонка с тегами через CellTemplate -->
+                <dxg:GridColumn FieldName="Tags" Header="{Localize Tags}" Width="150">
+                    <dxg:GridColumn.CellTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding RowData.Row.Tags, Converter={cnv:TokenConverter}}"
                          VerticalAlignment="Center"
                          Margin="4,0"
                          TextTrimming="CharacterEllipsis"/>
-            </DataTemplate>
-          </dxg:GridColumn.CellTemplate>
-        </dxg:GridColumn>
-        
-        <!-- Колонка с группой -->
-        <dxg:GridColumn FieldName="Group" GroupIndex="0" Header="{Localize Group}"/>
-      </dxg:GridControl.Columns>
-        <!-- ДОДАЙ ОСЬ ЦЕЙ БЛОК ВІДОБРАЖЕННЯ ТА ФОРМАТУВАННЯ -->
-            <dxg:GridControl.View>
-                <dxg:TableView AllowEditing="False" NavigationStyle="Row" ShowGroupPanel="False">
-                    <dxg:TableView.FormatConditions>
-                        <!-- 1. Повертаємо видалені товари (червоний фон + закреслений текст) -->
-                        <dxg:FormatCondition Expression="[IsDisabled] = True" ApplyToRow="True" PredefinedFormatName="LightRedFillWithDarkRedText"/>
-                        <dxg:FormatCondition Expression="[IsDisabled] = True" ApplyToRow="True" PredefinedFormatName="StrikethroughText"/>
+                        </DataTemplate>
+                    </dxg:GridColumn.CellTemplate>
+                </dxg:GridColumn>
 
-                        <!-- 2. Наше правило для частково прийнятих (які ще не приїхали повністю) -->
-                        <dxg:FormatCondition Expression="[ActionReceivedTotal] &lt; [ActionTotal] And [IsDisabled] = False" 
-                                 ApplyToRow="True" 
-                                 PredefinedFormatName="LightRedFillWithDarkRedText"/>
-                    </dxg:TableView.FormatConditions>
-                </dxg:TableView>
-            </dxg:GridControl.View>
-            <!-- КІНЕЦЬ ДОДАНОГО БЛОКУ -->
-    </ctrl:StyledGridControl>
+                <!-- Колонка с группой -->
+                <dxg:GridColumn FieldName="Group" GroupIndex="0" Header="{Localize Group}"/>
+            </dxg:GridControl.Columns>
+        </ctrl:StyledGridControl>
   </DockPanel>
 </mvx:MvxWpfView>

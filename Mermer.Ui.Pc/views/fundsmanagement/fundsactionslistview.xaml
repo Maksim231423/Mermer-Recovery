@@ -37,9 +37,14 @@
           </dxe:ComboBoxEdit>
         </dxlc:LayoutItem>
                 <dxlc:LayoutItem HorizontalAlignment="Left" Width="300" Label="{Localize 'Balance Currency'}">
-                    <dxe:ComboBoxEdit ShowCustomItems="True" DisplayMember="Name" ValueMember="Id"
-                            EditValue="{Binding CurrencyId, UpdateSourceTrigger=PropertyChanged}"
-                            ItemsSource="{Binding Currencies.List}"/>
+                    <dxe:ComboBoxEdit ShowCustomItems="True" 
+                              DisplayMember="Name" 
+                              ValueMember="Id"
+                              EditValue="{Binding CurrencyId, UpdateSourceTrigger=PropertyChanged}"
+                              ItemsSource="{Binding Currencies.List}"
+                              NullValueButtonPlacement="EditBox"
+                              NullText="(none)"
+                              AllowNullInput="True"/>
                 </dxlc:LayoutItem>
             </dxlc:LayoutGroup>
       <ctrl:StyledGridControl x:Name="GridControl" FilterString="[TransactionIsCompleted] And ![TransactionIsDisabled]"

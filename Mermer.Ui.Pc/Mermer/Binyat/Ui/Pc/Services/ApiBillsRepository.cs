@@ -98,18 +98,22 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
 
-        // Мгновенный подсчет для плиток дат слева без выгрузки всех счетов!
-        if (hasDates)
+        try
         {
-            try
+            string url = "/api/bills/count";
+            if (hasDates)
             {
                 var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
                 var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-
-                var res = await _restClient.GetAsync<CountResponse>($"/api/bills/count?from={fromStr}&till={tillStr}");
-                if (res != null) return res.Count;
+                url += $"?from={fromStr}&till={tillStr}";
             }
-            catch { }
+
+            var res = await _restClient.GetAsync<CountResponse>(url);
+            if (res != null) return res.Count;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[Bills CountAsync Error]: {ex.Message}");
         }
 
         var result = await GetAsync(predicates);

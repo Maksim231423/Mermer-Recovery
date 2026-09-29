@@ -205,19 +205,29 @@ public class ApiDailyFundsRegisteriesRepository :
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)
     {
-        var dict = new Dictionary<string, Dictionary<string, int>>();
-        if (fields != null) foreach (var f in fields) dict[f] = new Dictionary<string, int>();
+        var dict = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
+        if (fields != null)
+        {
+            foreach (var f in fields)
+                dict[f] = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        }
 
         try
         {
-            var fieldsParam = fields != null && fields.Length > 0 ? string.Join(",", fields) : "Date";
+            var fieldsParam = fields != null && fields.Length > 0 ? string.Join(",", fields) : "Group,Tags,Date";
             var apiResult = await _restClient.GetAsync<Dictionary<string, Dictionary<string, int>>>($"/api/finance/registeries/facets?fields={fieldsParam}");
             if (apiResult != null)
             {
-                foreach (var kvp in apiResult) dict[kvp.Key] = kvp.Value;
+                foreach (var kvp in apiResult)
+                {
+                    dict[kvp.Key] = new Dictionary<string, int>(kvp.Value, StringComparer.OrdinalIgnoreCase);
+                }
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[DailyRegisteries GetFacets Error]: {ex.Message}");
+        }
 
         return dict;
     }

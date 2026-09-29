@@ -23,20 +23,25 @@ public static class StockTransfersEndpoints
         // 1. СПИСОК ПЕРЕМЕЩЕНИЙ
         group.MapGet("/", async (DateTime? from, DateTime? till, string? warehouseId, string? destinationWarehouseId, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 10000) : 5000;
             int skip = offset.GetValueOrDefault(0);
 
-            DateTimeOffset startDate = from.HasValue ? new DateTimeOffset(from.Value.ToUniversalTime()) : DateTimeOffset.UtcNow.AddMonths(-1);
-            DateTimeOffset endDate = till.HasValue ? new DateTimeOffset(till.Value.ToUniversalTime()) : DateTimeOffset.UtcNow;
+            DateTimeOffset startDate = from.HasValue && from.Value.Year > 2000
+                ? new DateTimeOffset(from.Value.ToUniversalTime())
+                : DateTimeOffset.MinValue;
+
+            DateTimeOffset endDate = till.HasValue && till.Value.Year < 2099
+                ? new DateTimeOffset(till.Value.ToUniversalTime())
+                : DateTimeOffset.MaxValue;
 
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
                          ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
-            var defCurId = defCur?.Id.ToString() ?? string.Empty;
+            var defCurId = defCur?.Id.ToString() ?? "00000000-0000-0000-0000-000000000001";
             var convertions = await GetCurrencyConvertionsAsync(db, DateTime.UtcNow, ct);
 
             var query = db.StockTransfers
                 .AsNoTracking()
-                .Where(t => t.Date >= startDate && t.Date <= endDate && !t.IsDisabled);
+                .Where(t => t.Date >= startDate && t.Date <= endDate);
 
             if (Guid.TryParse(warehouseId, out var srcGuid))
                 query = query.Where(t => t.WarehouseId == srcGuid);
@@ -54,8 +59,101 @@ public static class StockTransfersEndpoints
 
             var result = transfers.Select(t =>
             {
-                decimal sentTotal = t.Lines != null && t.Lines.Any() ? t.Lines.Sum(l => l.ActionTotal) : t.ActionTotal;
-                decimal receivedTotal = t.Lines != null && t.Lines.Any() ? t.Lines.Sum(l => l.ActionReceivedTotal) : t.ActionReceivedTotal;
+                decimal dbSentTotal = t.ActionTotal;
+                decimal dbRecTotal = t.ActionReceivedTotal != 0m ? t.ActionReceivedTotal : t.ActionTotal;
+
+                var linesList = new List<object>();
+                // Используем Dictionary для гарантии УНИКАЛЬНОСТИ пар StockId_UnitId
+                var unitConvertionsDict = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+
+                if (t.Lines != null && t.Lines.Any())
+                {
+                    foreach (var l in t.Lines)
+                    {
+                        var sId = l.StockId?.ToString() ?? Guid.NewGuid().ToString();
+                        var uId = l.UnitId?.ToString() ?? Guid.NewGuid().ToString();
+                        var ruId = l.ReceivedUnitId?.ToString() ?? uId;
+
+                        linesList.Add(new
+                        {
+                            Id = l.Id.ToString(),
+                            StockTransferId = t.Id.ToString(),
+                            StockId = sId,
+                            UnitId = uId,
+                            ReceivedUnitId = ruId,
+                            CurrencyId = defCurId,
+                            Quantity = l.Quantity,
+                            ReceivedQuantity = l.ReceivedQuantity != 0m ? l.ReceivedQuantity : l.Quantity,
+                            Price = l.Price,
+                            ActionTotal = l.ActionTotal != 0m ? l.ActionTotal : (l.Quantity * l.Price),
+                            ActionReceivedTotal = l.ActionReceivedTotal != 0m ? l.ActionReceivedTotal : (l.ReceivedQuantity * l.Price),
+                            SortOrder = l.SortOrder
+                        });
+
+                        // Добавляем конвертер только если такой пары еще нет
+                        string keySent = $"{sId}_{uId}";
+                        if (!unitConvertionsDict.ContainsKey(keySent))
+                        {
+                            unitConvertionsDict[keySent] = new
+                            {
+                                StockId = sId,
+                                UnitId = uId,
+                                Multiplier = 1m,
+                                Divider = 1m
+                            };
+                        }
+
+                        string keyRec = $"{sId}_{ruId}";
+                        if (!unitConvertionsDict.ContainsKey(keyRec))
+                        {
+                            unitConvertionsDict[keyRec] = new
+                            {
+                                StockId = sId,
+                                UnitId = ruId,
+                                Multiplier = 1m,
+                                Divider = 1m
+                            };
+                        }
+                    }
+                }
+                else
+                {
+                    var dummyStockId = Guid.NewGuid().ToString();
+                    var dummyUnitId = Guid.NewGuid().ToString();
+
+                    linesList.Add(new
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        StockTransferId = t.Id.ToString(),
+                        StockId = dummyStockId,
+                        UnitId = dummyUnitId,
+                        ReceivedUnitId = dummyUnitId,
+                        CurrencyId = defCurId,
+                        Quantity = 1m,
+                        ReceivedQuantity = 1m,
+                        Price = dbSentTotal,
+                        ActionTotal = dbSentTotal,
+                        ActionReceivedTotal = dbRecTotal,
+                        SortOrder = 0
+                    });
+
+                    string key = $"{dummyStockId}_{dummyUnitId}";
+                    unitConvertionsDict[key] = new
+                    {
+                        StockId = dummyStockId,
+                        UnitId = dummyUnitId,
+                        Multiplier = 1m,
+                        Divider = 1m
+                    };
+                }
+
+                decimal finalSentTotal = linesList.Any() && t.Lines != null && t.Lines.Any()
+                    ? t.Lines.Sum(x => x.ActionTotal != 0m ? x.ActionTotal : (x.Quantity * x.Price))
+                    : dbSentTotal;
+
+                decimal finalReceivedTotal = linesList.Any() && t.Lines != null && t.Lines.Any()
+                    ? t.Lines.Sum(x => x.ActionReceivedTotal != 0m ? x.ActionReceivedTotal : (x.ReceivedQuantity * x.Price))
+                    : dbRecTotal;
 
                 return new
                 {
@@ -67,34 +165,51 @@ public static class StockTransfersEndpoints
                     DestinationWarehouseId = t.DestinationWarehouseId?.ToString(),
                     DisplayCurrencyId = t.DisplayCurrencyId?.ToString() ?? defCurId,
                     CurrencyConvertions = convertions,
+                    StockUnitConvertions = unitConvertionsDict.Values.ToList(), // Гарантированно уникальные элементы
                     UserName = t.UserName ?? "admin",
                     IsCompleted = t.IsCompleted,
                     IsDisabled = t.IsDisabled,
+                    IsConflicted = finalSentTotal != finalReceivedTotal,
                     Group = t.GroupName ?? string.Empty,
                     Tags = t.Tags != null ? t.Tags.ToList() : new List<string>(),
                     Description = t.Description ?? string.Empty,
-                    ActionTotal = sentTotal,
-                    ActionReceivedTotal = receivedTotal,
-                    DisplayTotal = sentTotal,
-                    DisplayReceivedTotal = receivedTotal,
-                    Lines = t.Lines != null ? t.Lines.Select(l => (object)new
-                    {
-                        Id = l.Id.ToString(),
-                        StockTransferId = t.Id.ToString(),
-                        StockId = l.StockId?.ToString(),
-                        UnitId = l.UnitId?.ToString(),
-                        ReceivedUnitId = l.ReceivedUnitId?.ToString() ?? l.UnitId?.ToString(),
-                        Quantity = l.Quantity,
-                        ReceivedQuantity = l.ReceivedQuantity,
-                        Price = l.Price,
-                        ActionTotal = l.ActionTotal,
-                        ActionReceivedTotal = l.ActionReceivedTotal,
-                        SortOrder = l.SortOrder
-                    }).ToList() : new List<object>()
+                    ActionTotal = finalSentTotal,
+                    ActionReceivedTotal = finalReceivedTotal,
+                    DisplayTotal = finalSentTotal,
+                    DisplayReceivedTotal = finalReceivedTotal,
+                    Total = finalSentTotal,
+                    Lines = linesList
                 };
             });
 
             return Results.Ok(result);
+        });
+
+        // 1.1. БЫСТРЫЙ ПОДСЧЕТ ДЛЯ ПЛИТОК ДАТ
+        group.MapGet("/count", async (DateTime? from, DateTime? till, string? warehouseId, string? destinationWarehouseId, MermerDbContext db, CancellationToken ct) =>
+        {
+            var query = db.StockTransfers.AsNoTracking();
+
+            if (from.HasValue && from.Value.Year > 2000)
+            {
+                var fUtc = new DateTimeOffset(from.Value.ToUniversalTime());
+                query = query.Where(t => t.Date >= fUtc);
+            }
+
+            if (till.HasValue && till.Value.Year < 2099)
+            {
+                var tUtc = new DateTimeOffset(till.Value.ToUniversalTime());
+                query = query.Where(t => t.Date <= tUtc);
+            }
+
+            if (Guid.TryParse(warehouseId, out var srcGuid))
+                query = query.Where(t => t.WarehouseId == srcGuid);
+
+            if (Guid.TryParse(destinationWarehouseId, out var dstGuid))
+                query = query.Where(t => t.DestinationWarehouseId == dstGuid);
+
+            var count = await query.CountAsync(ct);
+            return Results.Ok(new { count });
         });
 
         // 2. ПОЛУЧЕНИЕ ПО ID
@@ -109,8 +224,11 @@ public static class StockTransfersEndpoints
             var defCurId = defCur?.Id.ToString() ?? string.Empty;
             var convertions = await GetCurrencyConvertionsAsync(db, t.Date.UtcDateTime, ct);
 
-            decimal sentTotal = t.Lines != null && t.Lines.Any() ? t.Lines.Sum(l => l.ActionTotal) : t.ActionTotal;
-            decimal receivedTotal = t.Lines != null && t.Lines.Any() ? t.Lines.Sum(l => l.ActionReceivedTotal) : t.ActionReceivedTotal;
+            decimal linesSent = t.Lines != null && t.Lines.Any() ? t.Lines.Sum(l => l.ActionTotal) : 0m;
+            decimal linesReceived = t.Lines != null && t.Lines.Any() ? t.Lines.Sum(l => l.ActionReceivedTotal) : 0m;
+
+            decimal sentTotal = linesSent != 0m ? linesSent : t.ActionTotal;
+            decimal receivedTotal = linesReceived != 0m ? linesReceived : t.ActionReceivedTotal;
 
             return Results.Ok(new
             {
@@ -325,21 +443,30 @@ public static class StockTransfersEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var todayUtc = DateTime.UtcNow.Date;
-                    var weekStart = todayUtc.AddDays(-7);
-                    var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+                    var now = DateTime.UtcNow.Date;
+                    var transfers = await db.StockTransfers
+                        .AsNoTracking()
+                        .Where(r => !r.IsDisabled)
+                        .Select(r => r.Date)
+                        .ToListAsync(ct);
 
-                    var countToday = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= todayUtc, ct);
-                    var countWeek = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= weekStart, ct);
-                    var countMonth = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= monthStart, ct);
-                    var countAll = await db.StockTransfers.CountAsync(r => !r.IsDisabled, ct);
+                    var dates = transfers.Select(d => d.UtcDateTime.Date).ToList();
+
+                    int countAll = dates.Count;
+                    int countToday = dates.Count(d => d == now);
+                    int countWeek = dates.Count(d => d >= now.AddDays(-7));
+                    int countMonth = dates.Count(d => d.Month == now.Month && d.Year == now.Year);
+                    int countYear = dates.Count(d => d.Year == now.Year);
 
                     result[field] = new Dictionary<string, int>
                     {
                         { "#Today", countToday },
                         { "#This Week", countWeek },
                         { "#This Month", countMonth },
-                        { "#All Records", countAll }
+                        { "#This Year", countYear },
+                        { "#All Records", countAll },
+                        { "#All", countAll },
+                        { "", countAll }
                     };
                 }
                 else

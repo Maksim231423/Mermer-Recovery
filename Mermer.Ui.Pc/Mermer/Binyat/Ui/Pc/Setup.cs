@@ -7,6 +7,8 @@ using Castle.DynamicProxy;
 using Mermer.Authorization.Services;
 using Mermer.Commerce.Services;
 using Mermer.Common.Settings;
+using Mermer.Data.Storage;
+using Mermer.Finance.Spending.Models;
 using Mermer.Licensing.Client;
 using Mermer.Licensing.Client.Models;
 using Mermer.Services;
@@ -162,7 +164,11 @@ public class Setup : MvxWpfSetup
         builder.RegisterType<ApiFundsBalancesRepository>().As<Mermer.FundsManagement.Services.IFundsBalancesRepository>().SingleInstance();
 
         builder.RegisterType<ApiExpensesRepository>().As<Mermer.Data.Storage.IRepository<Mermer.Finance.Spending.Models.Expense>>().As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Finance.Spending.Models.Expense>>().As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Finance.Spending.Models.Expense>>().SingleInstance();
-        builder.RegisterType<ApiExpenseSlipsRepository>().As<Mermer.Data.Storage.IRepository<Mermer.Finance.Spending.Models.ExpenseSlip>>().As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Finance.Spending.Models.ExpenseSlip>>().As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Finance.Spending.Models.ExpenseSlip>>().SingleInstance();
+        builder.RegisterType<ApiExpenseSlipsRepository>()
+            .As<IRepository<ExpenseSlip>>()
+            .As<IRepositoryWithFacets<ExpenseSlip>>()
+            .As<IReadOnlyRepository<ExpenseSlip>>()
+            .SingleInstance();
         builder.RegisterType<ApiExpenseActionsRepository>().As<Mermer.Finance.Spending.Services.IExpenseActionsRepository>().SingleInstance();
 
         builder.RegisterType<ApiDailyFundsRegisteriesRepository>().As<Mermer.Data.Storage.IRepository<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>().As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>().As<Mermer.Finance.DailyRegistery.Services.IDailyFundsRegisteriesRepository>().As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>().SingleInstance();

@@ -42,10 +42,11 @@ public class FundsActionsListViewModel :
         get => this._currencyId;
         set
         {
-            if (this.SetProperty<string>(ref this._currencyId, value, nameof(CurrencyId)))
-            {
-                ApplyCustomCurrencyRate();
-            }
+            if (!this.SetProperty<string>(ref this._currencyId, value, nameof(CurrencyId)) || this.IsBusy)
+                return;
+
+            // Мгновенный пересчет колонки в памяти без выгрузки данных
+            this.ApplyCustomCurrencyRate();
         }
     }
 
@@ -68,6 +69,9 @@ public class FundsActionsListViewModel :
         this.Depositories = depositories;
         this.Types = new LocalizedTransactionTypes("Repricing");
         this.Currencies = currencies;
+
+        // Исключаем удаленные валюты из списка
+        this.Currencies.Filter = c => !c.IsDisabled;
     }
 
     public List<object> SelectedDepositoryIds
@@ -75,12 +79,16 @@ public class FundsActionsListViewModel :
         get => this._selectedDepositoryIds;
         set
         {
-            if (this.SetProperty<List<object>>(ref this._selectedDepositoryIds, value, nameof(SelectedDepositoryIds)))
+            if (this._selectedDepositoryIds != null && value != null && this._selectedDepositoryIds.SequenceEqual(value))
+                return;
+
+            if (!this.SetProperty<List<object>>(ref this._selectedDepositoryIds, value, nameof(SelectedDepositoryIds)))
+                return;
+
+            // Если окно уже загружено — вызываем Initialize(), который перезагружает счетчики и таблицу, как кнопка Reload
+            if (_loaded && !this.IsBusy)
             {
-                if (_loaded && !this.IsBusy)
-                {
-                    Task.Run(async () => await this.LoadByDateAsync(false));
-                }
+                this.Initialize();
             }
         }
     }
@@ -89,21 +97,16 @@ public class FundsActionsListViewModel :
     {
         get
         {
-            if (this.SelectedDepositoryIds == null || !this.SelectedDepositoryIds.Any())
-                return Array.Empty<string>();
+            var list = this.SelectedDepositoryIds;
+            if (list == null || !list.Any()) return Array.Empty<string>();
 
-            return this.SelectedDepositoryIds
-                .Select(x => x?.ToString())
-                .Where(x => !string.IsNullOrEmpty(x))
+            return list
+                .SelectMany(x => (x?.ToString() ?? string.Empty).Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                .Select(x => x.Trim())
+                .Where(x => !string.IsNullOrEmpty(x) && Guid.TryParse(x, out _))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
-    }
-
-    // Если IsDirty не виртуальное, переопределяем метод закрытия
-    public override Task<bool> OnCloseAsync()
-    {
-        // Молча закрываем вкладку без всяких проверок
-        return this.NavigationService.Close(this).ContinueWith(_ => true);
     }
 
     public Reference<Partner> Partners { get; }
@@ -111,6 +114,11 @@ public class FundsActionsListViewModel :
     public LocalizedTransactionTypes Types { get; }
 
     public void Prepare(FundsActionsFilter parameter) => this._parameter = parameter;
+
+    public override Task<bool> OnCloseAsync()
+    {
+        return this.NavigationService.Close(this).ContinueWith(_ => true);
+    }
 
     protected override async Task PreLoad()
     {
@@ -132,7 +140,7 @@ public class FundsActionsListViewModel :
             }
         }
 
-        _loaded = true;
+        this.Currencies.Filter = c => !c.IsDisabled;
 
         await Task.WhenAll(
             base.PreLoad(),
@@ -141,154 +149,72 @@ public class FundsActionsListViewModel :
             Currencies.Initialize()
         );
 
-        if (string.IsNullOrEmpty(CurrencyId))
-        {
-            CurrencyId = Currencies.List.FirstOrDefault(x => x.IsDefault)?.Id
-                         ?? Currencies.List.FirstOrDefault()?.Id;
-        }
+        // По умолчанию пусто, то есть (none)
+        this._currencyId = null;
+        this.RaisePropertyChanged(nameof(CurrencyId));
+
+        _loaded = true;
     }
 
     private void ApplyCustomCurrencyRate()
     {
-        if (this.List == null || !this.List.Any()) return;
-
-        var targetCurrency = this.Currencies?.List?.FirstOrDefault(x => x.Id == this._currencyId);
-        if (targetCurrency == null) return;
-
-        var updatedList = new List<FundsAction>();
-
-        foreach (var item in this.List)
-        {
-            decimal sourceAmount = item.ActionEffect;
-            string sourceCurrencyId = item.ActionCurrencyId;
-
-            if (string.IsNullOrEmpty(sourceCurrencyId) || sourceCurrencyId == targetCurrency.Id)
-            {
-                item.ActionEffectInCustomCurrency = Math.Round(sourceAmount, targetCurrency.Decimals);
-            }
-            else
-            {
-                var sourceCurrency = this.Currencies?.List?.FirstOrDefault(x => x.Id == sourceCurrencyId);
-                if (sourceCurrency != null)
-                {
-                    var sourceRate = sourceCurrency.GetRate(item.TransactionDate);
-                    var targetRate = targetCurrency.GetRate(item.TransactionDate);
-
-                    if (sourceRate != null && targetRate != null && sourceRate.Divider != 0 && targetRate.Multiplier != 0)
-                    {
-                        decimal sMult = sourceRate.Multiplier;
-                        decimal sDiv = sourceRate.Divider;
-                        decimal tMult = targetRate.Multiplier;
-                        decimal tDiv = targetRate.Divider;
-
-                        decimal conversionRate = (sMult / sDiv) * (tDiv / tMult);
-                        item.ActionEffectInCustomCurrency = Math.Round(sourceAmount * conversionRate, targetCurrency.Decimals);
-                    }
-                    else
-                    {
-                        item.ActionEffectInCustomCurrency = sourceAmount;
-                    }
-                }
-                else
-                {
-                    item.ActionEffectInCustomCurrency = sourceAmount;
-                }
-            }
-
-            updatedList.Add(item);
-        }
-
-        this.List = updatedList;
+        if (this.List == null) return;
+        this.List = this.ApplyCustomCurrencyRate(this.List).ToList();
         this.RaisePropertyChanged(nameof(List));
     }
 
-    private IEnumerable<FundsAction> TransformWithCurrencyRate(IEnumerable<FundsAction> list)
+    private IEnumerable<FundsAction> ApplyCustomCurrencyRate(IEnumerable<FundsAction> list)
     {
         if (list == null) return Enumerable.Empty<FundsAction>();
 
-        var targetCurrency = this.Currencies?.List?.FirstOrDefault(x => x.Id == this._currencyId);
-        if (targetCurrency == null) return list;
-
-        var result = list.ToList();
-        foreach (var item in result)
+        decimal rate = 0m;
+        if (!string.IsNullOrEmpty(this._currencyId))
         {
-            decimal sourceAmount = item.ActionEffect;
-            string sourceCurrencyId = item.ActionCurrencyId;
+            var currency = this.Currencies?.List?.SingleOrDefault(x => x.Id == this._currencyId);
+            var rateObj = currency != null ? currency.GetRate() : null;
 
-            if (string.IsNullOrEmpty(sourceCurrencyId) || sourceCurrencyId == targetCurrency.Id)
-            {
-                item.ActionEffectInCustomCurrency = Math.Round(sourceAmount, targetCurrency.Decimals);
-            }
-            else
-            {
-                var sourceCurrency = this.Currencies?.List?.FirstOrDefault(x => x.Id == sourceCurrencyId);
-                if (sourceCurrency != null)
-                {
-                    var sourceRate = sourceCurrency.GetRate(item.TransactionDate);
-                    var targetRate = targetCurrency.GetRate(item.TransactionDate);
-
-                    if (sourceRate != null && targetRate != null && sourceRate.Divider != 0 && targetRate.Multiplier != 0)
-                    {
-                        decimal sMult = sourceRate.Multiplier;
-                        decimal sDiv = sourceRate.Divider;
-                        decimal tMult = targetRate.Multiplier;
-                        decimal tDiv = targetRate.Divider;
-
-                        decimal conversionRate = (sMult / sDiv) * (tDiv / tMult);
-                        item.ActionEffectInCustomCurrency = Math.Round(sourceAmount * conversionRate, targetCurrency.Decimals);
-                    }
-                    else
-                    {
-                        item.ActionEffectInCustomCurrency = sourceAmount;
-                    }
-                }
-                else
-                {
-                    item.ActionEffectInCustomCurrency = sourceAmount;
-                }
-            }
+            if (rateObj != null && rateObj.Multiplier != 0m)
+                rate = rateObj.Divider / rateObj.Multiplier;
         }
 
-        return result;
+        foreach (var item in list)
+        {
+            item.ActionEffectInCustomCurrency = item.ActionEffect * rate;
+        }
+
+        return list;
     }
 
     protected override Task OnLoad()
     {
-        if (this._parameter != null)
-        {
-            this._parameter = null;
-            return this.LoadByDateAsync(false);
-        }
+        if (this._parameter == null)
+            return base.OnLoad();
 
-        // Если список уже загружен (например, были выбраны #All Records), не сбрасывать его в base.OnLoad() (на #Today)
-        if (this.List != null && this.List.Any())
-        {
-            return Task.CompletedTask;
-        }
-
-        return base.OnLoad();
+        this._parameter = null;
+        return this.LoadByDateAsync(false);
     }
 
+    // Подсчет всегда идет по датам и кассам, currencyId передается null
     protected override Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
     {
-        return this._repository.CountAsync(from, till, (string)null, this.DepositoryIds);
+        return this._repository.CountAsync(from, till, null, this.DepositoryIds);
     }
 
     protected override Task<int> CountFilteredListAsync(ListFilter filter)
     {
-        return this._repository.CountAsync(null, null, (string)null, this.DepositoryIds);
+        return this._repository.CountAsync(null, null, null, this.DepositoryIds);
     }
 
     protected override async Task<IEnumerable<FundsAction>> GetFilteredListByDateAsync(DateTime from, DateTime till)
     {
-        var result = await this._repository.GetAsync(from, till, (string)null, this.DepositoryIds);
-        return TransformWithCurrencyRate(result);
+        var result = await this._repository.GetAsync(from, till, null, this.DepositoryIds);
+        return ApplyCustomCurrencyRate(result).ToList();
     }
 
     protected override async Task<IEnumerable<FundsAction>> GetFilteredListAsync(ListFilter filter)
     {
-        var result = await this._repository.GetAsync(null, null, (string)null, this.DepositoryIds);
-        return TransformWithCurrencyRate(result);
+        var result = await this._repository.GetAsync(null, null, null, this.DepositoryIds);
+        return ApplyCustomCurrencyRate(result).ToList();
     }
 
     protected override Task<int> CountListAsync(params Expression<Func<FundsAction, bool>>[] predicates) => throw new NotImplementedException();

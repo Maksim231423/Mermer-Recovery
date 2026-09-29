@@ -207,7 +207,7 @@ public abstract class StockTransaction<T> : Transaction<T>, IRequestStockUnitCon
   protected virtual StockUnitConvertion StockUnitConverter(string stockId, string unitId)
   {
     WatchedObservableCollection<StockUnitConvertion> stockUnitConvertions = this.StockUnitConvertions;
-    StockUnitConvertion stockUnitConvertion = stockUnitConvertions != null ? stockUnitConvertions.SingleOrDefault<StockUnitConvertion>((Func<StockUnitConvertion, bool>) (x => x.StockId == stockId && x.UnitId == unitId)) : (StockUnitConvertion) null;
+    StockUnitConvertion stockUnitConvertion = stockUnitConvertions != null ? stockUnitConvertions.FirstOrDefault<StockUnitConvertion>((Func<StockUnitConvertion, bool>) (x => x.StockId == stockId && x.UnitId == unitId)) : (StockUnitConvertion) null;
     if (stockUnitConvertion == null)
     {
       stockUnitConvertion = this.GetStockUnitConvertion(stockId, unitId);
