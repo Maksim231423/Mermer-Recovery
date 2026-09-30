@@ -220,166 +220,316 @@ public static class StocksEndpoints
         .WithName("StocksFacets");
 
         // 6. ЖУРНАЛ ДВИЖЕНИЯ ТОВАРОВ (STOCK ACTIONS)
+        // 6.1. ПОДСЧЕТ КОЛИЧЕСТВА ДВИЖЕНИЙ ТОВАРОВ (STOCK ACTIONS COUNT)
+        group.MapGet("/actions/count", async (DateTime? from, DateTime? till, string? stockId, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        {
+            DateTimeOffset startDate = from.HasValue && from.Value.Year > 2000
+                ? new DateTimeOffset(from.Value.ToUniversalTime())
+                : DateTimeOffset.MinValue;
+
+            DateTimeOffset endDate = till.HasValue && till.Value.Year < 2099
+                ? new DateTimeOffset(till.Value.ToUniversalTime())
+                : DateTimeOffset.MaxValue;
+
+            var whIds = req.Query["warehouseId"]
+                .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
+                .Where(x => x.HasValue)
+                .Select(x => x!.Value)
+                .ToList();
+
+            Guid? filterStockGuid = Guid.TryParse(stockId, out var sG) ? sG : null;
+
+            // 1. Складские ордера
+            var slipsQuery = db.StockSlipLines.AsNoTracking()
+                .Where(l => l.StockSlip != null && l.StockSlip.Date >= startDate && l.StockSlip.Date <= endDate);
+            if (filterStockGuid.HasValue) slipsQuery = slipsQuery.Where(l => l.StockId == filterStockGuid);
+            if (whIds.Any()) slipsQuery = slipsQuery.Where(l => l.StockSlip!.WarehouseId.HasValue && whIds.Contains(l.StockSlip.WarehouseId.Value));
+            int countSlips = await slipsQuery.CountAsync(ct);
+
+            // 2. Перемещения
+            var trQuery = db.StockTransferLines.AsNoTracking()
+                .Where(l => l.StockTransfer != null && !l.StockTransfer.IsDisabled && l.StockTransfer.Date >= startDate && l.StockTransfer.Date <= endDate);
+            if (filterStockGuid.HasValue) trQuery = trQuery.Where(l => l.StockId == filterStockGuid);
+            if (whIds.Any())
+            {
+                trQuery = trQuery.Where(l =>
+                    (l.StockTransfer!.WarehouseId.HasValue && whIds.Contains(l.StockTransfer.WarehouseId.Value)) ||
+                    (l.StockTransfer!.DestinationWarehouseId.HasValue && whIds.Contains(l.StockTransfer.DestinationWarehouseId.Value)));
+            }
+            int countTransfers = await trQuery.CountAsync(ct);
+
+            // 3. Накладные
+            var invQuery = db.InvoiceLines.AsNoTracking()
+                .Where(l => l.Invoice != null && !l.Invoice.IsDisabled && l.Invoice.Date >= startDate && l.Invoice.Date <= endDate);
+            if (filterStockGuid.HasValue) invQuery = invQuery.Where(l => l.StockId == filterStockGuid);
+            if (whIds.Any()) invQuery = invQuery.Where(l => l.Invoice!.WarehouseId.HasValue && whIds.Contains(l.Invoice.WarehouseId.Value));
+            int countInvoices = await invQuery.CountAsync(ct);
+
+            return Results.Ok(new { count = countSlips + countTransfers + countInvoices });
+        })
+        .WithName("StockActionsCount");
+
+        // 6.2. ЖУРНАЛ ДВИЖЕНИЯ ТОВАРОВ (STOCK ACTIONS)
         group.MapGet("/actions", async (DateTime? from, DateTime? till, string? stockId, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTimeOffset startDate = from.HasValue ? new DateTimeOffset(from.Value.ToUniversalTime()) : DateTimeOffset.UtcNow.AddMonths(-1);
-            DateTimeOffset endDate = till.HasValue ? new DateTimeOffset(till.Value.ToUniversalTime()) : DateTimeOffset.UtcNow;
+            DateTimeOffset startDate = from.HasValue && from.Value.Year > 2000
+                ? new DateTimeOffset(from.Value.ToUniversalTime())
+                : DateTimeOffset.MinValue;
 
-            var whIds = req.Query["warehouseId"].Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null).Where(x => x.HasValue).Select(x => x!.Value).ToList();
+            DateTimeOffset endDate = till.HasValue && till.Value.Year < 2099
+                ? new DateTimeOffset(till.Value.ToUniversalTime())
+                : DateTimeOffset.MaxValue;
+
+            var whIds = req.Query["warehouseId"]
+                .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
+                .Where(x => x.HasValue)
+                .Select(x => x!.Value)
+                .ToList();
+
             Guid? filterStockGuid = Guid.TryParse(stockId, out var sG) ? sG : null;
 
             var actions = new List<object>();
 
-            // 1. Из складских ордеров (StockSlips)
-            var slipsQuery = db.StockSlips.Include(s => s.Lines).ThenInclude(l => l.Stock).AsSplitQuery().AsNoTracking()
-                .Where(s => s.Date >= startDate && s.Date <= endDate);
+            // 1. Складские ордера (StockSlips)
+            var slipsQuery = db.StockSlipLines
+                .Include(l => l.StockSlip)
+                .Include(l => l.Stock)
+                .AsSplitQuery().AsNoTracking()
+                .Where(l => l.StockSlip != null && l.StockSlip.Date >= startDate && l.StockSlip.Date <= endDate);
 
-            if (whIds.Any()) slipsQuery = slipsQuery.Where(s => s.WarehouseId.HasValue && whIds.Contains(s.WarehouseId.Value));
+            if (whIds.Any()) slipsQuery = slipsQuery.Where(l => l.StockSlip!.WarehouseId.HasValue && whIds.Contains(l.StockSlip.WarehouseId.Value));
+            if (filterStockGuid.HasValue) slipsQuery = slipsQuery.Where(l => l.StockId == filterStockGuid);
 
-            var slips = await slipsQuery.OrderByDescending(s => s.Date).Take(300).ToListAsync(ct);
-            foreach (var s in slips)
+            var slipLines = await slipsQuery.OrderByDescending(l => l.StockSlip!.Date).Take(2000).ToListAsync(ct);
+            foreach (var l in slipLines)
             {
-                foreach (var l in s.Lines ?? Enumerable.Empty<StockSlipLineEntity>())
-                {
-                    if (filterStockGuid.HasValue && l.StockId != filterStockGuid) continue;
+                var s = l.StockSlip!;
+                bool isIncome = s.SlipType == "StockOpening" || s.SlipType == "RevisionExceed";
+                decimal qty = l.Quantity;
+                decimal price = l.Price;
+                decimal total = l.ActionTotal != 0m ? l.ActionTotal : (qty * price);
+                decimal recPrice = price;
 
-                    bool isIncome = s.SlipType == "StockOpening" || s.SlipType == "RevisionExceed";
-                    actions.Add(new
-                    {
-                        TransactionId = s.Id.ToString(),
-                        TransactionCode = s.Code ?? "",
-                        TransactionDate = s.Date.UtcDateTime,
-                        TransactionType = s.SlipType,
-                        TransactionUserId = s.UserId?.ToString() ?? Guid.Empty.ToString(),
-                        TransactionUserName = "admin",
-                        Author = "admin",
-                        UserName = "admin",
-                        TransactionIsCompleted = s.IsCompleted,
-                        TransactionIsDisabled = false,
-                        ActionId = l.Id.ToString(),
-                        ActionWarehouseId = s.WarehouseId?.ToString(),
-                        ActionStockId = l.StockId?.ToString(),
-                        StockCode = l.Stock?.Code ?? "",
-                        StockName = l.Stock?.Name ?? "",
-                        ActionPrice = l.Price,
-                        ActionIncome = isIncome ? l.Quantity : 0m,
-                        ActionExpense = !isIncome ? l.Quantity : 0m,
-                        GrandTotal = l.Price * l.Quantity
-                    });
-                }
+                actions.Add(new
+                {
+                    TransactionId = s.Id.ToString(),
+                    TransactionCode = s.Code ?? "",
+                    TransactionDate = s.Date.UtcDateTime,
+                    TransactionType = s.SlipType ?? "StockSlip",
+                    TransactionUserId = s.UserId?.ToString() ?? Guid.Empty.ToString(),
+                    TransactionUserName = "admin",
+                    Author = "admin",
+                    UserName = "admin",
+                    TransactionIsCompleted = true,
+                    TransactionIsDisabled = false,
+                    TransactionIsCash = false,
+                    TransactionTags = s.Tags?.ToList() ?? new List<string>(),
+                    TransactionGroup = s.GroupName ?? string.Empty,
+
+                    ActionId = l.Id.ToString(),
+                    ActionWarehouseId = s.WarehouseId?.ToString(),
+                    ActionRelatedObjectName = string.Empty,
+                    ActionStockId = l.StockId?.ToString(),
+                    StockId = l.StockId?.ToString(),
+                    StockCode = l.Stock?.Code ?? "",
+                    StockName = l.Stock?.Name ?? "",
+                    StockType = l.Stock?.Type ?? "",
+                    StockGroup = l.Stock?.Group ?? "",
+                    StockTags = l.Stock?.Tags?.ToList() ?? new List<string>(),
+
+                    RecommendedPrice = recPrice,
+                    ActionPrice = price,
+                    ActionIncome = isIncome ? qty : 0m,
+                    ActionExpense = !isIncome ? qty : 0m,
+                    ActionEffect = isIncome ? qty : -qty,
+                    GrandTotal = total,
+                    RecommendedTotal = recPrice * qty,
+                    GrandTotalInCustomCurrency = total,
+                    ActionOverhead = 0m,
+                    ActionDiscount = 0m,
+                    IsCheaperThanRecommended = false
+                });
             }
 
-            // 2. Из перемещений (StockTransfers)
-            var transfersQuery = db.StockTransfers.Include(t => t.Lines).ThenInclude(l => l.Stock).AsSplitQuery().AsNoTracking()
-                .Where(t => t.Date >= startDate && t.Date <= endDate && !t.IsDisabled);
+            // 2. Перемещения (StockTransfers)
+            var trQuery = db.StockTransferLines
+                .Include(l => l.StockTransfer)
+                .Include(l => l.Stock)
+                .AsSplitQuery().AsNoTracking()
+                .Where(l => l.StockTransfer != null && l.StockTransfer.Date >= startDate && l.StockTransfer.Date <= endDate && !l.StockTransfer.IsDisabled);
 
-            if (whIds.Any()) transfersQuery = transfersQuery.Where(t => t.WarehouseId.HasValue && whIds.Contains(t.WarehouseId.Value));
-
-            var transfers = await transfersQuery.OrderByDescending(t => t.Date).Take(300).ToListAsync(ct);
-            foreach (var t in transfers)
+            if (filterStockGuid.HasValue) trQuery = trQuery.Where(l => l.StockId == filterStockGuid);
+            if (whIds.Any())
             {
-                foreach (var l in t.Lines ?? Enumerable.Empty<StockTransferLineEntity>())
-                {
-                    if (filterStockGuid.HasValue && l.StockId != filterStockGuid) continue;
-
-                    if (!whIds.Any() || (t.WarehouseId.HasValue && whIds.Contains(t.WarehouseId.Value)))
-                    {
-                        actions.Add(new
-                        {
-                            TransactionId = t.Id.ToString(),
-                            TransactionCode = t.Code ?? "",
-                            TransactionDate = t.Date.UtcDateTime,
-                            TransactionType = "StockTransferSource",
-                            TransactionUserId = Guid.Empty.ToString(),
-                            TransactionUserName = "admin",
-                            Author = "admin",
-                            UserName = "admin",
-                            TransactionIsCompleted = t.IsCompleted,
-                            TransactionIsDisabled = t.IsDisabled,
-                            ActionId = l.Id.ToString(),
-                            ActionWarehouseId = t.WarehouseId?.ToString(),
-                            ActionRelatedWarehouseId = t.DestinationWarehouseId?.ToString(),
-                            ActionStockId = l.StockId?.ToString(),
-                            StockCode = l.Stock?.Code ?? "",
-                            StockName = l.Stock?.Name ?? "",
-                            ActionPrice = l.Price,
-                            ActionIncome = 0m,
-                            ActionExpense = l.Quantity,
-                            GrandTotal = l.Price * l.Quantity
-                        });
-                    }
-
-                    if (!whIds.Any() || (t.DestinationWarehouseId.HasValue && whIds.Contains(t.DestinationWarehouseId.Value)))
-                    {
-                        actions.Add(new
-                        {
-                            TransactionId = t.Id.ToString(),
-                            TransactionCode = t.Code ?? "",
-                            TransactionDate = t.Date.UtcDateTime,
-                            TransactionType = "StockTransferDestination",
-                            TransactionUserId = Guid.Empty.ToString(),
-                            TransactionUserName = "admin",
-                            Author = "admin",
-                            UserName = "admin",
-                            TransactionIsCompleted = t.IsCompleted,
-                            TransactionIsDisabled = t.IsDisabled,
-                            ActionId = l.Id.ToString(),
-                            ActionWarehouseId = t.DestinationWarehouseId?.ToString(),
-                            ActionRelatedWarehouseId = t.WarehouseId?.ToString(),
-                            ActionStockId = l.StockId?.ToString(),
-                            StockCode = l.Stock?.Code ?? "",
-                            StockName = l.Stock?.Name ?? "",
-                            ActionPrice = l.Price,
-                            ActionIncome = l.ReceivedQuantity,
-                            ActionExpense = 0m,
-                            GrandTotal = l.Price * l.ReceivedQuantity
-                        });
-                    }
-                }
+                trQuery = trQuery.Where(l =>
+                    (l.StockTransfer!.WarehouseId.HasValue && whIds.Contains(l.StockTransfer.WarehouseId.Value)) ||
+                    (l.StockTransfer!.DestinationWarehouseId.HasValue && whIds.Contains(l.StockTransfer.DestinationWarehouseId.Value)));
             }
 
-            // 3. Из накладных (Invoices)
-            var invQuery = db.Invoices.Include(i => i.Lines).ThenInclude(l => l.Stock).AsSplitQuery().AsNoTracking()
-                .Where(i => i.Date >= startDate && i.Date <= endDate && !i.IsDisabled && i.IsCompleted);
-
-            if (whIds.Any()) invQuery = invQuery.Where(i => i.WarehouseId.HasValue && whIds.Contains(i.WarehouseId.Value));
-
-            var invoices = await invQuery.OrderByDescending(i => i.Date).Take(300).ToListAsync(ct);
-            foreach (var i in invoices)
+            var trLines = await trQuery.OrderByDescending(l => l.StockTransfer!.Date).Take(2000).ToListAsync(ct);
+            foreach (var l in trLines)
             {
-                foreach (var l in i.Lines ?? Enumerable.Empty<InvoiceLineEntity>())
-                {
-                    if (filterStockGuid.HasValue && l.StockId != filterStockGuid) continue;
+                var t = l.StockTransfer!;
+                decimal qtySent = l.Quantity;
+                decimal qtyRec = l.ReceivedQuantity != 0m ? l.ReceivedQuantity : l.Quantity;
+                decimal price = l.Price;
+                decimal recPrice = price;
 
-                    bool isIncome = i.InvoiceType == "Purchase" || i.InvoiceType == "SalesReturn";
+                // Расход со склада-отправителя
+                if (!whIds.Any() || (t.WarehouseId.HasValue && whIds.Contains(t.WarehouseId.Value)))
+                {
                     actions.Add(new
                     {
-                        TransactionId = i.Id.ToString(),
-                        TransactionCode = i.Code ?? "",
-                        TransactionDate = i.Date.UtcDateTime,
-                        TransactionType = i.InvoiceType,
+                        TransactionId = t.Id.ToString(),
+                        TransactionCode = t.Code ?? "",
+                        TransactionDate = t.Date.UtcDateTime,
+                        TransactionType = "StockTransferSource",
                         TransactionUserId = Guid.Empty.ToString(),
-                        TransactionUserName = "admin",
-                        Author = "admin",
-                        UserName = "admin",
-                        TransactionIsCompleted = i.IsCompleted,
-                        TransactionIsDisabled = i.IsDisabled,
+                        TransactionUserName = t.UserName ?? "admin",
+                        Author = t.UserName ?? "admin",
+                        UserName = t.UserName ?? "admin",
+                        TransactionIsCompleted = true,
+                        TransactionIsDisabled = false,
+                        TransactionIsCash = false,
+                        TransactionTags = t.Tags?.ToList() ?? new List<string>(),
+                        TransactionGroup = t.GroupName ?? string.Empty,
+
                         ActionId = l.Id.ToString(),
-                        ActionWarehouseId = i.WarehouseId?.ToString(),
-                        ActionRelatedPartnerId = i.PartnerId?.ToString(),
+                        ActionWarehouseId = t.WarehouseId?.ToString(),
+                        ActionRelatedObjectName = t.DestinationWarehouseId?.ToString() ?? "",
                         ActionStockId = l.StockId?.ToString(),
+                        StockId = l.StockId?.ToString(),
                         StockCode = l.Stock?.Code ?? "",
                         StockName = l.Stock?.Name ?? "",
-                        ActionPrice = l.Price,
-                        ActionIncome = isIncome ? l.Quantity : 0m,
-                        ActionExpense = !isIncome ? l.Quantity : 0m,
-                        GrandTotal = l.Price * l.Quantity
+                        StockType = l.Stock?.Type ?? "",
+                        StockGroup = l.Stock?.Group ?? "",
+                        StockTags = l.Stock?.Tags?.ToList() ?? new List<string>(),
+
+                        RecommendedPrice = recPrice,
+                        ActionPrice = price,
+                        ActionIncome = 0m,
+                        ActionExpense = qtySent,
+                        ActionEffect = -qtySent,
+                        GrandTotal = l.ActionTotal != 0m ? l.ActionTotal : (price * qtySent),
+                        RecommendedTotal = recPrice * qtySent,
+                        GrandTotalInCustomCurrency = l.ActionTotal != 0m ? l.ActionTotal : (price * qtySent),
+                        ActionOverhead = 0m,
+                        ActionDiscount = 0m,
+                        IsCheaperThanRecommended = false
+                    });
+                }
+
+                // Приход на склад-получатель
+                if (!whIds.Any() || (t.DestinationWarehouseId.HasValue && whIds.Contains(t.DestinationWarehouseId.Value)))
+                {
+                    actions.Add(new
+                    {
+                        TransactionId = t.Id.ToString(),
+                        TransactionCode = t.Code ?? "",
+                        TransactionDate = t.Date.UtcDateTime,
+                        TransactionType = "StockTransferDestination",
+                        TransactionUserId = Guid.Empty.ToString(),
+                        TransactionUserName = t.UserName ?? "admin",
+                        Author = t.UserName ?? "admin",
+                        UserName = t.UserName ?? "admin",
+                        TransactionIsCompleted = true,
+                        TransactionIsDisabled = false,
+                        TransactionIsCash = false,
+                        TransactionTags = t.Tags?.ToList() ?? new List<string>(),
+                        TransactionGroup = t.GroupName ?? string.Empty,
+
+                        ActionId = l.Id.ToString(),
+                        ActionWarehouseId = t.DestinationWarehouseId?.ToString(),
+                        ActionRelatedObjectName = t.WarehouseId?.ToString() ?? "",
+                        ActionStockId = l.StockId?.ToString(),
+                        StockId = l.StockId?.ToString(),
+                        StockCode = l.Stock?.Code ?? "",
+                        StockName = l.Stock?.Name ?? "",
+                        StockType = l.Stock?.Type ?? "",
+                        StockGroup = l.Stock?.Group ?? "",
+                        StockTags = l.Stock?.Tags?.ToList() ?? new List<string>(),
+
+                        RecommendedPrice = recPrice,
+                        ActionPrice = price,
+                        ActionIncome = qtyRec,
+                        ActionExpense = 0m,
+                        ActionEffect = qtyRec,
+                        GrandTotal = l.ActionReceivedTotal != 0m ? l.ActionReceivedTotal : (price * qtyRec),
+                        RecommendedTotal = recPrice * qtyRec,
+                        GrandTotalInCustomCurrency = l.ActionReceivedTotal != 0m ? l.ActionReceivedTotal : (price * qtyRec),
+                        ActionOverhead = 0m,
+                        ActionDiscount = 0m,
+                        IsCheaperThanRecommended = false
                     });
                 }
             }
 
-            return Results.Ok(actions.OrderByDescending(a => ((dynamic)a).TransactionDate));
-        });
+            // 3. Накладные (Invoices)
+            var invQuery = db.InvoiceLines
+                .Include(l => l.Invoice)
+                    .ThenInclude(i => i!.Partner)
+                .Include(l => l.Stock)
+                .AsSplitQuery().AsNoTracking()
+                .Where(l => l.Invoice != null && l.Invoice.Date >= startDate && l.Invoice.Date <= endDate && !l.Invoice.IsDisabled);
+
+            if (whIds.Any()) invQuery = invQuery.Where(l => l.Invoice!.WarehouseId.HasValue && whIds.Contains(l.Invoice.WarehouseId.Value));
+            if (filterStockGuid.HasValue) invQuery = invQuery.Where(l => l.StockId == filterStockGuid);
+
+            var invLines = await invQuery.OrderByDescending(l => l.Invoice!.Date).Take(2000).ToListAsync(ct);
+            foreach (var l in invLines)
+            {
+                var i = l.Invoice!;
+                bool isIncome = i.InvoiceType == "Purchase" || i.InvoiceType == "SalesReturn";
+                decimal qty = l.Quantity;
+                decimal price = l.Price;
+                decimal total = qty * price;
+                decimal recPrice = price;
+
+                actions.Add(new
+                {
+                    TransactionId = i.Id.ToString(),
+                    TransactionCode = i.Code ?? "",
+                    TransactionDate = i.Date.UtcDateTime,
+                    TransactionType = i.InvoiceType ?? "Invoice",
+                    TransactionUserId = Guid.Empty.ToString(),
+                    TransactionUserName = i.UserName ?? "admin",
+                    Author = i.UserName ?? "admin",
+                    UserName = i.UserName ?? "admin",
+                    TransactionIsCompleted = true,
+                    TransactionIsDisabled = false,
+                    TransactionIsCash = false,
+                    TransactionTags = i.Tags?.ToList() ?? new List<string>(),
+                    TransactionGroup = i.Group ?? string.Empty,
+
+                    ActionId = l.Id.ToString(),
+                    ActionWarehouseId = i.WarehouseId?.ToString(),
+                    ActionRelatedObjectName = i.Partner?.Name ?? "",
+                    ActionStockId = l.StockId?.ToString(),
+                    StockId = l.StockId?.ToString(),
+                    StockCode = l.Stock?.Code ?? "",
+                    StockName = l.Stock?.Name ?? "",
+                    StockType = l.Stock?.Type ?? "",
+                    StockGroup = l.Stock?.Group ?? "",
+                    StockTags = l.Stock?.Tags?.ToList() ?? new List<string>(),
+
+                    RecommendedPrice = recPrice,
+                    ActionPrice = price,
+                    ActionIncome = isIncome ? qty : 0m,
+                    ActionExpense = !isIncome ? qty : 0m,
+                    ActionEffect = isIncome ? qty : -qty,
+                    GrandTotal = total,
+                    RecommendedTotal = recPrice * qty,
+                    GrandTotalInCustomCurrency = total,
+                    ActionOverhead = 0m,
+                    ActionDiscount = 0m,
+                    IsCheaperThanRecommended = false
+                });
+            }
+
+            var sorted = actions.OrderByDescending(a => ((dynamic)a).TransactionDate).ToList();
+            return Results.Ok(sorted);
+        })
+        .WithName("StockActionsGet");
 
         // 7. СОХРАНЕНИЕ ТОВАРА (POST / PUT)
         Func<HttpRequest, MermerDbContext, Task<IResult>> saveStockHandler = async (request, db) =>

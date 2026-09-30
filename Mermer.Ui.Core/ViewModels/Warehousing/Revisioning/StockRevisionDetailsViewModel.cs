@@ -189,14 +189,30 @@ public class StockRevisionDetailsViewModel : TransactionDetailsViewModel<StockRe
     detailsViewModel.TagNames = facets["TagNames"].Select<KeyValuePair<string, int>, string>((Func<KeyValuePair<string, int>, string>) (x => x.Key)).ToArray<string>();
   }
 
-  protected override async Task PreLoad()
-  {
-    await Task.WhenAll(base.PreLoad(), this.LoadFacetsAsync(), this.Currencies.Initialize(), this.Warehouses.Initialize(), this.StockSearcher.Initialize());
-    if (this._initialized)
-      return;
-    this.DisplayCurrencyId = this.Currencies.List.Single<Currency>((Func<Currency, bool>) (x => x.IsDefault)).Id;
-    this._initialized = true;
-  }
+    protected override async Task PreLoad()
+    {
+        await Task.WhenAll(
+            base.PreLoad(),
+            this.LoadFacetsAsync(),
+            this.Currencies.Initialize(),
+            this.Warehouses.Initialize(),
+            this.StockSearcher.Initialize()
+        );
+
+        if (this._initialized)
+            return;
+
+        // ИСПРАВЛЕНИЕ: безопасное получение валюты по умолчанию (или первой попавшейся)
+        var defaultCurrency = this.Currencies.List.FirstOrDefault(x => x.IsDefault)
+                              ?? this.Currencies.List.FirstOrDefault();
+
+        if (defaultCurrency != null)
+        {
+            this.DisplayCurrencyId = defaultCurrency.Id;
+        }
+
+        this._initialized = true;
+    }
 
     protected override async Task OnLoad()
     {
@@ -306,19 +322,25 @@ public class StockRevisionDetailsViewModel : TransactionDetailsViewModel<StockRe
 
     private string GetDisplayCurrencyId() => this.DisplayCurrencyId;
 
-  private CurrencyConvertion GetCurrencyConverter(string currencyId)
-  {
-    Currency currency = this.Currencies.List.Single<Currency>((Func<Currency, bool>) (x => x.Id == currencyId));
-    CurrencyRate rate = currency.GetRate(this.Details.FinishDate);
-    return new CurrencyConvertion()
+    private CurrencyConvertion GetCurrencyConverter(string currencyId)
     {
-      CurrencyId = currency.Id,
-      Multiplier = rate.Multiplier,
-      Divider = rate.Divider
-    };
-  }
+        // ИСПРАВЛЕНИЕ: FirstOrDefault вместо Single
+        Currency currency = this.Currencies.List.FirstOrDefault(x => x.Id == currencyId)
+                            ?? this.Currencies.List.FirstOrDefault(x => x.IsDefault)
+                            ?? this.Currencies.List.FirstOrDefault();
 
-  private async void AutoReloadLines(CancellationToken cancellationToken)
+        if (currency == null) return null;
+
+        CurrencyRate rate = currency.GetRate(this.Details.FinishDate);
+        return new CurrencyConvertion()
+        {
+            CurrencyId = currency.Id,
+            Multiplier = rate?.Multiplier ?? 1m,
+            Divider = rate?.Divider ?? 1m
+        };
+    }
+
+    private async void AutoReloadLines(CancellationToken cancellationToken)
   {
     try
     {
@@ -767,23 +789,32 @@ public class StockRevisionDetailsViewModel : TransactionDetailsViewModel<StockRe
     return stockSlip4;
   }
 
-  private string Slip_DefaultCurrencyIdRequested()
-  {
-    return this._currenciesList.Single<Currency>((Func<Currency, bool>) (x => x.IsDefault)).Id;
-  }
-
-  private CurrencyConvertion Slip_CurrencyConverterRequested(string currencyId)
-  {
-    CurrencyRate rate = this._currenciesList.Single<Currency>((Func<Currency, bool>) (x => x.Id == currencyId)).GetRate(this.Details.FinishDate);
-    return new CurrencyConvertion()
+    private string Slip_DefaultCurrencyIdRequested()
     {
-      CurrencyId = currencyId,
-      Multiplier = rate.Multiplier,
-      Divider = rate.Divider
-    };
-  }
+        // ИСПРАВЛЕНИЕ: FirstOrDefault вместо Single
+        return this._currenciesList?.FirstOrDefault(x => x.IsDefault)?.Id
+               ?? this._currenciesList?.FirstOrDefault()?.Id
+               ?? this.DisplayCurrencyId;
+    }
 
-  private StockUnitConvertion Slip_StockUnitConverterRequested(string stockId, string unitId)
+    private CurrencyConvertion Slip_CurrencyConverterRequested(string currencyId)
+    {
+        Currency currency = this._currenciesList?.FirstOrDefault(x => x.Id == currencyId)
+                            ?? this._currenciesList?.FirstOrDefault(x => x.IsDefault)
+                            ?? this._currenciesList?.FirstOrDefault();
+
+        if (currency == null) return null;
+
+        CurrencyRate rate = currency.GetRate(this.Details.FinishDate);
+        return new CurrencyConvertion()
+        {
+            CurrencyId = currencyId,
+            Multiplier = rate?.Multiplier ?? 1m,
+            Divider = rate?.Divider ?? 1m
+        };
+    }
+
+    private StockUnitConvertion Slip_StockUnitConverterRequested(string stockId, string unitId)
   {
     StockUnit stockUnit = this._stocksList.Single<Stock>((Func<Stock, bool>) (x => x.Id == stockId)).Units.Single<StockUnit>((Func<StockUnit, bool>) (x => x.Id == unitId));
     return new StockUnitConvertion()

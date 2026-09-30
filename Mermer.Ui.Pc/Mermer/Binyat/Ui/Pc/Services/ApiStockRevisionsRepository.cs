@@ -253,7 +253,41 @@ namespace Mermer.Ui.Pc.Services
 
             var stockIds = revLines.Select(x => x.StockId).Where(x => !string.IsNullOrEmpty(x)).Distinct().ToArray();
             var stocks = (await stocksGetter(stockIds)).ToDictionary(x => x.Id, x => x);
-            var balances = (await stockBalancesGetter(stockIds)).GroupBy(b => b.StockId).ToDictionary(g => g.Key, g => g.Sum(x => x.Balance));
+
+            // Получаем учетные остатки
+            IEnumerable<StockBalance> balancesSource = await stockBalancesGetter(stockIds);
+
+            // Если свойство Balance не заполнено, считаем его как (Income - Expense)
+            var balances = balancesSource
+                .GroupBy(b => b.StockId)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.Sum(x => x.Balance != 0m ? x.Balance : (x.Income - x.Expense))
+                );
+
+            // Группируем строки ревизии по товарам для расчета TotalCounted с учетом коэффициентов единиц измерения
+            var countsByStocks = revLines.GroupBy(x => x.StockId).ToDictionary(
+                g => g.Key,
+                g => g.Select(x =>
+                {
+                    stocks.TryGetValue(x.StockId ?? "", out var st);
+                    var u = st?.Units?.FirstOrDefault(unit => unit.Id == x.UnitId)
+                            ?? (st != null && st.UnitId == x.UnitId ? new StockUnit { Id = st.UnitId, Name = st.Unit, Multiplier = 1m, Divider = 1m } : null)
+                            ?? new StockUnit { Multiplier = 1m, Divider = 1m, Name = "" };
+
+                    decimal mult = u.Multiplier != 0m ? u.Multiplier : 1m;
+                    decimal div = u.Divider != 0m ? u.Divider : 1m;
+                    decimal inBaseUnit = Math.Round(x.Quantity * mult / div, 2);
+
+                    return new
+                    {
+                        x.Id,
+                        x.UnitId,
+                        UnitName = u.Name,
+                        CountedInBaseUnit = inBaseUnit
+                    };
+                }).ToList()
+            );
 
             return revLines.Select(l =>
             {
@@ -261,7 +295,13 @@ namespace Mermer.Ui.Pc.Services
                 balances.TryGetValue(l.StockId ?? "", out var computed);
 
                 decimal price = l.Price ?? stock?.Price ?? 0m;
-                string unitName = stock?.Units?.FirstOrDefault(u => u.Id == l.UnitId)?.Name ?? stock?.Unit ?? "";
+                var stockUnit = stock?.Units?.FirstOrDefault(u => u.Id == l.UnitId);
+                string unitName = stockUnit?.Name ?? stock?.Unit ?? "";
+
+                var lineCounts = countsByStocks[l.StockId];
+                var currentLineData = lineCounts.FirstOrDefault(x => x.Id == l.Id);
+                decimal currentCountedInBase = currentLineData?.CountedInBaseUnit ?? l.Quantity;
+                decimal totalCountedInBase = lineCounts.Sum(x => x.CountedInBaseUnit);
 
                 return new StockRevisionLineInfo
                 {
@@ -276,7 +316,8 @@ namespace Mermer.Ui.Pc.Services
                     Quantity = l.Quantity,
                     UnitId = l.UnitId,
                     Unit = unitName,
-                    TotalCounted = l.Quantity,
+                    CurrentCounted = currentCountedInBase,
+                    TotalCounted = totalCountedInBase,
                     TotalComputed = computed,
                     UserId = l.UserId,
                     UserName = l.UserName

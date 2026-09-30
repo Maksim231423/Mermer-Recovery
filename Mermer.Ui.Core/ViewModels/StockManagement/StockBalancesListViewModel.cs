@@ -20,11 +20,11 @@ using System.Windows.Input;
 namespace Mermer.Ui.Core.ViewModels.StockManagement;
 
 public class StockBalancesListViewModel :
-  ListViewModelBaseWithFilterDate<StockBalanceByTypeWithBalanceAndData>
+    ListViewModelBaseWithFilterDate<StockBalanceByTypeWithBalanceAndData>
 {
     private readonly IConfigurator _configurator;
     private readonly IStockBalancesRepository _repository;
-    private System.Collections.Generic.List<object> _selectedWarehouseIds;
+    private List<object> _selectedWarehouseIds;
     private bool _aggregateWarehouses = true;
     private string _stockId;
     private string _selectedStockMessage;
@@ -44,14 +44,14 @@ public class StockBalancesListViewModel :
         this._configurator = configurator;
         this.Warehouses = warehouses;
         this.StockSearcher = stockSearcher;
-        this.StockSearcher.ResultSelected += new SearchResultSelected(this.StockSearcher_ResultSelected);
+        this.StockSearcher.ResultSelected += this.StockSearcher_ResultSelected;
     }
 
     public StockSearcher StockSearcher { get; }
 
     public Reference<Warehouse> Warehouses { get; }
 
-    public System.Collections.Generic.List<object> SelectedWarehouseIds
+    public List<object> SelectedWarehouseIds
     {
         get => this._selectedWarehouseIds;
         set
@@ -62,8 +62,13 @@ public class StockBalancesListViewModel :
             if (!this.SetProperty(ref this._selectedWarehouseIds, value ?? new List<object>(), nameof(SelectedWarehouseIds)))
                 return;
 
+            this.RaisePropertyChanged(() => this.WarehouseIds);
+
             if (!this.IsBusy)
+            {
                 this.Initialize();
+                this.UpdateFilters();
+            }
         }
     }
 
@@ -71,8 +76,14 @@ public class StockBalancesListViewModel :
     {
         get
         {
-            System.Collections.Generic.List<object> selectedWarehouseIds = this.SelectedWarehouseIds;
-            return (selectedWarehouseIds != null ? selectedWarehouseIds.Cast<string>().ToArray<string>() : (string[])null) ?? Array.Empty<string>();
+            if (this.SelectedWarehouseIds == null || this.SelectedWarehouseIds.Count == 0)
+                return Array.Empty<string>();
+
+            return this.SelectedWarehouseIds
+                .Select(x => x?.ToString())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
         }
     }
 
@@ -81,9 +92,14 @@ public class StockBalancesListViewModel :
         get => this._aggregateWarehouses;
         set
         {
-            if (!this.SetProperty<bool>(ref this._aggregateWarehouses, value, nameof(AggregateWarehouses)) || this.IsBusy)
+            if (!this.SetProperty(ref this._aggregateWarehouses, value, nameof(AggregateWarehouses)))
                 return;
-            this.Initialize();
+
+            if (!this.IsBusy)
+            {
+                this.Initialize();
+                this.UpdateFilters();
+            }
         }
     }
 
@@ -92,10 +108,12 @@ public class StockBalancesListViewModel :
         get => this._stockId;
         set
         {
-            if (!this.SetProperty<string>(ref this._stockId, value, nameof(StockId)) || this.IsBusy)
+            if (!this.SetProperty(ref this._stockId, value, nameof(StockId)) || this.IsBusy)
                 return;
-            this.RaisePropertyChanged<bool>((Expression<Func<bool>>)(() => this.StockIdSelected));
+
+            this.RaisePropertyChanged(() => this.StockIdSelected);
             this.Initialize();
+            this.UpdateFilters();
         }
     }
 
@@ -104,18 +122,15 @@ public class StockBalancesListViewModel :
     public virtual string SelectedStockMessage
     {
         get => this._selectedStockMessage;
-        set
-        {
-            this.SetProperty<string>(ref this._selectedStockMessage, value, nameof(SelectedStockMessage));
-        }
+        set => this.SetProperty(ref this._selectedStockMessage, value, nameof(SelectedStockMessage));
     }
 
     private void StockSearcher_ResultSelected(StockSearcher searcher, StockSearchResult result)
     {
         this.SelectedStockMessage = this["Showing balances for stock: {0} | {1}", new object[2]
         {
-            (object) result.Code,
-            (object) result.Name
+            result.Code,
+            result.Name
         }];
         this.StockId = result.Id;
     }
@@ -126,102 +141,66 @@ public class StockBalancesListViewModel :
         {
             await Task.WhenAll(
                 base.PreLoad(),
-                Warehouses.Initialize(),
-                StockSearcher.Initialize()
+                this.Warehouses.Initialize(),
+                this.StockSearcher.Initialize()
             );
 
-            SelectedWarehouseIds = new List<object>();
-            _initialized = true;
+            this.SelectedWarehouseIds = new List<object>();
+            this._initialized = true;
         }
         else
         {
             await base.PreLoad();
         }
 
-        if (string.IsNullOrEmpty(StockId))
-            SelectedStockMessage = this["Showing balances for all stocks"];
+        if (string.IsNullOrEmpty(this.StockId))
+            this.SelectedStockMessage = this["Showing balances for all stocks"];
     }
 
-    protected override Task<IEnumerable<StockBalanceByTypeWithBalanceAndData>> GetFilteredListByDateAsync(
-        DateTime from,
-        DateTime till)
+    private void UpdateFilters()
     {
-        return this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, from, till, this.AggregateWarehouses);
+        try
+        {
+            // Уведомляем UI об изменении фильтров для пересчета значений счетчиков
+            this.RaisePropertyChanged(() => this.Filters);
+        }
+        catch { }
     }
 
-    protected override Task<IEnumerable<StockBalanceByTypeWithBalanceAndData>> GetFilteredListAsync(
-        ListFilter filter)
+    // ── ЗАГРУЗКА ДАННЫХ В ТАБЛИЦУ ──
+
+    // Плитка "All Records"
+    protected override Task<IEnumerable<StockBalanceByTypeWithBalanceAndData>> GetFilteredListAsync(ListFilter filter)
     {
         return this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, DateTime.MinValue, DateTime.MaxValue, this.AggregateWarehouses);
     }
 
-    public ICommand RemoveSelectedStockId
+    // Фильтры по периодам дат
+    protected override Task<IEnumerable<StockBalanceByTypeWithBalanceAndData>> GetFilteredListByDateAsync(DateTime from, DateTime till)
     {
-        get
-        {
-            return (ICommand)new MvxCommand(new Action(this.OnRemoveSelectedStockId), (Func<bool>)(() => !this.IsBusy));
-        }
+        return this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, from, till, this.AggregateWarehouses);
     }
 
-    private void OnRemoveSelectedStockId() => this.StockId = (string)null;
-
-    public ICommand SelectOrViewDetailsCommand
+    protected override Task<IEnumerable<StockBalanceByTypeWithBalanceAndData>> GetListAsync(
+        params Expression<Func<StockBalanceByTypeWithBalanceAndData, bool>>[] predicates)
     {
-        get
-        {
-            return (ICommand)new MvxAsyncCommand(new Func<Task>(this.OnSelectOrViewDetailsAsync), (Func<bool>)(() => !this.IsBusy && this.SelectedItem != null));
-        }
+        return this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, DateTime.MinValue, DateTime.MaxValue, this.AggregateWarehouses);
     }
 
-    private Task OnSelectOrViewDetailsAsync()
+    // ── ПОДСЧЁТ СЧЁТЧИКОВ НА ПЛИТКАХ ──
+
+    // Счётчик плитки "All Records"
+    protected override async Task<int> CountFilteredListAsync(ListFilter filter)
     {
-        IMvxNavigationService navigationService = this.NavigationService;
-        StockActionsFilter stockActionsFilter1 = new StockActionsFilter();
-        StockActionsFilter stockActionsFilter2 = stockActionsFilter1;
-        string[] strArray;
-        if (this.AggregateWarehouses || string.IsNullOrEmpty(this.SelectedItem.WarehouseId))
-            strArray = this.WarehouseIds;
-        else
-            strArray = new string[1]
-            {
-                this.SelectedItem.WarehouseId
-            };
-        stockActionsFilter2.WarehouseIds = strArray;
-        stockActionsFilter1.StockId = this.SelectedItem.StockId;
-        stockActionsFilter1.DateFrom = this.DateFilterFrom;
-        stockActionsFilter1.DateTill = this.DateFilterTill;
-        StockActionsFilter stockActionsFilter3 = stockActionsFilter1;
-        return navigationService.Navigate<StockActionsListViewModel, StockActionsFilter>(stockActionsFilter3);
+        var items = await this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, DateTime.MinValue, DateTime.MaxValue, this.AggregateWarehouses);
+        return items?.Count() ?? 0;
     }
 
-    public ICommand ShowActionsCommand
+    // Счётчик для плиток дат (#Today, #This Week, #This Year и т.д.)
+    protected override async Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
     {
-        get
-        {
-            return (ICommand)new MvxAsyncCommand(new Func<Task>(this.OnShowActionsAsync), (Func<bool>)(() => !this.IsBusy));
-        }
-    }
-
-    private Task OnShowActionsAsync()
-    {
-        return this.NavigationService.Navigate<StockActionsListViewModel, StockActionsFilter>(new StockActionsFilter()
-        {
-            WarehouseIds = this.WarehouseIds,
-            StockId = this.StockId,
-            DateFrom = this.DateFilterFrom,
-            DateTill = this.DateFilterTill
-        });
-    }
-
-    // ОПТИМИЗАЦИЯ: Возвращаем 0 или реальное число без повторного похода в сеть
-    protected override Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
-    {
-        return Task.FromResult(0);
-    }
-
-    protected override Task<int> CountFilteredListAsync(ListFilter filter)
-    {
-        return Task.FromResult(0);
+        var items = await this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, from, till, this.AggregateWarehouses);
+        return items?.Count() ?? 0;
     }
 
     protected override Task<int> CountListAsync(params Expression<Func<StockBalanceByTypeWithBalanceAndData, bool>>[] predicates)
@@ -229,16 +208,52 @@ public class StockBalancesListViewModel :
         return Task.FromResult(0);
     }
 
-    protected override Expression<Func<StockBalanceByTypeWithBalanceAndData, bool>> GetDateFilter(
-        DateTime from,
-        DateTime till)
+    protected override Expression<Func<StockBalanceByTypeWithBalanceAndData, bool>> GetDateFilter(DateTime from, DateTime till)
     {
         return x => true;
     }
 
-    protected override Task<IEnumerable<StockBalanceByTypeWithBalanceAndData>> GetListAsync(
-        params Expression<Func<StockBalanceByTypeWithBalanceAndData, bool>>[] predicates)
+    // ── КОМАНДЫ ──
+
+    public ICommand RemoveSelectedStockId => new MvxCommand(this.OnRemoveSelectedStockId, () => !this.IsBusy);
+
+    private void OnRemoveSelectedStockId() => this.StockId = null;
+
+    public ICommand SelectOrViewDetailsCommand =>
+        new MvxAsyncCommand(this.OnSelectOrViewDetailsAsync, () => !this.IsBusy && this.SelectedItem != null);
+
+    private Task OnSelectOrViewDetailsAsync()
     {
-        return this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, DateTime.MinValue, DateTime.MaxValue, this.AggregateWarehouses);
+        string[] strArray;
+        if (this.AggregateWarehouses || string.IsNullOrEmpty(this.SelectedItem.WarehouseId))
+            strArray = this.WarehouseIds;
+        else
+            strArray = new[] { this.SelectedItem.WarehouseId };
+
+        var filter = new StockActionsFilter
+        {
+            WarehouseIds = strArray,
+            StockId = this.SelectedItem.StockId,
+            DateFrom = this.DateFilterFrom,
+            DateTill = this.DateFilterTill
+        };
+
+        return this.NavigationService.Navigate<StockActionsListViewModel, StockActionsFilter>(filter);
+    }
+
+    public ICommand ShowActionsCommand =>
+        new MvxAsyncCommand(this.OnShowActionsAsync, () => !this.IsBusy);
+
+    private Task OnShowActionsAsync()
+    {
+        var filter = new StockActionsFilter
+        {
+            WarehouseIds = this.WarehouseIds,
+            StockId = this.StockId,
+            DateFrom = this.DateFilterFrom,
+            DateTill = this.DateFilterTill
+        };
+
+        return this.NavigationService.Navigate<StockActionsListViewModel, StockActionsFilter>(filter);
     }
 }
