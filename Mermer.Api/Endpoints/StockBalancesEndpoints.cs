@@ -17,45 +17,146 @@ public static class StockBalancesEndpoints
     {
         var group = app.MapGroup("/api/stock-balances").WithTags("StockBalances");
 
-        // 1. ТЕКУЩИЕ ОСТАТКИ (Чтение напрямую из таблицы stock_balances с лимитом)
+        // 1. ТЕКУЩИЕ ОСТАТКИ НА СКЛАДАХ (Чистые плоские запросы без спама в логах)
         group.MapGet("/", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            int limit = int.TryParse(req.Query["limit"], out var l) ? Math.Clamp(l, 1, 1000) : 250;
-            int offset = int.TryParse(req.Query["offset"], out var o) ? Math.Max(0, o) : 0;
+            DateTimeOffset date = DateTimeOffset.UtcNow;
+            string? dateStr = req.Query["date"].FirstOrDefault();
+            if (!string.IsNullOrEmpty(dateStr) && DateTimeOffset.TryParse(dateStr.Replace(" ", "+"), out var pDate))
+                date = pDate.ToUniversalTime();
 
-            var whIds = req.Query["warehouseId"]
-                .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
-                .Where(x => x.HasValue).Select(x => x!.Value).ToList();
+            var whIds = new HashSet<Guid>();
+            foreach (var val in req.Query["warehouseId"])
+            {
+                if (string.IsNullOrWhiteSpace(val)) continue;
+                foreach (var part in val.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (Guid.TryParse(part.Trim(), out var parsedWh))
+                        whIds.Add(parsedWh);
+                }
+            }
 
-            var stockIds = req.Query["stockId"]
-                .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
-                .Where(x => x.HasValue).Select(x => x!.Value).ToList();
+            var stockIds = new HashSet<Guid>();
+            foreach (var val in req.Query["stockId"])
+            {
+                if (string.IsNullOrWhiteSpace(val)) continue;
+                foreach (var part in val.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (Guid.TryParse(part.Trim(), out var parsedSt))
+                        stockIds.Add(parsedSt);
+                }
+            }
 
-            // Читаем напрямую из таблицы остатков, исключая нулевые
-            var query = db.StockBalances
-                .AsNoTracking()
-                .Where(sb => (sb.Income - sb.Expense) != 0);
+            // 1. Накладные (Invoices)
+            var invQuery = db.InvoiceLines.AsNoTracking()
+                .Where(l => l.StockId.HasValue && l.Invoice != null && l.Invoice.IsCompleted && !l.Invoice.IsDisabled && l.Invoice.WarehouseId.HasValue && l.Invoice.Date <= date);
+
+            if (whIds.Any()) invQuery = invQuery.Where(l => whIds.Contains(l.Invoice.WarehouseId!.Value));
+            if (stockIds.Any()) invQuery = invQuery.Where(l => stockIds.Contains(l.StockId!.Value));
+
+            var invLines = await invQuery.Select(l => new
+            {
+                Wh = l.Invoice.WarehouseId!.Value,
+                St = l.StockId!.Value,
+                Type = l.Invoice.InvoiceType,
+                Qty = l.Quantity
+            }).ToListAsync(ct);
+
+            // 2. Складские ордера (StockSlips)
+            var slipQuery = db.StockSlipLines.AsNoTracking()
+                .Where(l => l.StockId.HasValue && l.StockSlip != null && l.StockSlip.IsCompleted && l.StockSlip.WarehouseId.HasValue && l.StockSlip.Date <= date);
+
+            if (whIds.Any()) slipQuery = slipQuery.Where(l => whIds.Contains(l.StockSlip.WarehouseId!.Value));
+            if (stockIds.Any()) slipQuery = slipQuery.Where(l => stockIds.Contains(l.StockId!.Value));
+
+            var slipLines = await slipQuery.Select(l => new
+            {
+                Wh = l.StockSlip.WarehouseId!.Value,
+                St = l.StockId!.Value,
+                Type = l.StockSlip.SlipType,
+                Qty = l.Quantity
+            }).ToListAsync(ct);
+
+            // 3. Перемещения (StockTransfers)
+            var trQuery = db.StockTransferLines.AsNoTracking()
+                .Where(l => l.StockId.HasValue && l.StockTransfer != null && l.StockTransfer.IsCompleted && !l.StockTransfer.IsDisabled && l.StockTransfer.Date <= date);
 
             if (whIds.Any())
-                query = query.Where(sb => whIds.Contains(sb.WarehouseId));
+            {
+                trQuery = trQuery.Where(l =>
+                    (l.StockTransfer.WarehouseId.HasValue && whIds.Contains(l.StockTransfer.WarehouseId.Value)) ||
+                    (l.StockTransfer.DestinationWarehouseId.HasValue && whIds.Contains(l.StockTransfer.DestinationWarehouseId.Value)));
+            }
+            if (stockIds.Any()) trQuery = trQuery.Where(l => stockIds.Contains(l.StockId!.Value));
 
-            if (stockIds.Any())
-                query = query.Where(sb => stockIds.Contains(sb.StockId));
+            var trLines = await trQuery.Select(l => new
+            {
+                SrcWh = l.StockTransfer.WarehouseId,
+                DstWh = l.StockTransfer.DestinationWarehouseId,
+                St = l.StockId!.Value,
+                QtySent = l.Quantity,
+                QtyRec = l.ReceivedQuantity != 0m ? l.ReceivedQuantity : l.Quantity
+            }).ToListAsync(ct);
 
-            var balances = await query
-                .OrderBy(sb => sb.StockId)
-                .Skip(offset)
-                .Take(limit)
-                .Select(sb => new
+            // 4. Суммируем остатки в памяти
+            var balancesDict = new Dictionary<(Guid Wh, Guid St), BalanceAccumulator>();
+
+            BalanceAccumulator GetOrCreate(Guid wh, Guid st)
+            {
+                var key = (wh, st);
+                if (!balancesDict.TryGetValue(key, out var acc))
                 {
-                    WarehouseId = sb.WarehouseId.ToString(),
-                    StockId = sb.StockId.ToString(),
-                    Income = sb.Income,
-                    Expense = sb.Expense
-                })
-                .ToListAsync(ct);
+                    acc = new BalanceAccumulator();
+                    balancesDict[key] = acc;
+                }
+                return acc;
+            }
 
-            return Results.Ok(balances);
+            foreach (var i in invLines)
+            {
+                bool isInc = i.Type.Equals("Purchase", StringComparison.OrdinalIgnoreCase) || i.Type.Equals("SalesReturn", StringComparison.OrdinalIgnoreCase);
+                var acc = GetOrCreate(i.Wh, i.St);
+                if (isInc) acc.Income += i.Qty;
+                else acc.Expense += i.Qty;
+            }
+
+            foreach (var s in slipLines)
+            {
+                string t = s.Type ?? "StockOpening";
+                bool isInc = t.Equals("StockOpening", StringComparison.OrdinalIgnoreCase) || t.Equals("RevisionExceed", StringComparison.OrdinalIgnoreCase);
+                var acc = GetOrCreate(s.Wh, s.St);
+                if (isInc) acc.Income += s.Qty;
+                else acc.Expense += s.Qty;
+            }
+
+            foreach (var tr in trLines)
+            {
+                if (tr.SrcWh.HasValue && (!whIds.Any() || whIds.Contains(tr.SrcWh.Value)))
+                {
+                    var acc = GetOrCreate(tr.SrcWh.Value, tr.St);
+                    acc.Expense += tr.QtySent;
+                }
+
+                if (tr.DstWh.HasValue && (!whIds.Any() || whIds.Contains(tr.DstWh.Value)))
+                {
+                    var acc = GetOrCreate(tr.DstWh.Value, tr.St);
+                    acc.Income += tr.QtyRec;
+                }
+            }
+
+            var result = balancesDict
+                .Select(kvp => new
+                {
+                    WarehouseId = kvp.Key.Wh.ToString(),
+                    StockId = kvp.Key.St.ToString(),
+                    Income = kvp.Value.Income,
+                    Expense = kvp.Value.Expense,
+                    Balance = kvp.Value.Income - kvp.Value.Expense
+                })
+                .Where(x => x.Balance != 0m || x.Income != 0m || x.Expense != 0m)
+                .ToList();
+
+            return Results.Ok(result);
         });
 
 
@@ -384,7 +485,7 @@ public static class StockBalancesEndpoints
             return Results.Ok(result.OrderBy(x => ((dynamic)x).StockName));
         });
 
-        // 3. ОТЧЕТ ПО СКЛАДАМ НА ДАТУ (С ограничением выборки)
+        // 3. ОТЧЕТ ПО СКЛАДАМ НА ДАТУ (Легкий плоский запрос)
         group.MapGet("/by-date-warehouses", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             DateTimeOffset date = DateTimeOffset.UtcNow;
@@ -395,102 +496,165 @@ public static class StockBalancesEndpoints
             string? displayCurrencyId = req.Query["displayCurrencyId"].FirstOrDefault();
             Guid? displayCurrGuid = Guid.TryParse(displayCurrencyId, out var dcG) ? dcG : null;
 
-            var whIds = req.Query["warehouseId"]
-                .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
-                .Where(x => x.HasValue).Select(x => x!.Value).ToList();
+            var whIds = new HashSet<Guid>();
+            foreach (var val in req.Query["warehouseId"])
+            {
+                if (string.IsNullOrWhiteSpace(val)) continue;
+                foreach (var part in val.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (Guid.TryParse(part.Trim(), out var parsedWh))
+                        whIds.Add(parsedWh);
+                }
+            }
 
-            var stockIds = req.Query["stockId"]
-                .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
-                .Where(x => x.HasValue).Select(x => x!.Value).ToList();
+            var stockIds = new HashSet<Guid>();
+            foreach (var val in req.Query["stockId"])
+            {
+                if (string.IsNullOrWhiteSpace(val)) continue;
+                foreach (var part in val.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (Guid.TryParse(part.Trim(), out var parsedSt))
+                        stockIds.Add(parsedSt);
+                }
+            }
 
-            var invQuery = db.InvoiceLines.Where(l => l.Invoice.IsCompleted && !l.Invoice.IsDisabled && l.Invoice.Date <= date);
-            if (whIds.Any()) invQuery = invQuery.Where(l => l.Invoice.WarehouseId.HasValue && whIds.Contains(l.Invoice.WarehouseId.Value));
-            if (stockIds.Any()) invQuery = invQuery.Where(l => l.StockId.HasValue && stockIds.Contains(l.StockId.Value));
+            // Читаем движения аналогично методу /
+            var invQuery = db.InvoiceLines.AsNoTracking()
+                .Where(l => l.StockId.HasValue && l.Invoice != null && l.Invoice.IsCompleted && !l.Invoice.IsDisabled && l.Invoice.WarehouseId.HasValue && l.Invoice.Date <= date);
 
-            var invSums = await invQuery.GroupBy(l => new { Wh = l.Invoice.WarehouseId, St = l.StockId })
-                .Select(g => new {
-                    Wh = g.Key.Wh,
-                    St = g.Key.St,
-                    Inc = g.Sum(x => x.Invoice.InvoiceType == "Purchase" || x.Invoice.InvoiceType == "SalesReturn" ? x.Quantity : 0),
-                    Exp = g.Sum(x => x.Invoice.InvoiceType == "Sales" || x.Invoice.InvoiceType == "PurchaseReturn" ? x.Quantity : 0)
-                }).ToListAsync(ct);
+            if (whIds.Any()) invQuery = invQuery.Where(l => whIds.Contains(l.Invoice.WarehouseId!.Value));
+            if (stockIds.Any()) invQuery = invQuery.Where(l => stockIds.Contains(l.StockId!.Value));
 
-            var slipQuery = db.StockSlipLines.Where(l => l.StockSlip.IsCompleted && l.StockSlip.Date <= date);
-            if (whIds.Any()) slipQuery = slipQuery.Where(l => l.StockSlip.WarehouseId.HasValue && whIds.Contains(l.StockSlip.WarehouseId.Value));
-            if (stockIds.Any()) slipQuery = slipQuery.Where(l => l.StockId.HasValue && stockIds.Contains(l.StockId.Value));
+            var invLines = await invQuery.Select(l => new
+            {
+                Wh = l.Invoice.WarehouseId!.Value,
+                St = l.StockId!.Value,
+                Type = l.Invoice.InvoiceType,
+                Qty = l.Quantity
+            }).ToListAsync(ct);
 
-            var slipSums = await slipQuery.GroupBy(l => new { Wh = l.StockSlip.WarehouseId, St = l.StockId })
-                .Select(g => new {
-                    Wh = g.Key.Wh,
-                    St = g.Key.St,
-                    Inc = g.Sum(x => x.StockSlip.SlipType == "StockOpening" || x.StockSlip.SlipType == "RevisionExceed" ? x.Quantity : 0),
-                    Exp = g.Sum(x => x.StockSlip.SlipType != "StockOpening" && x.StockSlip.SlipType != "RevisionExceed" ? x.Quantity : 0)
-                }).ToListAsync(ct);
+            var slipQuery = db.StockSlipLines.AsNoTracking()
+                .Where(l => l.StockId.HasValue && l.StockSlip != null && l.StockSlip.IsCompleted && l.StockSlip.WarehouseId.HasValue && l.StockSlip.Date <= date);
 
-            var trOutQuery = db.StockTransferLines.Where(l => l.StockTransfer.IsCompleted && !l.StockTransfer.IsDisabled && l.StockTransfer.Date <= date);
-            if (whIds.Any()) trOutQuery = trOutQuery.Where(l => l.StockTransfer.WarehouseId.HasValue && whIds.Contains(l.StockTransfer.WarehouseId.Value));
-            if (stockIds.Any()) trOutQuery = trOutQuery.Where(l => l.StockId.HasValue && stockIds.Contains(l.StockId.Value));
+            if (whIds.Any()) slipQuery = slipQuery.Where(l => whIds.Contains(l.StockSlip.WarehouseId!.Value));
+            if (stockIds.Any()) slipQuery = slipQuery.Where(l => stockIds.Contains(l.StockId!.Value));
 
-            var trOutSums = await trOutQuery.GroupBy(l => new { Wh = l.StockTransfer.WarehouseId, St = l.StockId })
-                .Select(g => new { Wh = g.Key.Wh, St = g.Key.St, Inc = 0m, Exp = g.Sum(x => x.Quantity) }).ToListAsync(ct);
+            var slipLines = await slipQuery.Select(l => new
+            {
+                Wh = l.StockSlip.WarehouseId!.Value,
+                St = l.StockId!.Value,
+                Type = l.StockSlip.SlipType,
+                Qty = l.Quantity
+            }).ToListAsync(ct);
 
-            var trInQuery = db.StockTransferLines.Where(l => l.StockTransfer.IsCompleted && !l.StockTransfer.IsDisabled && l.StockTransfer.Date <= date);
-            if (whIds.Any()) trInQuery = trInQuery.Where(l => l.StockTransfer.DestinationWarehouseId.HasValue && whIds.Contains(l.StockTransfer.DestinationWarehouseId.Value));
-            if (stockIds.Any()) trInQuery = trInQuery.Where(l => l.StockId.HasValue && stockIds.Contains(l.StockId.Value));
+            var trQuery = db.StockTransferLines.AsNoTracking()
+                .Where(l => l.StockId.HasValue && l.StockTransfer != null && l.StockTransfer.IsCompleted && !l.StockTransfer.IsDisabled && l.StockTransfer.Date <= date);
 
-            var trInSums = await trInQuery.GroupBy(l => new { Wh = l.StockTransfer.DestinationWarehouseId, St = l.StockId })
-                .Select(g => new { Wh = g.Key.Wh, St = g.Key.St, Inc = g.Sum(x => x.ReceivedQuantity), Exp = 0m }).ToListAsync(ct);
+            if (whIds.Any())
+            {
+                trQuery = trQuery.Where(l =>
+                    (l.StockTransfer.WarehouseId.HasValue && whIds.Contains(l.StockTransfer.WarehouseId.Value)) ||
+                    (l.StockTransfer.DestinationWarehouseId.HasValue && whIds.Contains(l.StockTransfer.DestinationWarehouseId.Value)));
+            }
+            if (stockIds.Any()) trQuery = trQuery.Where(l => stockIds.Contains(l.StockId!.Value));
 
-            var allBals = invSums.Concat(slipSums).Concat(trOutSums).Concat(trInSums)
-                .Where(x => x.Wh.HasValue && x.St.HasValue)
-                .GroupBy(x => new { Wh = x.Wh!.Value, St = x.St!.Value })
-                .Select(g => new { Wh = g.Key.Wh, St = g.Key.St, Balance = g.Sum(x => x.Inc - x.Exp) })
-                .Where(x => x.Balance != 0)
-                .ToList();
+            var trLines = await trQuery.Select(l => new
+            {
+                SrcWh = l.StockTransfer.WarehouseId,
+                DstWh = l.StockTransfer.DestinationWarehouseId,
+                St = l.StockId!.Value,
+                QtySent = l.Quantity,
+                QtyRec = l.ReceivedQuantity != 0m ? l.ReceivedQuantity : l.Quantity
+            }).ToListAsync(ct);
 
-            var validStockIds = allBals.Select(x => x.St).Distinct().Take(200).ToList();
-            if (stockIds.Any()) validStockIds = validStockIds.Union(stockIds).Distinct().Take(200).ToList();
+            var balancesDict = new Dictionary<(Guid Wh, Guid St), decimal>();
 
-            if (!validStockIds.Any()) return Results.Ok(Array.Empty<object>());
+            foreach (var i in invLines)
+            {
+                bool isInc = i.Type.Equals("Purchase", StringComparison.OrdinalIgnoreCase) || i.Type.Equals("SalesReturn", StringComparison.OrdinalIgnoreCase);
+                var key = (i.Wh, i.St);
+                balancesDict[key] = (balancesDict.TryGetValue(key, out var b) ? b : 0m) + (isInc ? i.Qty : -i.Qty);
+            }
 
-            var stocks = await db.Stocks
-                .Include(s => s.Units)
-                .Include(s => s.Prices)
-                .AsSplitQuery()
-                .Where(s => validStockIds.Contains(s.Id))
-                .AsNoTracking()
+            foreach (var s in slipLines)
+            {
+                string t = s.Type ?? "StockOpening";
+                bool isInc = t.Equals("StockOpening", StringComparison.OrdinalIgnoreCase) || t.Equals("RevisionExceed", StringComparison.OrdinalIgnoreCase);
+                var key = (s.Wh, s.St);
+                balancesDict[key] = (balancesDict.TryGetValue(key, out var b) ? b : 0m) + (isInc ? s.Qty : -s.Qty);
+            }
+
+            foreach (var tr in trLines)
+            {
+                if (tr.SrcWh.HasValue && (!whIds.Any() || whIds.Contains(tr.SrcWh.Value)))
+                {
+                    var key = (tr.SrcWh.Value, tr.St);
+                    balancesDict[key] = (balancesDict.TryGetValue(key, out var b) ? b : 0m) - tr.QtySent;
+                }
+
+                if (tr.DstWh.HasValue && (!whIds.Any() || whIds.Contains(tr.DstWh.Value)))
+                {
+                    var key = (tr.DstWh.Value, tr.St);
+                    balancesDict[key] = (balancesDict.TryGetValue(key, out var b) ? b : 0m) + tr.QtyRec;
+                }
+            }
+
+            var validStocks = balancesDict.Where(x => x.Value != 0m).Select(x => x.Key.St).Distinct().ToHashSet();
+            if (stockIds.Any()) validStocks.UnionWith(stockIds);
+
+            if (!validStocks.Any()) return Results.Ok(Array.Empty<object>());
+
+            var stocks = await db.Stocks.AsNoTracking()
+                .Where(s => validStocks.Contains(s.Id) && !s.IsDisabled)
+                .Select(s => new
+                {
+                    s.Id,
+                    s.Code,
+                    s.Name,
+                    s.ShortName,
+                    s.Type,
+                    s.Group,
+                    s.Tags,
+                    UnitName = s.Units.Where(u => u.IsDefault).Select(u => u.Name).FirstOrDefault()
+                               ?? s.Units.Select(u => u.Name).FirstOrDefault() ?? "",
+                    Price = s.Prices.Where(p => p.ValidFrom <= date).OrderByDescending(p => p.ValidFrom).Select(p => p.Price).FirstOrDefault(),
+                    CurrencyId = s.Prices.Where(p => p.ValidFrom <= date).OrderByDescending(p => p.ValidFrom).Select(p => (Guid?)p.CurrencyId).FirstOrDefault()
+                })
                 .ToListAsync(ct);
 
             var currencies = await db.Currencies.AsNoTracking().ToListAsync(ct);
             var rates = await db.CurrencyRates.AsNoTracking().ToListAsync(ct);
 
-            var displayCurrency = displayCurrGuid.HasValue ? currencies.FirstOrDefault(c => c.Id == displayCurrGuid.Value) : currencies.FirstOrDefault(c => c.IsDefault);
-            var dispRate = displayCurrency != null ? rates.Where(r => r.CurrencyId == displayCurrency.Id && r.ValidFrom <= date.Date).OrderByDescending(r => r.ValidFrom).FirstOrDefault() : null;
+            var displayCurrency = displayCurrGuid.HasValue
+                ? currencies.FirstOrDefault(c => c.Id == displayCurrGuid.Value)
+                : (currencies.FirstOrDefault(c => c.IsDefault) ?? currencies.FirstOrDefault());
+
+            var dispRate = displayCurrency != null
+                ? rates.Where(r => r.CurrencyId == displayCurrency.Id && r.ValidFrom <= date).OrderByDescending(r => r.ValidFrom).FirstOrDefault()
+                : null;
+
             decimal dispMult = dispRate?.Multiplier ?? 1m;
             decimal dispDiv = dispRate?.Divider ?? 1m;
             int dispDecimals = displayCurrency?.Decimals ?? 2;
 
-            var result = stocks.Select(stock => {
-                var stockBals = allBals.Where(b => b.St == stock.Id);
-                if (whIds.Any()) stockBals = stockBals.Where(b => whIds.Contains(b.Wh));
+            var result = stocks.Select(stock =>
+            {
+                var stockBals = balancesDict
+                    .Where(b => b.Key.St == stock.Id && (!whIds.Any() || whIds.Contains(b.Key.Wh)))
+                    .ToDictionary(b => b.Key.Wh.ToString(), b => b.Value);
 
-                var balancesDict = stockBals.ToDictionary(b => b.Wh.ToString(), b => b.Balance);
-
-                if (!balancesDict.Any() && !stockIds.Contains(stock.Id)) return null;
-
-                var defaultUnit = stock.Units?.FirstOrDefault(u => u.IsDefault) ?? stock.Units?.FirstOrDefault();
-                var currentPrice = stock.Prices?.Where(p => p.ValidFrom <= date.Date).OrderByDescending(p => p.ValidFrom).FirstOrDefault();
+                if (!stockBals.Any() && !stockIds.Contains(stock.Id)) return null;
 
                 decimal convertedPrice = 0m;
-                if (currentPrice != null)
+                if (stock.CurrencyId.HasValue && stock.Price > 0m)
                 {
-                    var currRate = rates.Where(r => r.CurrencyId == currentPrice.CurrencyId && r.ValidFrom <= date.Date).OrderByDescending(r => r.ValidFrom).FirstOrDefault();
+                    var currRate = rates.Where(r => r.CurrencyId == stock.CurrencyId.Value && r.ValidFrom <= date).OrderByDescending(r => r.ValidFrom).FirstOrDefault();
                     decimal currMult = currRate?.Multiplier ?? 1m;
                     decimal currDiv = currRate?.Divider ?? 1m;
 
                     if (currDiv != 0 && dispMult != 0)
                     {
-                        convertedPrice = Math.Round(currentPrice.Price * currMult / currDiv / dispMult * dispDiv, dispDecimals);
+                        convertedPrice = Math.Round(stock.Price * currMult / currDiv / dispMult * dispDiv, dispDecimals);
                     }
                 }
 
@@ -500,13 +664,13 @@ public static class StockBalancesEndpoints
                     StockCode = stock.Code ?? "",
                     StockName = stock.Name ?? "",
                     StockShortName = stock.ShortName ?? "",
-                    StockUnit = defaultUnit?.Name ?? "",
+                    StockUnit = stock.UnitName,
                     StockPrice = convertedPrice,
                     StockPriceCurrencyId = displayCurrency?.Id.ToString() ?? "",
                     StockType = stock.Type ?? "",
                     StockGroup = stock.Group ?? "",
                     StockTags = stock.Tags != null ? string.Join(" ", stock.Tags) : "",
-                    Balances = balancesDict
+                    Balances = stockBals
                 };
             }).Where(x => x != null).ToList();
 
@@ -528,5 +692,11 @@ public static class StockBalancesEndpoints
         return app;
     }
 
+
+    private class BalanceAccumulator
+    {
+        public decimal Income { get; set; }
+        public decimal Expense { get; set; }
+    }
     private record StockMovementRecord(Guid WarehouseId, Guid StockId, DateTimeOffset Date, string Type, decimal Income, decimal Expense);
 }

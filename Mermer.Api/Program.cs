@@ -13,6 +13,9 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.WebHost.UseUrls("http://*:5050");
 
+builder.Logging.AddFilter("Microsoft.EntityFrameworkCore.Database.Command", LogLevel.Warning);
+builder.Logging.AddFilter("Microsoft.EntityFrameworkCore.Query", LogLevel.Warning);
+
 var connectionString =
     builder.Configuration.GetConnectionString("Postgres")
     ?? builder.Configuration.GetConnectionString("DefaultConnection")
