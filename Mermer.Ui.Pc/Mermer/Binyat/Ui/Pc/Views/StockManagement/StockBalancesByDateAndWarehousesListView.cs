@@ -16,14 +16,24 @@ public partial class StockBalancesByDateAndWarehousesListView : MvxWpfView
         if (!(DataContext is StockBalancesByDateAndWarehousesListViewModel dataContext))
             return;
 
+        if (dataContext.List == null || e.ListSourceRowIndex < 0 || e.ListSourceRowIndex >= dataContext.List.Count)
+            return;
+
         StockBalanceByWarehouses balanceByWarehouses = dataContext.List[e.ListSourceRowIndex];
+        if (balanceByWarehouses == null)
+            return;
 
         if (!e.IsGetData)
             return;
 
-        e.Value = balanceByWarehouses.Balances.ContainsKey(e.Column.FieldName)
-            ? balanceByWarehouses.Balances[e.Column.FieldName]
-            : 0M;
+        if (balanceByWarehouses.Balances != null && balanceByWarehouses.Balances.TryGetValue(e.Column.FieldName, out var val))
+        {
+            e.Value = val;
+        }
+        else
+        {
+            e.Value = 0M;
+        }
     }
 
     private void DetectShortCut(object sender, KeyEventArgs e)

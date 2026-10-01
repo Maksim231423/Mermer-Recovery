@@ -138,8 +138,8 @@ public class Setup : MvxWpfSetup
         builder.RegisterType<ApiInvoicesRepository>().As<Mermer.Data.Storage.IRepository<Mermer.Commerce.Models.Invoice>>().As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Commerce.Models.Invoice>>().As<Mermer.Commerce.Services.IInvoicesRepository>().SingleInstance();
 
         builder.RegisterType<ApiLastPurchasePricesRepository>()
-       .As<ILastPurchasePricesRepository>()
-       .SingleInstance();
+               .As<ILastPurchasePricesRepository>()
+               .SingleInstance();
 
         builder.RegisterType<ApiBillsRepository>().As<Mermer.Data.Storage.IRepository<Mermer.Commerce.Models.Bill>>().As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Commerce.Models.Bill>>().As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Commerce.Models.Bill>>().SingleInstance();
 
@@ -171,7 +171,7 @@ public class Setup : MvxWpfSetup
             .SingleInstance();
         builder.RegisterType<ApiExpenseActionsRepository>().As<Mermer.Finance.Spending.Services.IExpenseActionsRepository>().SingleInstance();
 
-        builder.RegisterType<ApiDailyFundsRegisteriesRepository>().As<Mermer.Data.Storage.IRepository<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>().As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>().As<Mermer.Finance.DailyRegistery.Services.IDailyFundsRegisteriesRepository>().As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>().SingleInstance();
+        builder.RegisterType<ApiDailyFundsRegisteriesRepository>().As<Mermer.Data.Storage.IRepository<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>().As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>().As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>().SingleInstance();
         builder.RegisterType<ApiAggregatedReportsRepository>().As<Mermer.Reporting.Services.IAggregatedReportsRepository>().SingleInstance();
         builder.RegisterType<ApiRevenueReportsRepository>().As<Mermer.Reporting.Services.IRevenueReportsRepository>().SingleInstance();
 
@@ -181,7 +181,6 @@ public class Setup : MvxWpfSetup
         builder.RegisterAssemblyTypes(assembly).Where(x => x.Name.EndsWith("Mapper")).AsSelf().InstancePerDependency();
         builder.RegisterModule<AutoMapperModule>();
 
-        // Оставляем только оригинальный источник для локализации
         builder.RegisterSource(new OldLocalizationSource());
 
         var container = builder.Build();

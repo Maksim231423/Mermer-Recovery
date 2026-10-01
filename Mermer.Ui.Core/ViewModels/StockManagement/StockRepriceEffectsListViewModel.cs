@@ -63,10 +63,49 @@ public class StockRepriceEffectsListViewModel : ListViewModelBaseWithFilterDate<
             if (this._selectedWarehouseIds != null && value != null && this._selectedWarehouseIds.SequenceEqual<object>((IEnumerable<object>)value))
                 return;
 
-            if (!this.SetProperty<System.Collections.Generic.List<object>>(ref this._selectedWarehouseIds, value, nameof(SelectedWarehouseIds)) || this.IsBusy)
+            if (!this.SetProperty<System.Collections.Generic.List<object>>(ref this._selectedWarehouseIds, value, nameof(SelectedWarehouseIds)))
                 return;
 
-            this.Initialize();
+            this.RaisePropertyChanged(() => this.WarehouseIds);
+
+            if (!this.IsBusy && this._initialized)
+            {
+                // Принудительно перезагружаем список и обновляем плитки
+                Task.Run(async () =>
+                {
+                    await this.ReloadWithCountersAsync();
+                });
+            }
+        }
+    }
+
+    private async Task ReloadWithCountersAsync()
+    {
+        this.IsBusy = true;
+        try
+        {
+            await this.Initialize();
+
+            // Оповещаем плитки о необходимости запросить Counter заново
+            await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                this.RaisePropertyChanged(() => this.Filters);
+                if (this.Filters != null)
+                {
+                    foreach (var filter in this.Filters)
+                    {
+                        filter.RaisePropertyChanged("Count");
+                    }
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            this.UserInteractionService?.ShowExceptionMessage(ex);
+        }
+        finally
+        {
+            this.IsBusy = false;
         }
     }
 
@@ -74,7 +113,7 @@ public class StockRepriceEffectsListViewModel : ListViewModelBaseWithFilterDate<
     {
         if (SelectedItem != null)
         {
-            // Резерв під деталі
+            
         }
     });
 

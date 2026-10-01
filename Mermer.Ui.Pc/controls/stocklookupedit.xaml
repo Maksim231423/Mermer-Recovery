@@ -10,11 +10,14 @@
                    PreviewKeyDown="PopupBaseEdit_PreviewKeyDown" PopupOpened="PopupBaseEdit_PopupOpened"
                    NullText="{Localize 'Search or enter Barcode'}"
                    Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
-                   IsPopupOpen="{Binding HasResult, Mode=TwoWay}">
+                   IsPopupOpen="{Binding HasResult, Mode=TwoWay}"
+                   ShowNullTextIfFocused="False"
+                   EditValue="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}">
   <dxe:ButtonEdit.Buttons>
     <dxe:ButtonInfo GlyphKind="Refresh" Command="{Binding ReinitializeCommand}"/>
   </dxe:ButtonEdit.Buttons>
   <dxe:PopupBaseEdit.PopupContentTemplate>
+      
     <ControlTemplate>
             <dxg:GridControl MinHeight="300" MaxHeight="550" MinWidth="680" MaxWidth="900" AutoExpandAllGroups="true"
                  ItemsSource="{Binding SearchResult}"

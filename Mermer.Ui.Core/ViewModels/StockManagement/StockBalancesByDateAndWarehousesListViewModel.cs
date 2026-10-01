@@ -82,7 +82,10 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
             if (this._selectedWarehouseIds != null && value != null && this._selectedWarehouseIds.SequenceEqual(value))
                 return;
             this.SetProperty(ref this._selectedWarehouseIds, value, nameof(SelectedWarehouseIds));
+
+            // Генерируем колонки под выбранные склады
             this.GenerateColumns();
+
             if (this.IsBusy) return;
             this.Initialize();
         }
@@ -92,7 +95,14 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
     {
         get
         {
-            return (this.SelectedWarehouseIds != null ? this.SelectedWarehouseIds.Cast<string>() : null) ?? Array.Empty<string>();
+            if (this.SelectedWarehouseIds == null || this.SelectedWarehouseIds.Count == 0)
+                return Array.Empty<string>();
+
+            return this.SelectedWarehouseIds
+                .Select(x => x?.ToString())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
         }
     }
 
@@ -176,23 +186,43 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
 
     private async Task AddLineAsync(string stockId)
     {
-        this.IsBusy = true;
         try
         {
-            var balances = await this._balancesRepository.GetByDateAndWarehousesAsync(this.DateFilterInclusive, this.WarehouseIds, this.DisplayCurrencyId, new[] { stockId });
+            var balances = await this._balancesRepository.GetByDateAndWarehousesAsync(
+                this.DateFilterInclusive,
+                this.WarehouseIds,
+                this.DisplayCurrencyId,
+                new[] { stockId });
 
-            // ИСПРАВЛЕНИЕ: Защита от краша, если сервер вернул пустой массив (например, нет остатков товара)
-            var item = balances.FirstOrDefault();
+            var item = balances?.FirstOrDefault();
             if (item != null)
             {
-                this.List.Add(item);
+                // Защита от NRE в CustomUnboundColumnData
+                if (item.Balances == null)
+                {
+                    item.Balances = new Dictionary<string, decimal>();
+                }
+
+                await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    if (this.List == null)
+                        this.List = new ObservableCollection<StockBalanceByWarehouses>();
+
+                    var existing = this.List.FirstOrDefault(x => x.StockId == item.StockId);
+                    if (existing != null)
+                    {
+                        this.List.Remove(existing);
+                    }
+
+                    this.List.Add(item);
+                    this.SelectedItem = item;
+                });
             }
         }
         catch (Exception ex)
         {
-            this.UserInteractionService.ShowExceptionMessage(ex);
+            this.UserInteractionService?.ShowExceptionMessage(ex);
         }
-        this.IsBusy = false;
     }
 
     public ICommand AddAllStocksCommand => new MvxAsyncCommand(this.OnAddAllStocksCommandAsync, () => !this.IsBusy);
@@ -231,17 +261,31 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
 
     private void OnStockSearcherOnResultSelected(StockSearcher searcher, StockSearchResult result)
     {
-        if (this.SelectedStockIds.Contains(result.Id)) return;
-        this.SelectedStockIds.Add(result.Id);
+        if (result == null || string.IsNullOrEmpty(result.Id)) return;
+
+        if (!this.SelectedStockIds.Contains(result.Id))
+        {
+            this.SelectedStockIds.Add(result.Id);
+        }
+        else
+        {
+            // Если товар уже был в списке, принудительно подгружаем/обновляем строку
+            _ = this.AddLineAsync(result.Id);
+        }
+
+        // Очищаем строку поиска после выбора товара
+        this.StockSearcher.SearchText = string.Empty;
     }
 
     private async void SelectedStockIds_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
     {
-        if (!this.IsBusy && e.NewItems != null)
+        if (e.NewItems != null)
         {
             this.ShowAllStocks = false;
             foreach (string stockId in e.NewItems.Cast<string>())
+            {
                 await this.AddLineAsync(stockId);
+            }
         }
         this.SubCaption = this["By Selected Stocks"];
     }

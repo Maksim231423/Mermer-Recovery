@@ -77,8 +77,8 @@
                         </dxg:GridColumn>
 
                         <!-- Колонки группировки -->
-                        <dxg:GridColumn FieldName="StockGroup" GroupIndex="1" Header="{Localize Group}"/>
-                        <dxg:GridColumn FieldName="StockType" GroupIndex="0" Header="{Localize Type}"/>
+                        <dxg:GridColumn FieldName="StockGroup" GroupIndex="1" Header="{Localize Group}" AllowGrouping="True" ReadOnly="True"/>
+<dxg:GridColumn FieldName="StockType" GroupIndex="0" Header="{Localize Type}" AllowGrouping="True" ReadOnly="True"/>
                     </dxg:GridControlBand>
                     <dxg:GridControlBand Header="{Localize Balance}">
             <dxg:GridColumn FieldName="Income" Width="80" Style="{StaticResource QuantityDisplayFormat}"
@@ -90,7 +90,7 @@
             <dxg:GridColumn FieldName="StockUnit" Header="{Localize Unit}"/>
           </dxg:GridControlBand>
           <dxg:GridControlBand Header="{Localize Total}">
-            <dxg:GridColumn FieldName="StockPrice" Style="{StaticResource AmountDisplayFormat}" Header="{Localize Price}"/>
+            <dxg:GridColumn FieldName="StockPrice" Style="{StaticResource QuantityDisplayFormat}" Header="{Localize Price}"/>
             <dxg:GridColumn FieldName="Total" Style="{StaticResource AmountDisplayFormat}" Header="{Localize Total}"/>
           </dxg:GridControlBand>
         </dxg:GridControl.Bands>

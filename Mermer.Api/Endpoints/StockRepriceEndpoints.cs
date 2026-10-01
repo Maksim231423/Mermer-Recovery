@@ -17,19 +17,11 @@ public static class StockRepriceEndpoints
     {
         var group = app.MapGroup("/api/stock-reprice-effects").WithTags("StockReprice");
 
-        // 1. БЫСТРЫЙ ПОДСЧЕТ КОЛИЧЕСТВА СОБЫТИЙ (БЕЗ ВЫГРУЗКИ ВСЕЙ БАЗЫ В ПАМЯТЬ)
+        // 1. ПОДСЧЕТ КОЛИЧЕСТВА СОБЫТИЙ С УЧЕТОМ СКЛАДА И ОСТАТКОВ
         group.MapGet("/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            var (fUtc, tUtc) = ParseDates(req);
-
-            var priceEventsCount = await db.StockPrices
-                .AsNoTracking()
-                .Where(p => p.ValidFrom >= fUtc && p.ValidFrom <= tUtc)
-                .Select(p => p.ValidFrom)
-                .Distinct()
-                .CountAsync(ct);
-
-            return Results.Ok(priceEventsCount);
+            var effects = await CalculateEffectsAsync(req, db, ct);
+            return Results.Ok(effects.Count);
         });
 
         // 2. ДАТЫ ПЕРЕОЦЕНОК (ТОЧЕЧНАЯ ВЫБОРКА ИЗ ТАБЛИЦЫ ЦЕН И КУРСОВ)
@@ -88,7 +80,7 @@ public static class StockRepriceEndpoints
     private static async Task<List<StockRepriceEffectDto>> CalculateEffectsAsync(HttpRequest req, MermerDbContext db, CancellationToken ct)
     {
         var (fUtc, tUtc) = ParseDates(req);
-        int limit = int.TryParse(req.Query["limit"], out var l) ? Math.Clamp(l, 1, 1000) : 300;
+        
 
         var whIds = req.Query["warehouseId"]
             .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
@@ -290,7 +282,6 @@ public static class StockRepriceEndpoints
 
         return results
             .OrderByDescending(r => r.ChangeDate)
-            .Take(limit)
             .ToList();
     }
 
