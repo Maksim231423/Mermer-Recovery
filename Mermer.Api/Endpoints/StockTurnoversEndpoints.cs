@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Dapper;
@@ -18,80 +19,128 @@ public static class StockTurnoversEndpoints
     public static IEndpointRouteBuilder MapStockTurnoversEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/stock-turnovers").WithTags("StockTurnovers");
+        var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
 
         group.MapGet("/", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             string? warehouseIdStr = req.Query["warehouseId"].FirstOrDefault();
             Guid? warehouseId = Guid.TryParse(warehouseIdStr, out var w) && w != Guid.Empty ? w : null;
-            int limit = int.TryParse(req.Query["limit"], out var l) ? Math.Clamp(l, 1, 1000) : 250;
-            int offset = int.TryParse(req.Query["offset"], out var o) ? Math.Max(0, o) : 0;
 
+            // ТОЧНАЯ ФОРМУЛА COUCHBASE:
+            // Income = приходы
+            // Expense = списания/порча/расход (БЕЗ продаж)
+            // Sold = только продажи
+            // Sellable = Income - Expense (вычисляется в клиенте)
             const string sql = """
                 WITH raw_moves AS (
-                    -- 1. Накладные (Покупки / Продажи / Возвраты)
+                    -- 1. Накладные: Покупки и возвраты от клиентов = Приход
                     SELECT 
                         i.warehouse_id, 
                         il.stock_id,
-                        CASE WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN il.quantity ELSE 0 END AS income,
-                        CASE WHEN i.invoice_type IN ('Sales', 'PurchaseReturn') THEN il.quantity ELSE 0 END AS expense,
-                        CASE WHEN i.invoice_type = 'Sales' THEN il.quantity ELSE 0 END AS sold
+                        il.quantity AS income,
+                        0::numeric AS expense,
+                        0::numeric AS sold
                     FROM invoice_lines il
                     JOIN invoices i ON i.id = il.invoice_id
-                    WHERE i.is_completed = true 
-                      AND i.is_disabled = false
+                    WHERE i.is_completed = true AND i.is_disabled = false
+                      AND i.invoice_type IN ('Purchase', 'SalesReturn')
                       AND (@wh IS NULL OR i.warehouse_id = @wh)
 
                     UNION ALL
 
-                    -- 2. Складские ордера
+                    -- 2. Накладные: Продажи = Sold
+                    SELECT 
+                        i.warehouse_id, 
+                        il.stock_id,
+                        0::numeric AS income,
+                        0::numeric AS expense,
+                        il.quantity AS sold
+                    FROM invoice_lines il
+                    JOIN invoices i ON i.id = il.invoice_id
+                    WHERE i.is_completed = true AND i.is_disabled = false
+                      AND i.invoice_type = 'Sales'
+                      AND (@wh IS NULL OR i.warehouse_id = @wh)
+
+                    UNION ALL
+
+                    -- 3. Накладные: Возврат поставщику = Expense
+                    SELECT 
+                        i.warehouse_id, 
+                        il.stock_id,
+                        0::numeric AS income,
+                        il.quantity AS expense,
+                        0::numeric AS sold
+                    FROM invoice_lines il
+                    JOIN invoices i ON i.id = il.invoice_id
+                    WHERE i.is_completed = true AND i.is_disabled = false
+                      AND i.invoice_type = 'PurchaseReturn'
+                      AND (@wh IS NULL OR i.warehouse_id = @wh)
+
+                    UNION ALL
+
+                    -- 4. Складские ордера: Оприходование и излишки = Income
                     SELECT 
                         ss.warehouse_id, 
                         sl.stock_id,
-                        CASE WHEN ss.slip_type IN ('StockOpening', 'RevisionExceed') THEN sl.quantity ELSE 0 END AS income,
-                        CASE WHEN ss.slip_type NOT IN ('StockOpening', 'RevisionExceed') THEN sl.quantity ELSE 0 END AS expense,
-                        0 AS sold
+                        sl.quantity AS income,
+                        0::numeric AS expense,
+                        0::numeric AS sold
                     FROM stock_slip_lines sl
                     JOIN stock_slips ss ON ss.id = sl.stock_slip_id
                     WHERE ss.is_completed = true
+                      AND ss.slip_type IN ('StockOpening', 'RevisionExceed')
                       AND (@wh IS NULL OR ss.warehouse_id = @wh)
 
                     UNION ALL
 
-                    -- 3. Перемещения (Расход с источника)
+                    -- 5. Складские ордера: Списания, порча, недостачи = Expense
+                    SELECT 
+                        ss.warehouse_id, 
+                        sl.stock_id,
+                        0::numeric AS income,
+                        sl.quantity AS expense,
+                        0::numeric AS sold
+                    FROM stock_slip_lines sl
+                    JOIN stock_slips ss ON ss.id = sl.stock_slip_id
+                    WHERE ss.is_completed = true
+                      AND ss.slip_type NOT IN ('StockOpening', 'RevisionExceed')
+                      AND (@wh IS NULL OR ss.warehouse_id = @wh)
+
+                    UNION ALL
+
+                    -- 6. Перемещения (Расход с источника) = Expense
                     SELECT 
                         st.warehouse_id, 
                         stl.stock_id,
-                        0 AS income,
+                        0::numeric AS income,
                         stl.quantity AS expense,
-                        0 AS sold
+                        0::numeric AS sold
                     FROM stock_transfer_lines stl
                     JOIN stock_transfers st ON st.id = stl.stock_transfer_id
-                    WHERE st.is_completed = true 
-                      AND st.is_disabled = false
+                    WHERE st.is_completed = true AND st.is_disabled = false
                       AND (@wh IS NULL OR st.warehouse_id = @wh)
 
                     UNION ALL
 
-                    -- 4. Перемещения (Приход на получателя)
+                    -- 7. Перемещения (Приход на склад назначения) = Income
                     SELECT 
                         st.destination_warehouse_id AS warehouse_id, 
                         stl.stock_id,
-                        stl.received_quantity AS income,
-                        0 AS expense,
-                        0 AS sold
+                        COALESCE(NULLIF(stl.received_quantity, 0), stl.quantity) AS income,
+                        0::numeric AS expense,
+                        0::numeric AS sold
                     FROM stock_transfer_lines stl
                     JOIN stock_transfers st ON st.id = stl.stock_transfer_id
-                    WHERE st.is_completed = true 
-                      AND st.is_disabled = false
+                    WHERE st.is_completed = true AND st.is_disabled = false
                       AND (@wh IS NULL OR st.destination_warehouse_id = @wh)
                 ),
                 aggregated AS (
                     SELECT 
                         warehouse_id, 
                         stock_id,
-                        SUM(income)::numeric(18,4) AS income,
+                        SUM(income)::numeric(18,4)  AS income,
                         SUM(expense)::numeric(18,4) AS expense,
-                        SUM(sold)::numeric(18,4) AS sold
+                        SUM(sold)::numeric(18,4)    AS sold
                     FROM raw_moves
                     WHERE warehouse_id IS NOT NULL AND stock_id IS NOT NULL
                     GROUP BY warehouse_id, stock_id
@@ -110,18 +159,17 @@ public static class StockTurnoversEndpoints
                     a.sold                  AS "Sold"
                 FROM aggregated a
                 LEFT JOIN stocks s ON s.id = a.stock_id
-                ORDER BY s.name
-                LIMIT @limit OFFSET @offset;
+                ORDER BY s.name;
                 """;
 
             var connStr = db.Database.GetConnectionString();
             await using var conn = new NpgsqlConnection(connStr);
             var result = await conn.QueryAsync<StockTurnoverDataDto>(new CommandDefinition(
                 sql,
-                new { wh = warehouseId, limit, offset },
+                new { wh = warehouseId },
                 cancellationToken: ct));
 
-            return Results.Ok(result);
+            return Results.Json(result, jsonOptions);
         });
 
         return app;

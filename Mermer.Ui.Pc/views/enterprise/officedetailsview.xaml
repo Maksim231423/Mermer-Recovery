@@ -32,15 +32,16 @@
                               IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"/>
               </dxlc:LayoutItem>
               <dxlc:LayoutItem Label="{Localize Region}">
-                <dxe:ComboBoxEdit NullValueButtonPlacement="EditBox" IncrementalFiltering="True" ImmediatePopup="True"
-                                  IsTextEditable="True" EditValue="{Binding Details.Region, UpdateSourceTrigger=PropertyChanged}"
-                                  IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"
-                                  ItemsSource="{Binding RegionNames}">
-                  <dxe:BaseEdit.StyleSettings>
-                    <dxe:ComboBoxStyleSettings/>
-                  </dxe:BaseEdit.StyleSettings>
-                </dxe:ComboBoxEdit>
-              </dxlc:LayoutItem>
+                                <dxe:ComboBoxEdit NullValueButtonPlacement="EditBox" IncrementalFiltering="True" ImmediatePopup="True"
+                  AutoComplete="True"
+                  IsTextEditable="True" EditValue="{Binding Details.Region, UpdateSourceTrigger=PropertyChanged}"
+                  IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"
+                  ItemsSource="{Binding RegionNames}">
+                                    <dxe:BaseEdit.StyleSettings>
+                                        <dxe:ComboBoxStyleSettings/>
+                                    </dxe:BaseEdit.StyleSettings>
+                                </dxe:ComboBoxEdit>
+                            </dxlc:LayoutItem>
               <dxlc:LayoutItem Label="{Localize Tags}">
                 <dxe:ComboBoxEdit NullValueButtonPlacement="EditBox" IncrementalFiltering="True" ImmediatePopup="True"
                                   IsTextEditable="True" EditValue="{Binding Details.Tags, Converter={cnv:TokenConverter}}"

@@ -1,9 +1,11 @@
 ﻿using Mermer.Api.Endpoints;
 using Mermer.Api.Services;
 using Mermer.Data.Postgres;
-using Microsoft.OpenApi.Models;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.OpenApi.Models;
 using Npgsql;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 
 // РАЗРЕШАЕТ Npgsql АВТОМАТИЧЕСКИ ПРЕОБРАЗОВЫВАТЬ DateTime (Local/Unspecified) В UTC
@@ -61,8 +63,10 @@ builder.Services.AddSwaggerGen(options =>
 
 builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(o =>
 {
-    o.SerializerOptions.PropertyNamingPolicy =
-        System.Text.Json.JsonNamingPolicy.CamelCase;
+    o.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+    o.SerializerOptions.PropertyNameCaseInsensitive = true;
+    o.SerializerOptions.Converters.Add(new LocalDateTimeJsonConverter());
+    o.SerializerOptions.Converters.Add(new LocalDateTimeOffsetJsonConverter());
 });
 
 // РЕГИСТРАЦИЯ СЕРВИСОВ СИНХРОНИЗАЦИИ
@@ -164,5 +168,54 @@ app.MapRolesEndpoints();
 app.MapStockOrderTemplatesEndpoints();
 app.MapLicensingEndpoints();
 app.MapReportEndpoints();
+app.MapOfficeEndpoints();
+app.MapWarehouseEndpoints();
+
 
 app.Run();
+
+
+
+
+
+
+
+
+
+
+
+public class LocalDateTimeJsonConverter : JsonConverter<DateTime>
+{
+    public override DateTime Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TryGetDateTime(out var dt))
+        {
+            return DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+        }
+        return DateTime.UtcNow;
+    }
+
+    public override void Write(Utf8JsonWriter writer, DateTime value, JsonSerializerOptions options)
+    {
+        // Переводим дату в локальное системное время перед отдачей клиенту
+        var local = value.Kind == DateTimeKind.Utc ? value.ToLocalTime() : value;
+        writer.WriteStringValue(local.ToString("yyyy-MM-ddTHH:mm:ss"));
+    }
+}
+
+public class LocalDateTimeOffsetJsonConverter : JsonConverter<DateTimeOffset>
+{
+    public override DateTimeOffset Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TryGetDateTimeOffset(out var dto))
+        {
+            return dto.ToUniversalTime();
+        }
+        return DateTimeOffset.UtcNow;
+    }
+
+    public override void Write(Utf8JsonWriter writer, DateTimeOffset value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:sszzz"));
+    }
+}

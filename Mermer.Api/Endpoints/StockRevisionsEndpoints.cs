@@ -19,53 +19,49 @@ public static class StockRevisionsEndpoints
     public static IEndpointRouteBuilder MapStockRevisionsEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/warehousing/revisions").WithTags("StockRevisions");
+        var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
 
-        // 1. СПИСОК ИНВЕНТАРИЗАЦИЙ (С ЛИМИТОМ)
-        group.MapGet("/", async (int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
+        // 1. СПИСОК ИНВЕНТАРИЗАЦИЙ
+        group.MapGet("/", async (DateTime? from, DateTime? till, int? limit, int? offset, bool? includeDisabled, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 500) : 150;
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 10000) : 5000;
             int skip = offset.GetValueOrDefault(0);
 
-            var list = await db.StockRevisions
-                .AsNoTracking()
-                .Where(r => !r.IsDisabled)
+            var query = db.StockRevisions.AsNoTracking();
+
+            if (includeDisabled.HasValue && !includeDisabled.Value)
+            {
+                query = query.Where(r => !r.IsDisabled);
+            }
+            else
+            {
+                query = query.Where(r => !r.IsDisabled);
+            }
+
+            if (from.HasValue && from.Value.Year > 2000)
+            {
+                var startDate = new DateTimeOffset(from.Value.ToUniversalTime());
+                query = query.Where(r => r.Date >= startDate);
+            }
+
+            if (till.HasValue && till.Value.Year < 2099)
+            {
+                var endDate = new DateTimeOffset(till.Value.ToUniversalTime());
+                query = query.Where(r => r.Date <= endDate);
+            }
+
+            var list = await query
                 .OrderByDescending(r => r.Date)
                 .Skip(skip)
                 .Take(take)
                 .ToListAsync(ct);
 
-            return Results.Ok(list.Select(r => new
+            var result = list.Select(r => new
             {
                 Id = r.Id.ToString(),
                 Code = r.Code ?? "",
-                Date = r.Date.UtcDateTime,
-                FinishDate = r.FinishDate?.UtcDateTime,
-                WarehouseId = r.WarehouseId?.ToString(),
-                ExceedSlipId = r.ExceedSlipId?.ToString(),
-                DeficitSlipId = r.DeficitSlipId?.ToString(),
-                UserId = r.UserId?.ToString(),
-                UserName = r.UserName ?? "",
-                IsCompleted = r.IsCompleted,
-                IsDisabled = r.IsDisabled,
-                Group = r.GroupName ?? "",
-                Tags = r.Tags != null ? r.Tags.ToList() : new List<string>(),
-                Description = r.Description ?? ""
-            }));
-        });
-
-        // 2. ПОЛУЧЕНИЕ ПО ID
-        group.MapGet("/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
-        {
-            if (!Guid.TryParse(id, out var guid)) return Results.NotFound();
-            var r = await db.StockRevisions.AsNoTracking().FirstOrDefaultAsync(x => x.Id == guid, ct);
-            if (r == null) return Results.NotFound();
-
-            return Results.Ok(new
-            {
-                Id = r.Id.ToString(),
-                Code = r.Code ?? "",
-                Date = r.Date.UtcDateTime,
-                FinishDate = r.FinishDate?.UtcDateTime,
+                Date = r.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                FinishDate = r.FinishDate.HasValue ? r.FinishDate.Value.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss") : null,
                 WarehouseId = r.WarehouseId?.ToString(),
                 ExceedSlipId = r.ExceedSlipId?.ToString(),
                 DeficitSlipId = r.DeficitSlipId?.ToString(),
@@ -77,30 +73,95 @@ public static class StockRevisionsEndpoints
                 Tags = r.Tags != null ? r.Tags.ToList() : new List<string>(),
                 Description = r.Description ?? ""
             });
+
+            return Results.Json(result, jsonOptions);
         });
 
-        // 3. ПОЛУЧЕНИЕ СТРОК ИНВЕНТАРИЗАЦИИ
+        // 2. СЧЕТЧИК ИНВЕНТАРИЗАЦИЙ
+        group.MapGet("/count", async (DateTime? from, DateTime? till, bool? isCompleted, bool? isDisabled, MermerDbContext db, CancellationToken ct) =>
+        {
+            var query = db.StockRevisions.AsNoTracking();
+
+            if (isDisabled.HasValue)
+            {
+                query = query.Where(r => r.IsDisabled == isDisabled.Value);
+            }
+            else
+            {
+                query = query.Where(r => !r.IsDisabled);
+            }
+
+            if (isCompleted.HasValue)
+            {
+                query = query.Where(r => r.IsCompleted == isCompleted.Value);
+            }
+
+            if (from.HasValue && from.Value.Year > 2000)
+            {
+                var startDate = new DateTimeOffset(from.Value.ToUniversalTime());
+                query = query.Where(r => r.Date >= startDate);
+            }
+
+            if (till.HasValue && till.Value.Year < 2099)
+            {
+                var endDate = new DateTimeOffset(till.Value.ToUniversalTime());
+                query = query.Where(r => r.Date <= endDate);
+            }
+
+            int total = await query.CountAsync(ct);
+            return Results.Json(new { Count = total }, jsonOptions);
+        });
+
+        // 3. ПОЛУЧЕНИЕ ПО ID
+        group.MapGet("/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
+        {
+            if (!Guid.TryParse(id, out var guid)) return Results.NotFound();
+            var r = await db.StockRevisions.AsNoTracking().FirstOrDefaultAsync(x => x.Id == guid, ct);
+            if (r == null) return Results.NotFound();
+
+            return Results.Json(new
+            {
+                Id = r.Id.ToString(),
+                Code = r.Code ?? "",
+                Date = r.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                FinishDate = r.FinishDate.HasValue ? r.FinishDate.Value.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss") : null,
+                WarehouseId = r.WarehouseId?.ToString(),
+                ExceedSlipId = r.ExceedSlipId?.ToString(),
+                DeficitSlipId = r.DeficitSlipId?.ToString(),
+                UserId = r.UserId?.ToString(),
+                UserName = r.UserName ?? "",
+                IsCompleted = r.IsCompleted,
+                IsDisabled = r.IsDisabled,
+                Group = r.GroupName ?? "",
+                Tags = r.Tags != null ? r.Tags.ToList() : new List<string>(),
+                Description = r.Description ?? ""
+            }, jsonOptions);
+        });
+
+        // 4. СТРОКИ ИНВЕНТАРИЗАЦИИ
         group.MapGet("/{id}/lines", async (string id, MermerDbContext db, CancellationToken ct) =>
         {
-            if (!Guid.TryParse(id, out var guid)) return Results.Ok(Array.Empty<object>());
+            if (!Guid.TryParse(id, out var guid)) return Results.Json(Array.Empty<object>(), jsonOptions);
             var lines = await db.StockRevisionLines.AsNoTracking().Where(l => l.StockRevisionId == guid).ToListAsync(ct);
 
-            return Results.Ok(lines.Select(l => new
+            var result = lines.Select(l => new
             {
                 Id = l.Id.ToString(),
                 StockRevisionId = l.StockRevisionId.ToString(),
                 StockId = l.StockId?.ToString(),
-                Date = l.Date.UtcDateTime,
+                Date = l.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
                 Quantity = l.Quantity,
                 UnitId = l.UnitId?.ToString(),
                 Price = l.Price,
                 CurrencyId = l.CurrencyId?.ToString(),
                 UserId = l.UserId?.ToString(),
                 UserName = l.UserName ?? ""
-            }));
+            });
+
+            return Results.Json(result, jsonOptions);
         });
 
-        // 4. ДОБАВЛЕНИЕ/СОХРАНЕНИЕ СТРОКИ
+        // 5. ДОБАВЛЕНИЕ/СОХРАНЕНИЕ СТРОКИ
         group.MapPost("/{id}/lines", async (string id, HttpRequest req, MermerDbContext db) =>
         {
             if (!Guid.TryParse(id, out var revGuid)) return Results.BadRequest("Invalid Revision ID");
@@ -146,10 +207,10 @@ public static class StockRevisionsEndpoints
 
             line.Date = DateTimeOffset.UtcNow;
             await db.SaveChangesAsync();
-            return Results.Ok(new { id = lineId });
+            return Results.Json(new { Id = lineId }, jsonOptions);
         });
 
-        // 5. УДАЛЕНИЕ СТРОКИ
+        // 6. УДАЛЕНИЕ СТРОКИ
         group.MapDelete("/lines/{lineId}", async (string lineId, MermerDbContext db) =>
         {
             if (Guid.TryParse(lineId, out var g))
@@ -164,7 +225,7 @@ public static class StockRevisionsEndpoints
             return Results.Ok();
         });
 
-        // 6. СОХРАНЕНИЕ ШАПКИ ИНВЕНТАРИЗАЦИИ (POST / PUT)
+        // 7. СОХРАНЕНИЕ ШАПКИ ИНВЕНТАРИЗАЦИИ
         Func<HttpRequest, MermerDbContext, Task<IResult>> saveRevisionHandler = async (req, db) =>
         {
             using var reader = new StreamReader(req.Body);
@@ -245,13 +306,13 @@ public static class StockRevisionsEndpoints
             }
 
             await db.SaveChangesAsync();
-            return Results.Ok(new { id = revId, code = existing.Code });
+            return Results.Json(new { Id = revId, Code = existing.Code }, jsonOptions);
         };
 
         group.MapPost("/", saveRevisionHandler);
         group.MapPut("/{id}", saveRevisionHandler);
 
-        // 7. ФАСЕТЫ
+        // 8. ФАСЕТЫ
         group.MapGet("/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
             string? fields = ctx.Request.Query["fields"].ToString();
@@ -259,7 +320,7 @@ public static class StockRevisionsEndpoints
                 ? new[] { "Date", "Group", "Tags" }
                 : fields.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-            var result = new Dictionary<string, Dictionary<string, int>>();
+            var result = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var field in fieldList)
             {
@@ -314,7 +375,7 @@ public static class StockRevisionsEndpoints
                 }
             }
 
-            return Results.Ok(result);
+            return Results.Json(result, jsonOptions);
         });
 
         return app;
@@ -364,20 +425,6 @@ public static class StockRevisionsEndpoints
         return list.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    private static bool TryGetPropCaseInsensitive(JsonElement el, string name, out JsonElement val)
-    {
-        foreach (var p in el.EnumerateObject())
-        {
-            if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
-            {
-                val = p.Value;
-                return true;
-            }
-        }
-        val = default;
-        return false;
-    }
-
     private static string? GetStringProp(JsonElement el, params string[] names)
     {
         foreach (var n in names)
@@ -411,6 +458,20 @@ public static class StockRevisionsEndpoints
                 if (p.ValueKind == JsonValueKind.False) return false;
             }
         }
+        return false;
+    }
+
+    private static bool TryGetPropCaseInsensitive(JsonElement el, string name, out JsonElement val)
+    {
+        foreach (var p in el.EnumerateObject())
+        {
+            if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                val = p.Value;
+                return true;
+            }
+        }
+        val = default;
         return false;
     }
     #endregion

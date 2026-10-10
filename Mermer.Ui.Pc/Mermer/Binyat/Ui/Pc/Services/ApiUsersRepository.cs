@@ -150,6 +150,9 @@ public class ApiUsersRepository : IRepository<User>
 
         LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
 
+        // Мгновенно обновляем реестр пользователей в интерфейсе
+        UiEventBus.NotifyDocumentModified<User>(model.Id);
+
         _ = Task.Run(async () =>
         {
             try
@@ -159,6 +162,7 @@ public class ApiUsersRepository : IRepository<User>
                 else await _restClient.PutAsync($"/api/users/{model.Id}", payload);
 
                 LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
+                UiEventBus.NotifyDocumentModified<User>(model.Id);
             }
             catch (Exception ex)
             {
@@ -176,6 +180,9 @@ public class ApiUsersRepository : IRepository<User>
         {
             _usersCache?.RemoveAll(x => x.Id == id);
         }
+
+        // Мгновенно удаляем пользователя из списка
+        UiEventBus.NotifyDocumentModified<User>(id);
 
         _ = Task.Run(async () =>
         {

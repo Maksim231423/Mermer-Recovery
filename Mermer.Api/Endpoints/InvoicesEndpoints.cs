@@ -41,7 +41,7 @@ public static class InvoicesEndpoints
                 Code = i.Code,
                 Type = (int)i.InvoiceType, // Числовой enum предотвращает сбой десериализации
                 InvoiceType = (int)i.InvoiceType,
-                Date = i.Date,
+                Date = i.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО НА LOCAL TIME
                 UserId = i.UserId,
                 UserName = i.UserName,
                 IsCash = true,
@@ -122,7 +122,11 @@ public static class InvoicesEndpoints
         group.MapGet("/{id}", async (string id, IInvoicesRepository repo, CancellationToken ct) =>
         {
             var inv = await repo.GetAsync(id, ct);
-            return inv is null ? Results.NotFound() : Results.Json(inv, jsonOptions);
+            if (inv is null) return Results.NotFound();
+
+            // Приводим дату к Local Time перед возвратом
+            inv.Date = inv.Date.ToLocalTime();
+            return Results.Json(inv, jsonOptions);
         })
         .WithName("InvoicesGetById");
 
@@ -153,6 +157,9 @@ public static class InvoicesEndpoints
                 pgInvoice.Tags = extractedTags;
             }
 
+            // Обеспечиваем UTC при сохранении в базу
+            pgInvoice.Date = EnsureUtc(pgInvoice.Date);
+
             var existing = await repo.GetAsync(pgInvoice.Id, ct);
 
             try
@@ -160,17 +167,17 @@ public static class InvoicesEndpoints
                 if (existing == null)
                 {
                     await repo.CreateAsync(pgInvoice, ct);
-                    return Results.Created($"/api/invoices/{pgInvoice.Id}", pgInvoice);
                 }
                 else
                 {
                     await repo.UpdateAsync(pgInvoice, ct);
-                    return Results.Json(pgInvoice, jsonOptions);
                 }
+
+                return Results.Json(pgInvoice, jsonOptions);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[Invoice Save Error]: {ex}");
+                System.Console.WriteLine($"[Invoice Save Error]: {ex}");
                 return Results.Problem(ex.Message);
             }
         };

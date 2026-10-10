@@ -81,6 +81,10 @@ public class Setup : MvxWpfSetup
                         && !t.Name.EndsWith("View")
                         && !t.Name.EndsWith("Setup")
                         && !IsMvxSingletonDeep(t)
+                        && t.Name != "OfficesRepository"
+                        && t.Name != "WarehousesRepository"
+                        && t.Name != "DepositoriesRepository" // <--- ДОБАВЬТЕ ЭТУ СТРОКУ
+                        && t.Name != "DailyFundsRegisteriesRepository"
                         && !t.Name.Contains("Couch")
                         && !t.Name.Contains("Cluster")
                         && !t.Name.Contains("DocumentChangeListener"))
@@ -123,8 +127,29 @@ public class Setup : MvxWpfSetup
         builder.RegisterType<ApiPartnerCodeGenerator>().As<Mermer.CRM.Services.IPartnerCodeGenerationService>().SingleInstance();
         builder.RegisterType<ApiStockCodeGenerator>().As<Mermer.StockManagement.Services.IStockCodeGenerationService>().SingleInstance();
 
-        builder.RegisterType<ApiWarehousesRepository>().As<Mermer.Data.Storage.IRepository<Mermer.Enterprise.Models.Warehouse>>().As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Enterprise.Models.Warehouse>>().SingleInstance();
-        builder.RegisterType<ApiOfficesRepository>().As<Mermer.Data.Storage.IRepository<Mermer.Enterprise.Models.Office>>().As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Enterprise.Models.Office>>().SingleInstance();
+        builder.RegisterType<SafeAuthorizationService>()
+       .As<Mermer.Authorization.Services.IAuthorizationService>()
+       .SingleInstance();
+
+        builder.RegisterType<ApiWarehousesRepository>()
+       .As<Mermer.Data.Storage.IRepository<Mermer.Enterprise.Models.Warehouse>>()
+       .As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Enterprise.Models.Warehouse>>()
+       .As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Enterprise.Models.Warehouse>>()
+       .AsSelf()
+       .SingleInstance();
+
+        builder.RegisterType<ApiOfficesRepository>()
+               .As<Mermer.Data.Storage.IRepository<Mermer.Enterprise.Models.Office>>()
+               .As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Enterprise.Models.Office>>()
+               .As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Enterprise.Models.Office>>()
+               .AsSelf()
+               .SingleInstance();
+
+        builder.RegisterType<Mermer.Ui.Core.ViewModels.Enterprise.OfficeDetailsViewModel>()
+               .As<Mermer.Mvvm.ViewModels.DetailsViewModel<Mermer.Enterprise.Models.Office>>()
+               .AsSelf()
+               .InstancePerDependency();
+
         builder.RegisterType<ApiCurrenciesRepository>().As<Mermer.Data.Storage.IRepository<Mermer.FundsManagement.Models.Currency>>().As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.FundsManagement.Models.Currency>>().SingleInstance();
         builder.RegisterType<ApiDepositoriesRepository>().As<Mermer.Data.Storage.IRepository<Mermer.Enterprise.Models.Depository>>().As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Enterprise.Models.Depository>>().As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Enterprise.Models.Depository>>().SingleInstance();
 
@@ -171,7 +196,13 @@ public class Setup : MvxWpfSetup
             .SingleInstance();
         builder.RegisterType<ApiExpenseActionsRepository>().As<Mermer.Finance.Spending.Services.IExpenseActionsRepository>().SingleInstance();
 
-        builder.RegisterType<ApiDailyFundsRegisteriesRepository>().As<Mermer.Data.Storage.IRepository<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>().As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>().As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>().SingleInstance();
+        builder.RegisterType<ApiDailyFundsRegisteriesRepository>()
+                    .As<Mermer.Finance.DailyRegistery.Services.IDailyFundsRegisteriesRepository>() // <--- ДОБАВИТЬ ЭТОТ ИНТЕРФЕЙС
+                    .As<Mermer.Data.Storage.IRepository<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>()
+                    .As<Mermer.Data.Storage.IReadOnlyRepository<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>()
+                    .As<Mermer.Data.Storage.IRepositoryWithFacets<Mermer.Finance.DailyRegistery.Models.DailyFundsRegistery>>()
+                    .AsSelf()
+                    .SingleInstance();
         builder.RegisterType<ApiAggregatedReportsRepository>().As<Mermer.Reporting.Services.IAggregatedReportsRepository>().SingleInstance();
         builder.RegisterType<ApiRevenueReportsRepository>().As<Mermer.Reporting.Services.IRevenueReportsRepository>().SingleInstance();
 
@@ -300,5 +331,148 @@ public class DummyInterceptor : IInterceptor
             invocation.ReturnValue = Activator.CreateInstance(invocation.Method.ReturnType);
         else
             invocation.ReturnValue = null;
+    }
+}
+
+public class SafeAuthorizationService : Mermer.Authorization.Services.IAuthorizationService
+{
+    private readonly Mermer.Authorization.Services.ILoginService _loginService;
+
+    public SafeAuthorizationService(Mermer.Authorization.Services.ILoginService loginService)
+    {
+        _loginService = loginService;
+    }
+
+    private bool IsDenied(string action, int accessLevel)
+    {
+        var session = _loginService.Session;
+        if (session == null || session.IsAdmin) return false;
+        if (string.IsNullOrEmpty(action)) return false;
+
+        if (session.Roles != null)
+        {
+            // 1. Точное совпадение ключа действия в словаре прав роли
+            if (session.Roles.TryGetValue(action, out int val))
+            {
+                // Если в роли стоит 0 — значит раздел полностью ЗАПРЕЩЕН
+                if (val == 0) return true;
+
+                // Если требуется конкретный уровень доступа (например Create = 2, Delete = 4),
+                // а у пользователя только Read = 1
+                if (accessLevel > 0 && (val & accessLevel) == 0)
+                    return true;
+            }
+
+            // 2. Если проверяется доступ к складам (Warehouses / Warehousing / Stock)
+            if (action.IndexOf("Warehouse", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                // Ищем в словаре прав роли ключ, отвечающий за склады
+                var whKey = session.Roles.Keys.FirstOrDefault(k => k.IndexOf("Warehouse", StringComparison.OrdinalIgnoreCase) >= 0);
+                if (whKey != null && session.Roles.TryGetValue(whKey, out int whVal))
+                {
+                    if (whVal == 0 || (accessLevel > 0 && (whVal & accessLevel) == 0))
+                        return true;
+                }
+            }
+        }
+
+        // По умолчанию для всех не запрещенных действий — доступ разрешен
+        return false;
+    }
+
+    public void AuthorizeAction(string action, int accessLevel)
+    {
+        var session = _loginService.Session;
+        if (session == null || session.IsAdmin) return;
+
+        if (IsDenied(action, accessLevel))
+        {
+            // Бросаем исключение ТОЛЬКО для реально запрещенных разделов!
+            throw new Mermer.Common.Exceptions.AuthorizationFailedException($"Доступ к разделу '{action}' запрещен настройками роли.");
+        }
+    }
+
+    public void AuthorizeAction(Enum action, Enum accessLevel)
+    {
+        AuthorizeAction(action?.ToString() ?? string.Empty, Convert.ToInt32(accessLevel));
+    }
+
+    public IEnumerable<string> FilterAvailableActions(int accessLevel, params string[] actions)
+    {
+        var session = _loginService.Session;
+        if (session == null || session.IsAdmin)
+            return actions ?? Enumerable.Empty<string>();
+
+        return (actions ?? Enumerable.Empty<string>())
+            .Where(a => !IsDenied(a, accessLevel));
+    }
+
+    public void AuthorizeAccountAccess(Mermer.Authorization.Enums.AccountAccessLevel accessLevel, params string[] accountIds)
+    {
+    }
+
+    public IEnumerable<string> GetAccessableAccounts(Mermer.Authorization.Enums.AccountAccessLevel accessLevel)
+    {
+        return Enumerable.Empty<string>();
+    }
+}
+
+public class SafeAuthorizerInterceptor : IInterceptor
+{
+    private readonly Mermer.Authorization.Services.ILoginService _loginService;
+
+    public SafeAuthorizerInterceptor(Mermer.Authorization.Services.ILoginService loginService)
+    {
+        _loginService = loginService;
+    }
+
+    public void Intercept(IInvocation invocation)
+    {
+        var session = _loginService.Session;
+
+        // Если метод CanCreate, CanUpdate или CanRead
+        if (invocation.Method.Name.StartsWith("Can") && invocation.Method.ReturnType == typeof(bool))
+        {
+            if (session != null && session.IsAdmin)
+            {
+                invocation.ReturnValue = true;
+                return;
+            }
+
+            // Проверяем имя сущности/модуля (например Warehouses)
+            string entityName = invocation.TargetType?.GenericTypeArguments?.FirstOrDefault()?.Name ?? string.Empty;
+            if (!string.IsNullOrEmpty(entityName) && session?.Roles != null)
+            {
+                var key = session.Roles.Keys.FirstOrDefault(k => k.IndexOf(entityName, StringComparison.OrdinalIgnoreCase) >= 0);
+                if (key != null && session.Roles[key] == 0)
+                {
+                    invocation.ReturnValue = false; // Тихо отключаем кнопку без throw
+                    return;
+                }
+            }
+
+            invocation.ReturnValue = true;
+            return;
+        }
+
+        // Если метод Authorize... при открытии запрещенного окна — выбрасываем исключение
+        if (invocation.Method.Name.StartsWith("Authorize"))
+        {
+            if (session != null && !session.IsAdmin && session.Roles != null)
+            {
+                string entityName = invocation.TargetType?.GenericTypeArguments?.FirstOrDefault()?.Name ?? string.Empty;
+                if (!string.IsNullOrEmpty(entityName))
+                {
+                    var key = session.Roles.Keys.FirstOrDefault(k => k.IndexOf(entityName, StringComparison.OrdinalIgnoreCase) >= 0);
+                    if (key != null && session.Roles[key] == 0)
+                    {
+                        throw new Mermer.Common.Exceptions.AuthorizationFailedException($"Доступ к разделу {entityName} запрещен.");
+                    }
+                }
+            }
+            return;
+        }
+
+        invocation.Proceed();
     }
 }

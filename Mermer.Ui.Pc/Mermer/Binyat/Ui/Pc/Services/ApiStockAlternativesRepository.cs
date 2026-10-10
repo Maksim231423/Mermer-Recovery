@@ -134,12 +134,16 @@ namespace Mermer.Ui.Pc.Services
 
             LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
 
+            // Мгновенно обновляем список аналогов товаров
+            UiEventBus.NotifyDocumentModified<StockAlternative>(entity.Id);
+
             _ = Task.Run(async () =>
             {
                 try
                 {
                     await _restClient.PostAsync("/api/stock-management/alternatives", entity);
                     LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
+                    UiEventBus.NotifyDocumentModified<StockAlternative>(entity.Id);
                 }
                 catch { }
             });
@@ -154,6 +158,9 @@ namespace Mermer.Ui.Pc.Services
             {
                 _memoryCache?.RemoveAll(x => x.Id == id);
             }
+
+            // Мгновенно удаляем аналог из UI
+            UiEventBus.NotifyDocumentModified<StockAlternative>(id);
 
             _ = Task.Run(async () =>
             {

@@ -61,32 +61,46 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
         return result;
     }
 
-    // --- БЫСТРАЯ ФИЛЬТРАЦИЯ ПО ДАТАМ (ПРЯМОЙ СРЕЗ С СЕРВЕРА) ---
+    // --- ИСПРАВЛЕННАЯ ФИЛЬТРАЦИЯ С УЧЕТОМ КОНФЛИКТОВ ---
     public async Task<IEnumerable<FundsTransfer>> GetAsync(params Expression<Func<FundsTransfer, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
+        bool isConflictedFilter = HasConflictedPredicate(predicates);
 
-        if (hasDates)
+        try
         {
-            try
+            string url = "/api/finance/transfers";
+            var queryParams = new List<string>();
+
+            if (hasDates)
             {
                 var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
                 var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-
-                var remoteSlice = await _restClient.GetAsync<List<FundsTransfer>>($"/api/finance/transfers?from={fromStr}&till={tillStr}");
-                if (remoteSlice != null)
-                {
-                    var query = remoteSlice.AsQueryable();
-                    if (predicates != null)
-                    {
-                        foreach (var p in predicates.Where(x => x != null)) query = query.Where(p);
-                    }
-                    return query.ToList();
-                }
+                queryParams.Add($"from={fromStr}&till={tillStr}");
             }
-            catch { }
-        }
 
+            if (isConflictedFilter)
+            {
+                queryParams.Add("conflicted=true");
+            }
+
+            queryParams.Add("limit=5000");
+            url += "?" + string.Join("&", queryParams);
+
+            var remoteSlice = await _restClient.GetAsync<List<FundsTransfer>>(url);
+            if (remoteSlice != null)
+            {
+                var query = remoteSlice.AsQueryable();
+                if (predicates != null)
+                {
+                    foreach (var p in predicates.Where(x => x != null)) query = query.Where(p);
+                }
+                return query.ToList();
+            }
+        }
+        catch { }
+
+        // Fallback (если сервер недоступен)
         var all = await GetAllAsync();
         var fallbackQuery = all.AsQueryable();
         if (predicates != null)
@@ -99,22 +113,51 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
     public async Task<int> CountAsync(params Expression<Func<FundsTransfer, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
+        bool isConflictedFilter = HasConflictedPredicate(predicates);
 
-        if (hasDates)
+        try
         {
-            try
+            string url = "/api/finance/transfers/count";
+            var queryParams = new List<string>();
+
+            if (hasDates)
             {
                 var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
                 var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-
-                var res = await _restClient.GetAsync<CountResponse>($"/api/finance/transfers/count?from={fromStr}&till={tillStr}");
-                if (res != null) return res.Count;
+                queryParams.Add($"from={fromStr}&till={tillStr}");
             }
-            catch { }
+
+            if (isConflictedFilter)
+            {
+                queryParams.Add("conflicted=true");
+            }
+
+            if (queryParams.Any())
+            {
+                url += "?" + string.Join("&", queryParams);
+            }
+
+            var res = await _restClient.GetAsync<CountResponse>(url);
+            if (res != null) return res.Count;
         }
+        catch { }
 
         var items = await GetAsync(predicates);
         return items.Count();
+    }
+
+    private static bool HasConflictedPredicate(Expression<Func<FundsTransfer, bool>>[] predicates)
+    {
+        if (predicates == null || predicates.Length == 0) return false;
+
+        foreach (var pred in predicates.Where(p => p != null))
+        {
+            var text = pred.ToString();
+            if (text.IndexOf("IsConflicted", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        }
+
+        return false;
     }
 
     public async Task<IEnumerable<FundsTransfer>> GetAllAsync()
@@ -122,14 +165,34 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
         if (_cardCache.Count > 0)
             return _cardCache.Values.ToList();
 
+        // 1. Читаем из локального SQLite
         var local = LocalSqliteCache.GetAllDocuments<FundsTransfer>(DocType);
-        if (local != null)
+        if (local != null && local.Any())
         {
             foreach (var item in local)
             {
                 if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
             }
+            return _cardCache.Values.ToList();
         }
+
+        // 2. Если кэш пуст — подгружаем с сервера
+        try
+        {
+            var remote = await _restClient.GetAsync<List<FundsTransfer>>("/api/finance/transfers?limit=5000");
+            if (remote != null)
+            {
+                foreach (var item in remote)
+                {
+                    if (!string.IsNullOrEmpty(item?.Id))
+                    {
+                        _cardCache[item.Id] = item;
+                        LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
+                    }
+                }
+            }
+        }
+        catch { }
 
         return _cardCache.Values.ToList();
     }
@@ -147,6 +210,11 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
         _cardCache[model.Id] = model;
         LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
 
+        // Инвалидируем кэш, чтобы при следующем запросе список подгрузился заново с сервера
+        _cardCache.Clear();
+
+        UiEventBus.NotifyDocumentModified<FundsTransfer>(model.Id);
+
         _ = Task.Run(async () =>
         {
             try
@@ -157,6 +225,8 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
                     await _restClient.PutAsync($"/api/finance/transfers/{model.Id}", model);
 
                 LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
+                _cardCache.Clear(); // Очищаем кэш повторно после успешного ответа сервера
+                UiEventBus.NotifyDocumentModified<FundsTransfer>(model.Id);
             }
             catch (Exception ex)
             {
@@ -169,6 +239,9 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
     {
         if (string.IsNullOrEmpty(id)) return;
         _cardCache.TryRemove(id, out _);
+
+        // Мгновенное удаление перемещения средств из списка
+        UiEventBus.NotifyDocumentModified<FundsTransfer>(id);
 
         _ = Task.Run(async () =>
         {

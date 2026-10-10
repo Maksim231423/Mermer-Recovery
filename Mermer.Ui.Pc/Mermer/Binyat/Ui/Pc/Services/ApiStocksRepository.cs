@@ -5,6 +5,7 @@ using System.Linq;
 using System.Linq.Expressions;
 using System.Threading.Tasks;
 using Mermer.Data.Storage;
+using Mermer.FundsManagement.Models;
 using Mermer.Http;
 using Mermer.StockManagement.Models;
 using Mermer.StockManagement.Services;
@@ -14,15 +15,17 @@ namespace Mermer.Ui.Pc.Services;
 public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock>, IRepositoryWithFacets<Stock>, IStocksRepository
 {
     private readonly RestClient _restClient;
+    private readonly IRepository<Currency> _currenciesRepository;
     private const string DocType = "Stock";
 
     private static readonly ConcurrentDictionary<string, Stock> _cardCache = new(StringComparer.OrdinalIgnoreCase);
     private static List<Stock> _memoryCache;
     private static readonly object _syncLock = new();
 
-    public ApiStocksRepository(RestClient restClient)
+    public ApiStocksRepository(RestClient restClient, IRepository<Currency> currenciesRepository)
     {
         _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
+        _currenciesRepository = currenciesRepository;
     }
 
     public async Task<IEnumerable<Stock>> GetAllAsync()
@@ -33,9 +36,9 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
                 return _memoryCache;
         }
 
-        // 1. Быстрое чтение из локального SQLite (не отсекаем IsDisabled, чтобы работали стили зачеркивания)
-        var local = LocalSqliteCache.GetAllDocuments<Stock>(DocType)?.ToList() ?? new List<Stock>();
-        if (local.Any())
+        var local = LocalSqliteCache.GetAllDocuments<Stock>(DocType)?.ToList();
+
+        if (local != null && local.Count > 0 && !local.All(x => string.IsNullOrEmpty(x.Code)))
         {
             lock (_syncLock)
             {
@@ -45,34 +48,50 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
                     if (!string.IsNullOrEmpty(s?.Id)) _cardCache[s.Id] = s;
                 }
             }
+            return _memoryCache;
         }
 
-        // 2. Если кэш пуст — подгружаем с бэкенда
-        if (_memoryCache == null || _memoryCache.Count == 0)
+        return await ReloadFromServerAsync();
+    }
+
+    public async Task<IEnumerable<Stock>> ReloadFromServerAsync()
+    {
+        try
         {
-            try
+            var remote = await _restClient.GetAsync<List<Stock>>("/api/stocks?limit=10000");
+            if (remote != null && remote.Any())
             {
-                var remote = await _restClient.GetAsync<List<Stock>>("/api/stocks?limit=10000");
-                if (remote != null && remote.Any())
+                lock (_syncLock)
                 {
-                    lock (_syncLock)
+                    _memoryCache = remote.OrderBy(s => s.Name).ToList();
+                    foreach (var s in _memoryCache)
                     {
-                        _memoryCache = remote.OrderBy(s => s.Name).ToList();
-                        foreach (var s in _memoryCache)
-                        {
-                            if (!string.IsNullOrEmpty(s?.Id))
-                            {
-                                _cardCache[s.Id] = s;
-                                LocalSqliteCache.SaveDocument(DocType, s.Id, s, isSynced: true);
-                            }
-                        }
+                        if (!string.IsNullOrEmpty(s?.Id)) _cardCache[s.Id] = s;
                     }
                 }
+
+                // Фоновое сохранение без блокировки UI-потока
+                _ = Task.Run(() =>
+                {
+                    foreach (var s in remote)
+                    {
+                        if (!string.IsNullOrEmpty(s?.Id))
+                            LocalSqliteCache.SaveDocument(DocType, s.Id, s, isSynced: true);
+                    }
+                });
+
+                return _memoryCache;
             }
-            catch { }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[STOCK RELOAD ERROR]: {ex.Message}");
         }
 
-        return _memoryCache ?? Enumerable.Empty<Stock>();
+        lock (_syncLock)
+        {
+            return _memoryCache ?? Enumerable.Empty<Stock>();
+        }
     }
 
     public async Task<Stock> GetAsync(string id)
@@ -152,6 +171,7 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
         }
 
         LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
+        UiEventBus.NotifyDocumentModified<Stock>(entity.Id);
 
         _ = Task.Run(async () =>
         {
@@ -160,6 +180,7 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
                 if (isNew) await _restClient.PostAsync("/api/stocks", entity);
                 else await _restClient.PutAsync($"/api/stocks/{entity.Id}", entity);
                 LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
+                UiEventBus.NotifyDocumentModified<Stock>(entity.Id);
             }
             catch (Exception ex)
             {
@@ -177,6 +198,8 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
         {
             _memoryCache?.RemoveAll(x => x.Id == id);
         }
+
+        UiEventBus.NotifyDocumentModified<Stock>(id);
 
         _ = Task.Run(async () =>
         {
@@ -203,7 +226,6 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
         }
         catch { }
 
-        // Fallback для PriceGroupNames
         if (result.ContainsKey("PriceGroupNames") && result["PriceGroupNames"].Count == 0)
         {
             var all = await GetAllAsync();
@@ -242,15 +264,71 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
         }).ToList();
     }
 
+    // --- ПЕРЕСЧЕТ ЦЕН ПО КУРСУ ДЛЯ СПИСКА ТОВАРОВ ---
     public async Task<IEnumerable<StockInfo>> GetInfoAsync(string additionalPriceCurrencyId, string additionalPriceGroup)
     {
+        // 1. Автоматически в фоне отправляем зависшие несохранённые товары на сервер
+        _ = Task.Run(async () => await SyncPendingDocumentsAsync());
+
         var all = await GetAllAsync();
+        // Загружаем список валют для конвертации курсов
+        Dictionary<string, Currency> currenciesMap = new(StringComparer.OrdinalIgnoreCase);
+        if (_currenciesRepository != null)
+        {
+            try
+            {
+                var curList = await _currenciesRepository.GetAsync();
+                if (curList != null)
+                {
+                    foreach (var c in curList)
+                    {
+                        if (!string.IsNullOrEmpty(c?.Id)) currenciesMap[c.Id] = c;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // Если через репозиторий список не пришел, берем из локального SQLite кэша
+        if (!currenciesMap.Any())
+        {
+            var cachedCurrencies = LocalSqliteCache.GetAllDocuments<Currency>("Currency");
+            if (cachedCurrencies != null)
+            {
+                foreach (var c in cachedCurrencies)
+                {
+                    if (!string.IsNullOrEmpty(c?.Id)) currenciesMap[c.Id] = c;
+                }
+            }
+        }
+
+        // ЕСЛИ И В SQLITE ПУСТО (первый запуск инсталлятора) — ДЕЛАЕМ ПРЯМОЙ ЗАПРОС К API
+        if (!currenciesMap.Any())
+        {
+            try
+            {
+                var directList = await _restClient.GetAsync<List<Currency>>("/api/currencies");
+                if (directList != null && directList.Any())
+                {
+                    foreach (var c in directList)
+                    {
+                        if (!string.IsNullOrEmpty(c?.Id))
+                        {
+                            currenciesMap[c.Id] = c;
+                            LocalSqliteCache.SaveDocument("Currency", c.Id, c, isSynced: true);
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
 
         return all.Select(stock =>
         {
             decimal addPrice = 0m;
             string addPriceCurrency = null;
 
+            // 1. Если выбрана конкретная группа цен (Price Group)
             if (!string.IsNullOrEmpty(additionalPriceGroup) && stock.AdditionalPrices != null && stock.AdditionalPrices.Any())
             {
                 var matched = stock.AdditionalPrices
@@ -265,9 +343,20 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
                 }
             }
 
-            if (addPrice == 0m && !string.IsNullOrEmpty(additionalPriceCurrencyId))
+            // 2. Если группа не задана (или для неё нет цены), отталкиваемся от базовой цены товара
+            if (addPrice == 0m)
             {
                 addPrice = stock.Price;
+                addPriceCurrency = stock.CurrencyId;
+            }
+
+            // 3. КОНВЕРТАЦИЯ В ВЫБРАННУЮ ЦЕЛЕВУЮ ВАЛЮТУ (например, USD -> YUAN)
+            if (!string.IsNullOrEmpty(additionalPriceCurrencyId))
+            {
+                if (!string.IsNullOrEmpty(addPriceCurrency) && !string.Equals(addPriceCurrency, additionalPriceCurrencyId, StringComparison.OrdinalIgnoreCase))
+                {
+                    addPrice = ConvertPrice(addPrice, addPriceCurrency, additionalPriceCurrencyId, currenciesMap);
+                }
                 addPriceCurrency = additionalPriceCurrencyId;
             }
 
@@ -291,6 +380,66 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
         }).ToList();
     }
 
+    public async Task SyncPendingDocumentsAsync()
+    {
+        try
+        {
+            // Получаем кортежи (string id, Stock entity) со статусом is_synced = 0
+            var unsynced = LocalSqliteCache.GetUnsyncedDocuments<Stock>(DocType);
+            if (unsynced == null) return;
+
+            foreach (var tuple in unsynced)
+            {
+                var stock = tuple.entity;
+                var stockId = tuple.id ?? stock?.Id;
+                if (stock == null) continue;
+
+                try
+                {
+                    await _restClient.PostAsync("/api/stocks", stock);
+                    LocalSqliteCache.SaveDocument(DocType, stockId, stock, isSynced: true);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[AUTO-SYNC ERROR for {stock.Code}]: {ex.Message}");
+                }
+            }
+        }
+        catch { }
+    }
+
+    private static decimal ConvertPrice(decimal amount, string fromCurId, string toCurId, Dictionary<string, Currency> curMap)
+    {
+        if (amount <= 0 || string.IsNullOrEmpty(fromCurId) || string.IsNullOrEmpty(toCurId) || fromCurId == toCurId)
+            return amount;
+
+        if (!curMap.TryGetValue(fromCurId, out var fromCur) || !curMap.TryGetValue(toCurId, out var toCur))
+            return amount;
+
+        // Исходный курс (Multiplier / Divider)
+        var fromRate = fromCur.Rates?.OrderByDescending(r => r.ValidFrom).FirstOrDefault();
+        decimal fromMult = fromRate?.Multiplier ?? 1m;
+        decimal fromDiv = fromRate?.Divider ?? 1m;
+        if (fromDiv == 0m) fromDiv = 1m;
+        if (fromMult == 0m) fromMult = 1m;
+
+        // Переводим в базовую системную валюту
+        decimal baseAmount = amount * (fromMult / fromDiv);
+
+        // Целевой курс
+        var toRate = toCur.Rates?.OrderByDescending(r => r.ValidFrom).FirstOrDefault();
+        decimal toMult = toRate?.Multiplier ?? 1m;
+        decimal toDiv = toRate?.Divider ?? 1m;
+        if (toDiv == 0m) toDiv = 1m;
+        if (toMult == 0m) toMult = 1m;
+
+        // Переводим из базовой валюты в целевую
+        decimal converted = baseAmount * (toDiv / toMult);
+
+        int decimals = toCur.Decimals > 0 ? toCur.Decimals : 4;
+        return Math.Round(converted, decimals, MidpointRounding.AwayFromZero);
+    }
+
     public async Task MergeAsync(string mainStockId, string[] mergeStockIds, bool disableMergedItems)
     {
         if (string.IsNullOrEmpty(mainStockId) || mergeStockIds == null || !mergeStockIds.Any()) return;
@@ -304,12 +453,10 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
                 DisableMergedItems = disableMergedItems
             };
 
-            // 1. Отправляем запрос на сервер
             await _restClient.PostAsync("/api/stocks/merge", payload);
 
             var mergeSet = new HashSet<string>(mergeStockIds, StringComparer.OrdinalIgnoreCase);
 
-            // 2. Мгновенно обновляем флаг в оперативной памяти и локальном SQLite
             lock (_syncLock)
             {
                 if (_memoryCache != null)
@@ -331,7 +478,6 @@ public class ApiStocksRepository : IRepository<Stock>, IReadOnlyRepository<Stock
                 }
             }
 
-            // 3. Сбрасываем кэш в фоне, не блокируя UI
             _ = Task.Run(async () =>
             {
                 try

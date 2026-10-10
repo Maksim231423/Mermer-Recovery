@@ -167,12 +167,16 @@ public class ApiStockSlipsRepository : IRepository<StockSlip>, IReadOnlyReposito
         _cardCache[entity.Id] = entity;
         LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
 
+        // Мгновенно обновляем складские ордера (приход/расход/списание)
+        UiEventBus.NotifyDocumentModified<StockSlip>(entity.Id);
+
         _ = Task.Run(async () =>
         {
             try
             {
                 await _restClient.PostAsync("/api/catalog/slips", entity);
                 LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
+                UiEventBus.NotifyDocumentModified<StockSlip>(entity.Id);
             }
             catch { }
         });
@@ -182,6 +186,9 @@ public class ApiStockSlipsRepository : IRepository<StockSlip>, IReadOnlyReposito
     {
         if (string.IsNullOrEmpty(id)) return;
         _cardCache.TryRemove(id, out _);
+
+        // Мгновенно удаляем складской ордер из UI
+        UiEventBus.NotifyDocumentModified<StockSlip>(id);
 
         _ = Task.Run(async () =>
         {

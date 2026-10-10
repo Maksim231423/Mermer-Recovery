@@ -13,11 +13,13 @@ using Mermer.Mvvm.Services;
 using Mermer.Mvvm.ViewModels;
 using Mermer.Ui.Core.Helpers;
 using MvvmCross.Core.Navigation;
+using MvvmCross.Core.ViewModels;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using System.Windows.Input;
 
 #nullable disable
 namespace Mermer.Ui.Core.ViewModels.CRM;
@@ -67,6 +69,31 @@ public class PartnerDetailsViewModel : DetailsViewModel<Partner>
   {
     return Task.WhenAll(base.PreLoad(), this.LoadFacetsAsync(), this.Currencies.Initialize());
   }
+
+    private ICommand _reloadCommand;
+    public new ICommand ReloadCommand => _reloadCommand ??= new MvxAsyncCommand(OnReloadAsync, () => !this.IsBusy);
+
+    private async Task OnReloadAsync()
+    {
+        this.IsBusy = true;
+        try
+        {
+            // Вызываем ReloadAsync через рефлексию, если репозиторий его поддерживает
+            var reloadMethod = this.Repository?.GetType().GetMethod("ReloadAsync");
+            if (reloadMethod != null)
+            {
+                var task = reloadMethod.Invoke(this.Repository, null) as Task;
+                if (task != null) await task;
+            }
+
+            await this.Initialize();
+            await this.LoadFacetsAsync();
+        }
+        finally
+        {
+            this.IsBusy = false;
+        }
+    }
 
     protected override async Task PostLoad()
     {

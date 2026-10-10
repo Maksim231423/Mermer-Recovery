@@ -21,7 +21,7 @@ public static class StockTransfersEndpoints
         var group = routes.MapGroup("/api/warehousing/transfers").WithTags("StockTransfers");
 
         // 1. СПИСОК ПЕРЕМЕЩЕНИЙ
-        group.MapGet("/", async (DateTime? from, DateTime? till, string? warehouseId, string? destinationWarehouseId, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/", async (DateTime? from, DateTime? till, string? warehouseId, string? destinationWarehouseId, bool? conflicted, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 10000) : 5000;
             int skip = offset.GetValueOrDefault(0);
@@ -41,7 +41,7 @@ public static class StockTransfersEndpoints
 
             var query = db.StockTransfers
                 .AsNoTracking()
-                .Where(t => t.Date >= startDate && t.Date <= endDate);
+                .Where(t => !t.IsDisabled && t.Date >= startDate && t.Date <= endDate);
 
             if (Guid.TryParse(warehouseId, out var srcGuid))
                 query = query.Where(t => t.WarehouseId == srcGuid);
@@ -63,8 +63,8 @@ public static class StockTransfersEndpoints
                 decimal dbRecTotal = t.ActionReceivedTotal != 0m ? t.ActionReceivedTotal : t.ActionTotal;
 
                 var linesList = new List<object>();
-                // Используем Dictionary для гарантии УНИКАЛЬНОСТИ пар StockId_UnitId
                 var unitConvertionsDict = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                bool hasQuantityConflict = false;
 
                 if (t.Lines != null && t.Lines.Any())
                 {
@@ -74,6 +74,15 @@ public static class StockTransfersEndpoints
                         var uId = l.UnitId?.ToString() ?? Guid.NewGuid().ToString();
                         var ruId = l.ReceivedUnitId?.ToString() ?? uId;
 
+                        decimal sentQty = l.Quantity;
+                        decimal recQty = l.ReceivedQuantity != 0m ? l.ReceivedQuantity : 0m;
+
+                        // Если строка не принята полностью или отличается по количеству
+                        if (sentQty != recQty)
+                        {
+                            hasQuantityConflict = true;
+                        }
+
                         linesList.Add(new
                         {
                             Id = l.Id.ToString(),
@@ -82,15 +91,14 @@ public static class StockTransfersEndpoints
                             UnitId = uId,
                             ReceivedUnitId = ruId,
                             CurrencyId = defCurId,
-                            Quantity = l.Quantity,
-                            ReceivedQuantity = l.ReceivedQuantity != 0m ? l.ReceivedQuantity : l.Quantity,
+                            Quantity = sentQty,
+                            ReceivedQuantity = recQty,
                             Price = l.Price,
-                            ActionTotal = l.ActionTotal != 0m ? l.ActionTotal : (l.Quantity * l.Price),
-                            ActionReceivedTotal = l.ActionReceivedTotal != 0m ? l.ActionReceivedTotal : (l.ReceivedQuantity * l.Price),
+                            ActionTotal = l.ActionTotal != 0m ? l.ActionTotal : (sentQty * l.Price),
+                            ActionReceivedTotal = l.ActionReceivedTotal != 0m ? l.ActionReceivedTotal : (recQty * l.Price),
                             SortOrder = l.SortOrder
                         });
 
-                        // Добавляем конвертер только если такой пары еще нет
                         string keySent = $"{sId}_{uId}";
                         if (!unitConvertionsDict.ContainsKey(keySent))
                         {
@@ -116,36 +124,6 @@ public static class StockTransfersEndpoints
                         }
                     }
                 }
-                else
-                {
-                    var dummyStockId = Guid.NewGuid().ToString();
-                    var dummyUnitId = Guid.NewGuid().ToString();
-
-                    linesList.Add(new
-                    {
-                        Id = Guid.NewGuid().ToString(),
-                        StockTransferId = t.Id.ToString(),
-                        StockId = dummyStockId,
-                        UnitId = dummyUnitId,
-                        ReceivedUnitId = dummyUnitId,
-                        CurrencyId = defCurId,
-                        Quantity = 1m,
-                        ReceivedQuantity = 1m,
-                        Price = dbSentTotal,
-                        ActionTotal = dbSentTotal,
-                        ActionReceivedTotal = dbRecTotal,
-                        SortOrder = 0
-                    });
-
-                    string key = $"{dummyStockId}_{dummyUnitId}";
-                    unitConvertionsDict[key] = new
-                    {
-                        StockId = dummyStockId,
-                        UnitId = dummyUnitId,
-                        Multiplier = 1m,
-                        Divider = 1m
-                    };
-                }
 
                 decimal finalSentTotal = linesList.Any() && t.Lines != null && t.Lines.Any()
                     ? t.Lines.Sum(x => x.ActionTotal != 0m ? x.ActionTotal : (x.Quantity * x.Price))
@@ -155,21 +133,24 @@ public static class StockTransfersEndpoints
                     ? t.Lines.Sum(x => x.ActionReceivedTotal != 0m ? x.ActionReceivedTotal : (x.ReceivedQuantity * x.Price))
                     : dbRecTotal;
 
+                // Перемещение конфликтное, если разошлось количество в строках или итоговые суммы
+                bool isConflicted = hasQuantityConflict || (finalSentTotal != finalReceivedTotal);
+
                 return new
                 {
                     Id = t.Id.ToString(),
                     Code = t.Code ?? string.Empty,
-                    Date = t.Date.UtcDateTime,
+                    Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
                     Type = "StockTransfer",
                     WarehouseId = t.WarehouseId?.ToString(),
                     DestinationWarehouseId = t.DestinationWarehouseId?.ToString(),
                     DisplayCurrencyId = t.DisplayCurrencyId?.ToString() ?? defCurId,
                     CurrencyConvertions = convertions,
-                    StockUnitConvertions = unitConvertionsDict.Values.ToList(), // Гарантированно уникальные элементы
+                    StockUnitConvertions = unitConvertionsDict.Values.ToList(),
                     UserName = t.UserName ?? "admin",
                     IsCompleted = t.IsCompleted,
                     IsDisabled = t.IsDisabled,
-                    IsConflicted = finalSentTotal != finalReceivedTotal,
+                    IsConflicted = isConflicted,
                     Group = t.GroupName ?? string.Empty,
                     Tags = t.Tags != null ? t.Tags.ToList() : new List<string>(),
                     Description = t.Description ?? string.Empty,
@@ -182,13 +163,18 @@ public static class StockTransfersEndpoints
                 };
             });
 
+            if (conflicted.HasValue && conflicted.Value)
+            {
+                result = result.Where(x => ((dynamic)x).IsConflicted);
+            }
+
             return Results.Ok(result);
         });
 
         // 1.1. БЫСТРЫЙ ПОДСЧЕТ ДЛЯ ПЛИТОК ДАТ
-        group.MapGet("/count", async (DateTime? from, DateTime? till, string? warehouseId, string? destinationWarehouseId, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/count", async (DateTime? from, DateTime? till, string? warehouseId, string? destinationWarehouseId, bool? conflicted, MermerDbContext db, CancellationToken ct) =>
         {
-            var query = db.StockTransfers.AsNoTracking();
+            var query = db.StockTransfers.AsNoTracking().Where(t => !t.IsDisabled);
 
             if (from.HasValue && from.Value.Year > 2000)
             {
@@ -207,6 +193,12 @@ public static class StockTransfersEndpoints
 
             if (Guid.TryParse(destinationWarehouseId, out var dstGuid))
                 query = query.Where(t => t.DestinationWarehouseId == dstGuid);
+
+            if (conflicted.HasValue && conflicted.Value)
+            {
+                // Считаем документы, у которых есть расхождения по количеству в строках
+                query = query.Where(t => t.Lines.Any(l => l.Quantity != (l.ReceivedQuantity != 0m ? l.ReceivedQuantity : 0m)));
+            }
 
             var count = await query.CountAsync(ct);
             return Results.Ok(new { count });
@@ -234,7 +226,7 @@ public static class StockTransfersEndpoints
             {
                 Id = t.Id.ToString(),
                 Code = t.Code ?? string.Empty,
-                Date = t.Date.UtcDateTime,
+                Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО НА LOCAL TIME
                 Type = "StockTransfer",
                 WarehouseId = t.WarehouseId?.ToString(),
                 DestinationWarehouseId = t.DestinationWarehouseId?.ToString(),
@@ -403,7 +395,7 @@ public static class StockTransfersEndpoints
             return Results.Ok();
         });
 
-        // 5. ФАСЕТЫ (БЕЗ N+1 И СКАНИРОВАНИЯ ВСЕЙ ТАБЛИЦЫ)
+        // 5. ФАСЕТЫ
         group.MapGet("/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
             string? fields = ctx.Request.Query["fields"].ToString();
@@ -463,10 +455,7 @@ public static class StockTransfersEndpoints
                         { "#Today", countToday },
                         { "#This Week", countWeek },
                         { "#This Month", countMonth },
-                        { "#This Year", countYear },
-                        { "#All Records", countAll },
-                        { "#All", countAll },
-                        { "", countAll }
+                        { "#All Records", countAll }
                     };
                 }
                 else

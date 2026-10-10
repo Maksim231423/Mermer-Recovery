@@ -108,11 +108,26 @@ public class FundsSlipDetailsViewModel :
                 Details.CurrencyConvertions = new Mermer.Data.WatchedObservableCollection<CurrencyConvertion>();
             }
 
+            // Заменяем блок добавления конверсий:
             if (Currencies?.List != null)
             {
-                foreach (var curr in Currencies.List)
+                var activeCurrencies = Currencies.List.Where(c => !c.IsDisabled).ToList();
+
+                // Удаляем строки конверсий с удаленными валютами
+                var activeIds = activeCurrencies.Select(c => c.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var toRemove = Details.CurrencyConvertions
+                    .Where(c => !activeIds.Contains(c.CurrencyId))
+                    .ToList();
+
+                foreach (var item in toRemove)
                 {
-                    if (!Details.CurrencyConvertions.Any(c => c.CurrencyId == curr.Id))
+                    Details.CurrencyConvertions.Remove(item);
+                }
+
+                // Добавляем недостающие активные валюты
+                foreach (var curr in activeCurrencies)
+                {
+                    if (!Details.CurrencyConvertions.Any(c => string.Equals(c.CurrencyId, curr.Id, StringComparison.OrdinalIgnoreCase)))
                     {
                         Details.CurrencyConvertions.Add(new CurrencyConvertion
                         {
@@ -125,7 +140,7 @@ public class FundsSlipDetailsViewModel :
                 }
 
                 if (string.IsNullOrEmpty(Details.DisplayCurrencyId))
-                    Details.DisplayCurrencyId = Currencies.List.FirstOrDefault()?.Id;
+                    Details.DisplayCurrencyId = activeCurrencies.FirstOrDefault(c => c.IsDefault)?.Id ?? activeCurrencies.FirstOrDefault()?.Id;
             }
 
             if (string.IsNullOrEmpty(ItemId))

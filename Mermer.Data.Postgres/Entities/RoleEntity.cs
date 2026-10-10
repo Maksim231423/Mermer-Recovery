@@ -8,6 +8,11 @@ namespace Mermer.Data.Postgres.Entities;
 [Table("roles")]
 public class RoleEntity
 {
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
     [Column("id")]
     public Guid Id { get; set; }
 
@@ -17,7 +22,6 @@ public class RoleEntity
     [Column("description")]
     public string? Description { get; set; }
 
-    // Колонка в БД хранит чистый JSON-текст
     [Column("authorizations")]
     public string? AuthorizationsJson { get; set; }
 
@@ -27,20 +31,52 @@ public class RoleEntity
         get
         {
             if (string.IsNullOrWhiteSpace(AuthorizationsJson))
-                return new Dictionary<string, int>();
+                return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
             try
             {
-                return JsonSerializer.Deserialize<Dictionary<string, int>>(AuthorizationsJson) ?? new Dictionary<string, int>();
+                var dict = JsonSerializer.Deserialize<Dictionary<string, int>>(AuthorizationsJson, JsonOptions);
+                return dict != null
+                    ? new Dictionary<string, int>(dict, StringComparer.OrdinalIgnoreCase)
+                    : new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             }
             catch
             {
-                return new Dictionary<string, int>();
+                return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             }
         }
         set
         {
             AuthorizationsJson = value != null ? JsonSerializer.Serialize(value) : "{}";
+        }
+    }
+
+    [Column("account_privileges")]
+    public string? AccountPrivilegesJson { get; set; }
+
+    [NotMapped]
+    public Dictionary<string, int> AccountPrivileges
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(AccountPrivilegesJson))
+                return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+            try
+            {
+                var dict = JsonSerializer.Deserialize<Dictionary<string, int>>(AccountPrivilegesJson, JsonOptions);
+                return dict != null
+                    ? new Dictionary<string, int>(dict, StringComparer.OrdinalIgnoreCase)
+                    : new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+        set
+        {
+            AccountPrivilegesJson = value != null ? JsonSerializer.Serialize(value) : "{}";
         }
     }
 

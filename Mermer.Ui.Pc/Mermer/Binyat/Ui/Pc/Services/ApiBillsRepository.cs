@@ -1,4 +1,5 @@
-﻿using Mermer.Commerce.Models;
+﻿using DevExpress.Xpf.Bars;
+using Mermer.Commerce.Models;
 using Mermer.Data.Storage;
 using Mermer.Http;
 using System;
@@ -62,7 +63,6 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
 
-        // Если это фильтрация по датам — забираем срез напрямую с бэкенда!
         if (hasDates)
         {
             try
@@ -70,9 +70,18 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
                 var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
                 var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-                var remoteSlice = await _restClient.GetAsync<List<Bill>>($"/api/bills?from={fromStr}&till={tillStr}");
+                var remoteSlice = await _restClient.GetAsync<List<Bill>>($"/api/bills?from={fromStr}&till={tillStr}&limit=50000");
                 if (remoteSlice != null)
                 {
+                    foreach (var b in remoteSlice)
+                    {
+                        if (!string.IsNullOrEmpty(b?.Id))
+                        {
+                            _cardCache[b.Id] = b;
+                            LocalSqliteCache.SaveDocument(DocType, b.Id, b, isSynced: true);
+                        }
+                    }
+
                     var query = remoteSlice.AsQueryable();
                     if (predicates != null)
                     {
@@ -84,7 +93,7 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
             catch { }
         }
 
-        // Если запрос без диапазона дат — отдаем из кэша памяти
+        // Для фильтра "All Records" без дат — забираем полный список с сервера
         var all = await GetAllAsync();
         var fallbackQuery = all.AsQueryable();
         if (predicates != null)
@@ -98,22 +107,25 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
 
-        try
+        if (hasDates)
         {
-            string url = "/api/bills/count";
-            if (hasDates)
+            try
             {
                 var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
                 var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                url += $"?from={fromStr}&till={tillStr}";
+                var res = await _restClient.GetAsync<CountResponse>($"/api/bills/count?from={fromStr}&till={tillStr}");
+                if (res != null) return res.Count;
             }
-
-            var res = await _restClient.GetAsync<CountResponse>(url);
-            if (res != null) return res.Count;
+            catch { }
         }
-        catch (Exception ex)
+        else
         {
-            System.Diagnostics.Debug.WriteLine($"[Bills CountAsync Error]: {ex.Message}");
+            try
+            {
+                var res = await _restClient.GetAsync<CountResponse>("/api/bills/count");
+                if (res != null && res.Count > 0) return res.Count;
+            }
+            catch { }
         }
 
         var result = await GetAsync(predicates);
@@ -122,15 +134,34 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
 
     public async Task<IEnumerable<Bill>> GetAllAsync()
     {
-        if (_cardCache.Count > 0)
-            return _cardCache.Values.ToList();
-
-        var local = LocalSqliteCache.GetAllDocuments<Bill>(DocType);
-        if (local != null)
+        // Если кэш пуст — скачиваем все счета с сервера
+        if (_cardCache.IsEmpty)
         {
-            foreach (var item in local)
+            try
             {
-                if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+                var remote = await _restClient.GetAsync<List<Bill>>("/api/bills?limit=50000");
+                if (remote != null && remote.Any())
+                {
+                    foreach (var item in remote)
+                    {
+                        if (!string.IsNullOrEmpty(item?.Id))
+                        {
+                            _cardCache[item.Id] = item;
+                            LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
+                        }
+                    }
+                    return _cardCache.Values.ToList();
+                }
+            }
+            catch { }
+
+            var local = LocalSqliteCache.GetAllDocuments<Bill>(DocType);
+            if (local != null)
+            {
+                foreach (var item in local)
+                {
+                    if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+                }
             }
         }
 
@@ -148,12 +179,18 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
         _cardCache[entity.Id] = entity;
         LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
 
+        // Мгновенное обновление списка Bills в UI
+        UiEventBus.NotifyDocumentModified<Bill>(entity.Id);
+
         _ = Task.Run(async () =>
         {
             try
             {
                 await _restClient.PostAsync("/api/bills", entity);
                 LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
+
+                // Повторное уведомление после фиксации на сервере
+                UiEventBus.NotifyDocumentModified<Bill>(entity.Id);
             }
             catch { }
         });
@@ -164,7 +201,11 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
     public async Task DeleteAsync(string id)
     {
         if (string.IsNullOrEmpty(id)) return;
+
         _cardCache.TryRemove(id, out _);
+
+        // Уведомляем открытое окно Bills об удалении записи
+        UiEventBus.NotifyDocumentModified<Bill>(id);
 
         _ = Task.Run(async () =>
         {

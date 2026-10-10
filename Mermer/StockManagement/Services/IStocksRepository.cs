@@ -25,5 +25,7 @@ public interface IStocksRepository :
     string additionalPriceCurrencyId,
     string additionalPriceGroup);
 
+
+
   Task MergeAsync(string mainStockId, string[] mergeStockIds, bool disableMergedItems);
 }

@@ -20,7 +20,7 @@ public static class SpendingEndpoints
     {
         var group = routes.MapGroup("/api/spending/slips").WithTags("SpendingSlips");
 
-        // 1. СПИСОК АКТОВ РАСХОДОВ (СОРТИРОВКА ПО УБЫВАНИЮ ДАТЫ)
+        // 1. СПИСОК АКТОВ РАСХОДОВ
         group.MapGet("", async (DateTime? from, DateTime? till, string? depositoryId, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 500;
@@ -59,7 +59,7 @@ public static class SpendingEndpoints
                 {
                     Id = s.Id.ToString(),
                     Code = s.Code ?? "",
-                    Date = s.Date,
+                    Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО
                     Type = "ExpenseSlip",
                     FundsSlipType = "ExpenseSlip",
                     DepositoryId = s.DepositoryId?.ToString(),
@@ -97,7 +97,7 @@ public static class SpendingEndpoints
             return Results.Ok(result);
         });
 
-        // 2. ПОДСЧЕТ ДЛЯ ПЛИТОК ДАТ (И ДЛЯ ALL RECORDS)
+        // 2. ПОДСЧЕТ ДЛЯ ПЛИТОК ДАТ
         group.MapGet("/count", async (DateTime? from, DateTime? till, string? depositoryId, MermerDbContext db, CancellationToken ct) =>
         {
             var startDate = from.HasValue ? from.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
@@ -129,7 +129,7 @@ public static class SpendingEndpoints
             {
                 Id = s.Id.ToString(),
                 Code = s.Code ?? "",
-                Date = s.Date,
+                Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО
                 Type = "ExpenseSlip",
                 FundsSlipType = "ExpenseSlip",
                 DepositoryId = s.DepositoryId?.ToString(),
@@ -287,22 +287,14 @@ public static class SpendingEndpoints
                 }
 
                 await db.SaveChangesAsync();
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"[EXPENSE SLIP SAVED]: {id} (Code: {code})");
-                Console.ResetColor();
-
                 return Results.Ok(new { id = id.ToString(), code });
             }
             catch (Exception ex)
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"[EXPENSE SLIP SAVE FAILED]: {ex.Message} -> {ex.InnerException?.Message}");
-                Console.ResetColor();
                 return Results.Problem(detail: ex.InnerException?.Message ?? ex.Message, statusCode: 500);
             }
         };
 
-        // Регистрация роутов сохранения идентично Bills
         group.MapPost("", saveHandler);
         group.MapPut("/{id}", saveHandler);
 
@@ -322,7 +314,7 @@ public static class SpendingEndpoints
             return Results.Ok();
         });
 
-        // 6. ФАСЕТЫ (ИДЕНТИЧНО BILLS И FUNDS TRANSFERS)
+        // 6. ФАСЕТЫ
         group.MapGet("/facets", async (string? fields, MermerDbContext db, CancellationToken ct) =>
         {
             var connStr = db.Database.GetConnectionString()!;
@@ -330,8 +322,7 @@ public static class SpendingEndpoints
             return Results.Ok(facets);
         });
 
-        // 7. ЖУРНАЛ СТАТЕЙ РАСХОДОВ С ЛИМИТОМ
-        // 7.1. БЫСТРЫЙ ПОДСЧЕТ ДЛЯ ПЛИТОК ДАТ (ИЗБАВЛЯЕТ ОТ 404 И ЗАВИСАНИЯ)
+        // 7. ЖУРНАЛ СТАТЕЙ РАСХОДОВ
         routes.MapGet("/api/spending/actions/count", async (DateTime? from, DateTime? till, string? expenseId, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             var startDate = from.HasValue ? from.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
@@ -368,7 +359,6 @@ public static class SpendingEndpoints
             return Results.Ok(new { count = countAll });
         }).WithTags("SpendingActions");
 
-        // 7.2. ЖУРНАЛ СТАТЕЙ РАСХОДОВ
         routes.MapGet("/api/spending/actions", async (DateTime? from, DateTime? till, string? expenseId, int? limit, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 10000) : 5000;
@@ -407,7 +397,7 @@ public static class SpendingEndpoints
                     {
                         TransactionId = s.Id.ToString(),
                         TransactionCode = s.Code ?? "",
-                        TransactionDate = s.Date,
+                        TransactionDate = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО
                         TransactionType = "ExpenseSlip",
                         TransactionUserId = s.UserId?.ToString(),
                         TransactionUserName = s.UserName,

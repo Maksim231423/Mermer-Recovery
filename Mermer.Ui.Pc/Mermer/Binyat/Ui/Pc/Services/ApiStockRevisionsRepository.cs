@@ -66,7 +66,7 @@ namespace Mermer.Ui.Pc.Services
             return result;
         }
 
-        // --- БЫСТРАЯ ВЫБОРКА ПО ДАТАМ (ПРЯМОЙ ЗАПРОС СРЕЗА) ---
+        // --- ВЫБОРКА ПО ДАТАМ И ПРЕДИКАТАМ ---
         public async Task<IEnumerable<StockRevision>> GetAsync(params Expression<Func<StockRevision, bool>>[] predicates)
         {
             var (hasDates, from, till) = TryExtractDateRange(predicates);
@@ -78,9 +78,18 @@ namespace Mermer.Ui.Pc.Services
                     var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
                     var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-                    var remoteSlice = await _restClient.GetAsync<List<StockRevision>>($"/api/warehousing/revisions?from={fromStr}&till={tillStr}");
+                    var remoteSlice = await _restClient.GetAsync<List<StockRevision>>($"/api/warehousing/revisions?from={fromStr}&till={tillStr}&limit=5000");
                     if (remoteSlice != null)
                     {
+                        foreach (var item in remoteSlice)
+                        {
+                            if (!string.IsNullOrEmpty(item?.Id))
+                            {
+                                _cardCache[item.Id] = item;
+                                LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
+                            }
+                        }
+
                         var query = remoteSlice.AsQueryable();
                         if (predicates != null)
                         {
@@ -113,26 +122,53 @@ namespace Mermer.Ui.Pc.Services
                     var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
 
                     var res = await _restClient.GetAsync<CountResponse>($"/api/warehousing/revisions/count?from={fromStr}&till={tillStr}");
-                    if (res != null) return res.Count;
+                    if (res != null && res.Count > 0) return res.Count;
                 }
                 catch { }
             }
 
-            var items = await GetAsync(predicates);
-            return items.Count();
+            // Для фильтров по статусам (Active, Completed, Deleted, All Records)
+            var all = await GetAllAsync();
+            var query = all.AsQueryable();
+            if (predicates != null)
+            {
+                foreach (var p in predicates.Where(x => x != null))
+                {
+                    query = query.Where(p);
+                }
+            }
+            return query.Count();
         }
 
         public async Task<IEnumerable<StockRevision>> GetAllAsync()
         {
-            if (_cardCache.Count > 0)
-                return _cardCache.Values.ToList();
-
-            var local = LocalSqliteCache.GetAllDocuments<StockRevision>(DocType);
-            if (local != null)
+            if (_cardCache.IsEmpty)
             {
-                foreach (var item in local)
+                try
                 {
-                    if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+                    var remote = await _restClient.GetAsync<List<StockRevision>>("/api/warehousing/revisions?limit=5000");
+                    if (remote != null && remote.Any())
+                    {
+                        foreach (var item in remote)
+                        {
+                            if (!string.IsNullOrEmpty(item?.Id))
+                            {
+                                _cardCache[item.Id] = item;
+                                LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
+                            }
+                        }
+                        return _cardCache.Values.ToList();
+                    }
+                }
+                catch { }
+
+                var local = LocalSqliteCache.GetAllDocuments<StockRevision>(DocType);
+                if (local != null)
+                {
+                    foreach (var item in local)
+                    {
+                        if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+                    }
                 }
             }
 
@@ -150,12 +186,15 @@ namespace Mermer.Ui.Pc.Services
             _cardCache[entity.Id] = entity;
             LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
 
+            UiEventBus.NotifyDocumentModified<StockRevision>(entity.Id);
+
             _ = Task.Run(async () =>
             {
                 try
                 {
                     await _restClient.PostAsync("/api/warehousing/revisions", entity);
                     LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
+                    UiEventBus.NotifyDocumentModified<StockRevision>(entity.Id);
                 }
                 catch { }
             });
@@ -165,6 +204,8 @@ namespace Mermer.Ui.Pc.Services
         {
             if (string.IsNullOrEmpty(id)) return;
             _cardCache.TryRemove(id, out _);
+
+            UiEventBus.NotifyDocumentModified<StockRevision>(id);
 
             _ = Task.Run(async () =>
             {
@@ -254,10 +295,8 @@ namespace Mermer.Ui.Pc.Services
             var stockIds = revLines.Select(x => x.StockId).Where(x => !string.IsNullOrEmpty(x)).Distinct().ToArray();
             var stocks = (await stocksGetter(stockIds)).ToDictionary(x => x.Id, x => x);
 
-            // Получаем учетные остатки
             IEnumerable<StockBalance> balancesSource = await stockBalancesGetter(stockIds);
 
-            // Если свойство Balance не заполнено, считаем его как (Income - Expense)
             var balances = balancesSource
                 .GroupBy(b => b.StockId)
                 .ToDictionary(
@@ -265,7 +304,6 @@ namespace Mermer.Ui.Pc.Services
                     g => g.Sum(x => x.Balance != 0m ? x.Balance : (x.Income - x.Expense))
                 );
 
-            // Группируем строки ревизии по товарам для расчета TotalCounted с учетом коэффициентов единиц измерения
             var countsByStocks = revLines.GroupBy(x => x.StockId).ToDictionary(
                 g => g.Key,
                 g => g.Select(x =>
@@ -388,9 +426,11 @@ namespace Mermer.Ui.Pc.Services
             return lambda.Compile().DynamicInvoke();
         }
 
+        // Вложенный класс для маппинга счетчика
         private class CountResponse
         {
             public int Count { get; set; }
+            public int count { get => Count; set => Count = value; }
         }
     }
 }

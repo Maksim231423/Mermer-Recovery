@@ -167,6 +167,9 @@ public class ApiPartnerSlipsRepository : IRepositoryWithFacets<PartnerSlip>, IRe
         // Фиксируем документ в SQLite
         LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
 
+        // Мгновенно обновляем список операций контрагентов
+        UiEventBus.NotifyDocumentModified<PartnerSlip>(model.Id);
+
         // Помечаем, что данный ID взят в обработку отправки
         if (!_inFlightSync.TryAdd(model.Id, 0))
             return;
@@ -177,6 +180,7 @@ public class ApiPartnerSlipsRepository : IRepositoryWithFacets<PartnerSlip>, IRe
             {
                 await _restClient.PostAsync("/api/partners/slips", model);
                 LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
+                UiEventBus.NotifyDocumentModified<PartnerSlip>(model.Id);
             }
             catch (Exception ex)
             {
@@ -221,6 +225,9 @@ public class ApiPartnerSlipsRepository : IRepositoryWithFacets<PartnerSlip>, IRe
     {
         if (string.IsNullOrEmpty(id)) return;
         _cardCache.TryRemove(id, out _);
+
+        // Мгновенно удаляем из списка UI
+        UiEventBus.NotifyDocumentModified<PartnerSlip>(id);
 
         _ = Task.Run(async () =>
         {

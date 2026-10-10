@@ -153,6 +153,9 @@ public class ApiRolesRepository : IRepository<Role>
 
         LocalSqliteCache.SaveDocument(DocType, normalized.Id, normalized, isSynced: false);
 
+        // Мгновенно обновляем справочник ролей в интерфейсе
+        UiEventBus.NotifyDocumentModified<Role>(normalized.Id);
+
         _ = Task.Run(async () =>
         {
             try
@@ -162,6 +165,7 @@ public class ApiRolesRepository : IRepository<Role>
                 else await _restClient.PutAsync($"/api/roles/{normalized.Id}", payload);
 
                 LocalSqliteCache.SaveDocument(DocType, normalized.Id, normalized, isSynced: true);
+                UiEventBus.NotifyDocumentModified<Role>(normalized.Id);
             }
             catch (Exception ex)
             {
@@ -180,6 +184,9 @@ public class ApiRolesRepository : IRepository<Role>
             _rolesCache?.RemoveAll(x => x.Id == id);
         }
 
+        // Мгновенно убираем удаленную роль из списка
+        UiEventBus.NotifyDocumentModified<Role>(id);
+
         _ = Task.Run(async () =>
         {
             try { await _restClient.DeleteAsync($"/api/roles/{id}"); } catch { }
@@ -190,22 +197,33 @@ public class ApiRolesRepository : IRepository<Role>
     {
         if (role?.Authorizations != null && role.Authorizations.Any())
         {
-            role.Authorizations = role.Authorizations.ToDictionary(
-                x => x.Key.First().ToString().ToUpper() + x.Key.Substring(1),
-                x => x.Value);
+            role.Authorizations = new Dictionary<string, int>(role.Authorizations, StringComparer.OrdinalIgnoreCase);
+        }
+        else if (role != null)
+        {
+            role.Authorizations = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         }
         return role;
     }
 
     private static object CreatePayload(Role model)
     {
+        var authDict = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (model.Authorizations != null)
+        {
+            foreach (var kvp in model.Authorizations)
+            {
+                authDict[kvp.Key] = kvp.Value;
+            }
+        }
+
         return new
         {
             Id = model.Id,
-            Name = model.Name,
+            Name = model.Name ?? string.Empty,
             Description = model.Description,
             IsDisabled = model.IsDisabled,
-            Authorizations = model.Authorizations?.ToDictionary(x => x.Key, x => x.Value) ?? new Dictionary<string, int>()
+            Authorizations = authDict
         };
     }
 }

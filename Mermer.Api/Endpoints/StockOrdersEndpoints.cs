@@ -19,19 +19,41 @@ public static class StockOrdersEndpoints
     public static IEndpointRouteBuilder MapStockOrdersEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/warehousing/orders").WithTags("StockOrders");
+        var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
 
         // 1. СПИСОК ЗАКАЗОВ
-        group.MapGet("/", async (DateTime? from, DateTime? till, string? warehouseId, string? partnerId, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/", async (DateTime? from, DateTime? till, string? warehouseId, string? partnerId, bool? isCompleted, bool? isDisabled, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 10000) : 5000;
             int skip = offset.GetValueOrDefault(0);
 
-            DateTimeOffset startDate = from.HasValue ? new DateTimeOffset(from.Value.ToUniversalTime()) : DateTimeOffset.UtcNow.AddMonths(-1);
-            DateTimeOffset endDate = till.HasValue ? new DateTimeOffset(till.Value.ToUniversalTime()) : DateTimeOffset.UtcNow;
+            var query = db.StockOrders.AsNoTracking();
 
-            var query = db.StockOrders
-                .AsNoTracking()
-                .Where(o => o.Date >= startDate && o.Date <= endDate && !o.IsDisabled);
+            if (isDisabled.HasValue)
+            {
+                query = query.Where(o => o.IsDisabled == isDisabled.Value);
+            }
+            else
+            {
+                query = query.Where(o => !o.IsDisabled);
+            }
+
+            if (isCompleted.HasValue)
+            {
+                query = query.Where(o => o.IsCompleted == isCompleted.Value);
+            }
+
+            if (from.HasValue && from.Value.Year > 2000)
+            {
+                var startDate = new DateTimeOffset(from.Value.ToUniversalTime());
+                query = query.Where(o => o.Date >= startDate);
+            }
+
+            if (till.HasValue && till.Value.Year < 2099)
+            {
+                var endDate = new DateTimeOffset(till.Value.ToUniversalTime());
+                query = query.Where(o => o.Date <= endDate);
+            }
 
             if (Guid.TryParse(warehouseId, out var wG))
                 query = query.Where(o => o.WarehouseId == wG);
@@ -48,59 +70,11 @@ public static class StockOrdersEndpoints
                 .AsSplitQuery()
                 .ToListAsync(ct);
 
-            return Results.Ok(list.Select(o => new
+            var result = list.Select(o => new
             {
                 Id = o.Id.ToString(),
                 Code = o.Code ?? "",
-                Date = o.Date.UtcDateTime,
-                WarehouseId = o.WarehouseId?.ToString(),
-                PartnerId = o.PartnerId?.ToString(),
-                UserId = o.UserId?.ToString(),
-                UserName = o.UserName ?? "admin",
-                IsCompleted = o.IsCompleted,
-                IsDisabled = o.IsDisabled,
-                Group = o.GroupName ?? "",
-                Tags = o.Tags != null ? o.Tags.ToList() : new List<string>(),
-                Description = o.Description ?? "",
-                Lines = o.Lines.Select(l => new
-                {
-                    Id = l.Id.ToString(),
-                    StockOrderId = o.Id.ToString(),
-                    StockId = l.StockId?.ToString(),
-                    Quantity = l.Quantity,
-                    UnitId = l.UnitId?.ToString()
-                }),
-                StockUnitConvertions = o.UnitConvertions.Select(c => new
-                {
-                    Id = c.Id.ToString(),
-                    StockOrderId = o.Id.ToString(),
-                    StockId = c.StockId?.ToString(),
-                    UnitId = c.UnitId?.ToString(),
-                    Multiplier = c.Multiplier,
-                    Divider = c.Divider
-                })
-            }));
-        });
-
-        // 2. ПОЛУЧЕНИЕ ПО ID
-        group.MapGet("/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
-        {
-            if (!Guid.TryParse(id, out var orderId)) return Results.NotFound();
-
-            var o = await db.StockOrders
-                .Include(x => x.Lines)
-                .Include(x => x.UnitConvertions)
-                .AsSplitQuery()
-                .AsNoTracking()
-                .FirstOrDefaultAsync(x => x.Id == orderId, ct);
-
-            if (o == null) return Results.NotFound();
-
-            return Results.Ok(new
-            {
-                Id = o.Id.ToString(),
-                Code = o.Code ?? "",
-                Date = o.Date.UtcDateTime,
+                Date = o.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
                 WarehouseId = o.WarehouseId?.ToString(),
                 PartnerId = o.PartnerId?.ToString(),
                 UserId = o.UserId?.ToString(),
@@ -128,9 +102,99 @@ public static class StockOrdersEndpoints
                     Divider = c.Divider
                 })
             });
+
+            return Results.Json(result, jsonOptions);
         });
 
-        // 3. ФАСЕТЫ
+        // 2. СЧЕТЧИК ЗАКАЗОВ
+        group.MapGet("/count", async (DateTime? from, DateTime? till, bool? isCompleted, bool? isDisabled, string? userId, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        {
+            var query = db.StockOrders.AsNoTracking();
+
+            if (isDisabled.HasValue)
+            {
+                query = query.Where(o => o.IsDisabled == isDisabled.Value);
+            }
+            else
+            {
+                query = query.Where(o => !o.IsDisabled);
+            }
+
+            if (isCompleted.HasValue)
+            {
+                query = query.Where(o => o.IsCompleted == isCompleted.Value);
+            }
+
+            if (Guid.TryParse(userId, out var uG))
+            {
+                query = query.Where(o => o.UserId == uG);
+            }
+
+            if (from.HasValue && from.Value.Year > 2000)
+            {
+                var startDate = new DateTimeOffset(from.Value.ToUniversalTime());
+                query = query.Where(o => o.Date >= startDate);
+            }
+
+            if (till.HasValue && till.Value.Year < 2099)
+            {
+                var endDate = new DateTimeOffset(till.Value.ToUniversalTime());
+                query = query.Where(o => o.Date <= endDate);
+            }
+
+            int total = await query.CountAsync(ct);
+            return Results.Json(new { Count = total }, jsonOptions);
+        });
+
+        // 3. ПОЛУЧЕНИЕ ПО ID
+        group.MapGet("/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
+        {
+            if (!Guid.TryParse(id, out var orderId)) return Results.NotFound();
+
+            var o = await db.StockOrders
+                .Include(x => x.Lines)
+                .Include(x => x.UnitConvertions)
+                .AsSplitQuery()
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.Id == orderId, ct);
+
+            if (o == null) return Results.NotFound();
+
+            return Results.Json(new
+            {
+                Id = o.Id.ToString(),
+                Code = o.Code ?? "",
+                Date = o.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                WarehouseId = o.WarehouseId?.ToString(),
+                PartnerId = o.PartnerId?.ToString(),
+                UserId = o.UserId?.ToString(),
+                UserName = o.UserName ?? "admin",
+                IsCompleted = o.IsCompleted,
+                IsDisabled = o.IsDisabled,
+                Group = o.GroupName ?? "",
+                Tags = o.Tags != null ? o.Tags.ToList() : new List<string>(),
+                Description = o.Description ?? "",
+                Lines = o.Lines.Select(l => new
+                {
+                    Id = l.Id.ToString(),
+                    StockOrderId = o.Id.ToString(),
+                    StockId = l.StockId?.ToString(),
+                    Quantity = l.Quantity,
+                    UnitId = l.UnitId?.ToString()
+                }),
+                StockUnitConvertions = o.UnitConvertions.Select(c => new
+                {
+                    Id = c.Id.ToString(),
+                    StockOrderId = o.Id.ToString(),
+                    StockId = c.StockId?.ToString(),
+                    UnitId = c.UnitId?.ToString(),
+                    Multiplier = c.Multiplier,
+                    Divider = c.Divider
+                })
+            }, jsonOptions);
+        });
+
+        // 4. ФАСЕТЫ
         group.MapGet("/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
             string? fields = ctx.Request.Query["fields"].ToString();
@@ -138,7 +202,7 @@ public static class StockOrdersEndpoints
                 ? new[] { "Date", "Group", "Tags", "GroupNames", "TagNames" }
                 : fields.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-            var result = new Dictionary<string, Dictionary<string, int>>();
+            var result = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var field in fieldList)
             {
@@ -193,10 +257,10 @@ public static class StockOrdersEndpoints
                 }
             }
 
-            return Results.Ok(result);
+            return Results.Json(result, jsonOptions);
         });
 
-        // 4. СОХРАНЕНИЕ (POST / PUT)
+        // 5. СОХРАНЕНИЕ (POST / PUT)
         Func<HttpRequest, MermerDbContext, Task<IResult>> saveOrderHandler = async (req, db) =>
         {
             using var reader = new StreamReader(req.Body);
@@ -313,13 +377,13 @@ public static class StockOrdersEndpoints
             }
 
             await db.SaveChangesAsync();
-            return Results.Ok(new { id = orderId, code });
+            return Results.Json(new { Id = orderId, Code = code }, jsonOptions);
         };
 
         group.MapPost("/", saveOrderHandler);
         group.MapPut("/{id}", saveOrderHandler);
 
-        // 5. УДАЛЕНИЕ
+        // 6. УДАЛЕНИЕ
         group.MapDelete("/{id}", async (string id, MermerDbContext db) =>
         {
             if (Guid.TryParse(id, out var guid))
@@ -332,7 +396,7 @@ public static class StockOrdersEndpoints
                     await db.SaveChangesAsync();
                 }
             }
-            return Results.Ok();
+            return Results.NoContent();
         });
 
         return app;

@@ -66,27 +66,22 @@ public static class PartnersEndpoints
             {
                 var prms = new { mainId = mainGuid, mergeIds = mergeGuids, now = DateTime.UtcNow };
 
-                // 1. Накладные (Invoices)
                 await conn.ExecuteAsync(
                     "UPDATE invoices SET partner_id = @mainId WHERE partner_id = ANY(@mergeIds);",
                     prms, tx);
 
-                // 2. Счета и кассовые ордера (FundsSlips)
                 await conn.ExecuteAsync(
                     "UPDATE funds_slips SET partner_id = @mainId WHERE partner_id = ANY(@mergeIds);",
                     prms, tx);
 
-                // 3. Строки актов сверки (PartnerSlipLines)
                 await conn.ExecuteAsync(
                     "UPDATE partner_slip_lines SET partner_id = @mainId WHERE partner_id = ANY(@mergeIds);",
                     prms, tx);
 
-                // 4. Строки переводов контрагентов (PartnerTransferLines)
                 await conn.ExecuteAsync(
                     "UPDATE partner_transfer_lines SET partner_id = @mainId WHERE partner_id = ANY(@mergeIds);",
                     prms, tx);
 
-                // 5. Отключение дубликатов при необходимости
                 if (dto.DisableMergedItems)
                 {
                     await conn.ExecuteAsync(
@@ -310,14 +305,12 @@ public static class PartnersEndpoints
         {
             var connStr = db.Database.GetConnectionString()!;
 
-            // Если запрос из карточки за подсказками
             if (!string.IsNullOrEmpty(fields))
             {
                 var facets = await FacetsHelper.GetEntityFacetsAsync(connStr, "partner_slips", fields, ct);
                 return Results.Ok(facets);
             }
 
-            // Запрос из журнала (календарь дат)
             var todayUtc = DateTime.UtcNow.Date;
             var weekStart = todayUtc.AddDays(-7);
             var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -345,7 +338,6 @@ public static class PartnersEndpoints
         })
         .WithName("PartnerSlipsGetFacets");
 
-        // 6.1. ПОДСЧЕТ КОЛИЧЕСТВА ДЛЯ ПЛИТОК ДАТ (ИСПРАВЛЯЕТ ОШИБКУ 405)
         group.MapGet("/slips/count", async (DateTime? from, DateTime? till, MermerDbContext db, CancellationToken ct) =>
         {
             var query = db.PartnerSlips.AsNoTracking().Where(s => !s.IsDisabled);
@@ -366,14 +358,13 @@ public static class PartnersEndpoints
             return Results.Ok(new { count });
         });
 
-        // 6.2. ГЕНЕРАЦИЯ СЛЕДУЮЩЕГО НОМЕРА
         group.MapGet("/slips/next-code", async (MermerDbContext db, CancellationToken ct) =>
         {
             var count = await db.PartnerSlips.CountAsync(ct);
             return Results.Ok(new { code = $"DOC-{DateTime.UtcNow:yyMMdd}{(count + 1):D4}" });
         });
 
-        // 7. ПОДГРУЗКА PARTNER SLIPS (С ПАГИНАЦИЕЙ)
+        // 7. ПОДГРУЗКА PARTNER SLIPS
         group.MapGet("/slips", async (int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
@@ -393,7 +384,7 @@ public static class PartnersEndpoints
             {
                 Id = s.Id.ToString(),
                 Code = s.Code,
-                Date = s.Date,
+                Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО
                 SlipType = s.SlipType == "PartnerOpeningBalance" ? 0 : 1,
                 Type = s.SlipType,
                 OfficeId = s.OfficeId?.ToString(),
@@ -429,7 +420,7 @@ public static class PartnersEndpoints
             return Results.Json(result, jsonOptions);
         });
 
-        // 8. СОХРАНЕНИЕ PARTNER SLIPS (POST И PUT БЕЗ 404)
+        // 8. СОХРАНЕНИЕ PARTNER SLIPS
         Func<HttpRequest, MermerDbContext, Task<IResult>> saveSlipHandler = async (request, db) =>
         {
             using var reader = new StreamReader(request.Body);
@@ -540,11 +531,57 @@ public static class PartnersEndpoints
         // 9. ФАСЕТЫ ДЛЯ PARTNER TRANSFERS
         group.MapGet("/transfers/facets", async (string? fields, MermerDbContext db, CancellationToken ct) =>
         {
+            var todayUtc = DateTime.UtcNow.Date;
+            var weekStart = todayUtc.AddDays(-7);
+            var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+            var yearStart = new DateTime(todayUtc.Year, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+            var countToday = await db.PartnerTransfers.CountAsync(t => !t.IsDisabled && t.Date >= todayUtc, ct);
+            var countWeek = await db.PartnerTransfers.CountAsync(t => !t.IsDisabled && t.Date >= weekStart, ct);
+            var countMonth = await db.PartnerTransfers.CountAsync(t => !t.IsDisabled && t.Date >= monthStart, ct);
+            var countYear = await db.PartnerTransfers.CountAsync(t => !t.IsDisabled && t.Date >= yearStart, ct);
+            var countAll = await db.PartnerTransfers.CountAsync(t => !t.IsDisabled, ct);
+
             var connStr = db.Database.GetConnectionString()!;
-            var facets = await FacetsHelper.GetEntityFacetsAsync(connStr, "partner_transfers", fields, ct);
-            return Results.Ok(facets);
+            var entityFacets = await FacetsHelper.GetEntityFacetsAsync(connStr, "partner_transfers", fields ?? "GroupNames,TagNames,Group,Tags", ct);
+            var groups = entityFacets.TryGetValue("Group", out var g) ? g : new Dictionary<string, int>();
+
+            return Results.Ok(new Dictionary<string, object>
+            {
+                ["Group"] = groups,
+                ["GroupNames"] = groups,
+                ["Date"] = new Dictionary<string, int>
+                {
+                    { "#Today", countToday },
+                    { "#This Week", countWeek },
+                    { "#This Month", countMonth },
+                    { "#This Year", countYear },
+                    { "#All Records", countAll }
+                }
+            });
         })
         .WithName("PartnerTransfersGetFacets");
+
+        group.MapGet("/transfers/count", async (DateTime? from, DateTime? till, MermerDbContext db, CancellationToken ct) =>
+        {
+            var query = db.PartnerTransfers.AsNoTracking().Where(t => !t.IsDisabled);
+
+            if (from.HasValue && from.Value.Year > 2000)
+            {
+                var fUtc = from.Value.Kind == DateTimeKind.Utc ? from.Value : from.Value.ToUniversalTime();
+                query = query.Where(t => t.Date >= fUtc);
+            }
+
+            if (till.HasValue && till.Value.Year < 2099)
+            {
+                var tUtc = till.Value.Kind == DateTimeKind.Utc ? till.Value : till.Value.ToUniversalTime();
+                query = query.Where(t => t.Date <= tUtc);
+            }
+
+            var count = await query.CountAsync(ct);
+            return Results.Ok(new { count });
+        })
+        .WithName("PartnerTransfersGetCount");
 
         // 10. ПОДГРУЗКА ПЕРЕВОДОВ PARTNER TRANSFERS
         group.MapGet("/transfers", async (int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
@@ -555,7 +592,8 @@ public static class PartnersEndpoints
             var transfers = await db.PartnerTransfers
                 .AsNoTracking()
                 .Where(t => !t.IsDisabled)
-                .OrderByDescending(t => t.Date)
+                .OrderBy(t => t.Group == null ? string.Empty : t.Group.Trim()) // Сначала собираем одинаковые группы вместе
+                .ThenByDescending(t => t.Date)                                 // Затем сортируем по дате внутри группы
                 .Skip(skip)
                 .Take(take)
                 .Include(t => t.Lines)
@@ -591,14 +629,17 @@ public static class PartnersEndpoints
                     };
                 }).ToList();
 
+                // Строгая нормализация: null и любые пробелы превращаются в чистую пустую строку
+                string normalizedGroup = string.IsNullOrWhiteSpace(t.Group) ? string.Empty : t.Group.Trim();
+
                 return new
                 {
                     Id = t.Id.ToString(),
                     Code = t.Code,
-                    Date = t.Date,
+                    Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
                     Type = "PartnerTransfer",
                     UserName = t.UserName ?? "admin",
-                    Group = t.Group ?? string.Empty,
+                    Group = normalizedGroup, // Единое значение для всех записей без группы
                     Tags = t.Tags != null ? t.Tags.ToList() : new List<string>(),
                     Description = t.Description ?? string.Empty,
                     IsDisabled = t.IsDisabled,
@@ -646,7 +687,10 @@ public static class PartnersEndpoints
             string dateStr = GetJsonString(root, "date", "Date");
             DateTime transferDate = DateTime.TryParse(dateStr, out var pDate) ? pDate.ToUniversalTime() : DateTime.UtcNow;
 
-            string groupName = GetJsonString(root, "group", "Group") ?? string.Empty;
+            // Очищаем сохраняемую группу от лишних концевых пробелов
+            string rawGroup = GetJsonString(root, "group", "Group");
+            string groupName = string.IsNullOrWhiteSpace(rawGroup) ? string.Empty : rawGroup.Trim();
+
             string description = GetJsonString(root, "description", "Description") ?? string.Empty;
             string userName = GetJsonString(root, "userName", "UserName") ?? "admin";
             var tagsList = ExtractTagsFromRawJson(root);
@@ -730,8 +774,7 @@ public static class PartnersEndpoints
             return Results.Content($"{{\"id\":\"{transferId}\",\"code\":\"{code}\"}}", "application/json");
         });
 
-
-        // ПОДСЧЕТ КОЛИЧЕСТВА ДВИЖЕНИЙ ДЛЯ ПЛИТОК ДАТ
+        // 12. ПОДСЧЕТ КОЛИЧЕСТВА ДВИЖЕНИЙ ДЛЯ ПЛИТОК ДАТ
         group.MapGet("/actions/count", async (string? partnerId, DateTime? from, DateTime? till, [Microsoft.AspNetCore.Mvc.FromQuery(Name = "officeId")] string[]? officeId, MermerDbContext db, CancellationToken ct) =>
         {
             DateTime fUtc = from?.ToUniversalTime() ?? DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
@@ -790,11 +833,10 @@ public static class PartnersEndpoints
             return Results.Ok(new { count = totalCount });
         });
 
-        // 12. РЕЕСТР ДВИЖЕНИЙ ПО ПАРТНЕРАМ
+        // 13. РЕЕСТР ДВИЖЕНИЙ ПО ПАРТНЕРАМ
         group.MapGet("/actions", async (string? partnerId, DateTime? from, DateTime? till, [Microsoft.AspNetCore.Mvc.FromQuery(Name = "officeId")] string[]? officeId, int? limit, MermerDbContext db, CancellationToken ct) =>
         {
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 5000) : 1000;
-            // Если from не задан — берем за всё время (с 2000 года), а не за последний месяц!
             DateTime fUtc = from?.ToUniversalTime() ?? DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
             DateTime tUtc = till?.ToUniversalTime() ?? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
@@ -895,10 +937,30 @@ public static class PartnersEndpoints
 
             var connStr = db.Database.GetConnectionString();
             await using var conn = new NpgsqlConnection(connStr);
-            var result = await conn.QueryAsync<PartnerActionDto>(new CommandDefinition(
+            var rawList = await conn.QueryAsync(new CommandDefinition(
                 sql,
                 new { partner = pGuid, offices = targetOfficeGuids, from = fUtc, till = tUtc, take },
                 cancellationToken: ct));
+
+            // Формируем чистые локальные даты для каждого движения
+            var result = rawList.Select(r => new
+            {
+                TransactionId = (string)r.TransactionId,
+                TransactionCode = (string)r.TransactionCode,
+                TransactionType = (string)r.TransactionType,
+                TransactionDate = ((DateTime)r.TransactionDate).ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО
+                ActionOfficeId = (string)r.ActionOfficeId,
+                ActionPartnerId = (string)r.ActionPartnerId,
+                ActionDebit = (decimal)r.ActionDebit,
+                ActionCredit = (decimal)r.ActionCredit,
+                ActionEffect = (decimal)r.ActionEffect,
+                ActionEffectInCustomCurrency = (decimal)r.ActionEffectInCustomCurrency,
+                TransactionUserName = (string)r.TransactionUserName,
+                TransactionGroup = (string)r.TransactionGroup,
+                TransactionTags = (string[])r.TransactionTags,
+                TransactionIsCompleted = (bool)r.TransactionIsCompleted,
+                TransactionIsDisabled = (bool)r.TransactionIsDisabled
+            }).ToList();
 
             var jsonOptions = new JsonSerializerOptions
             {
@@ -978,24 +1040,5 @@ public static class PartnersEndpoints
         public string MainItemId { get; set; } = string.Empty;
         public string[] MergeItemIds { get; set; } = Array.Empty<string>();
         public bool DisableMergedItems { get; set; }
-    }
-
-    public class PartnerActionDto
-    {
-        public string TransactionId { get; set; } = null!;
-        public string TransactionCode { get; set; } = null!;
-        public string TransactionType { get; set; } = null!;
-        public DateTime TransactionDate { get; set; }
-        public string ActionOfficeId { get; set; } = null!;
-        public string ActionPartnerId { get; set; } = null!;
-        public decimal ActionDebit { get; set; }
-        public decimal ActionCredit { get; set; }
-        public decimal ActionEffect { get; set; }
-        public decimal ActionEffectInCustomCurrency { get; set; } // Добавлено!
-        public string TransactionUserName { get; set; } = null!;
-        public string TransactionGroup { get; set; } = string.Empty; // Добавлено!
-        public string[]? TransactionTags { get; set; } // Добавлено!
-        public bool TransactionIsCompleted { get; set; }
-        public bool TransactionIsDisabled { get; set; }
     }
 }

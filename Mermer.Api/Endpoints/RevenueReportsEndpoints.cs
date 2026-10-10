@@ -44,7 +44,7 @@ public static class RevenueReportsEndpoints
 
             if (whIds.Length == 0)
             {
-                return Results.Ok(Array.Empty<RevenueReportDto>());
+                return Results.Ok(Array.Empty<object>());
             }
 
             int limit = int.TryParse(req.Query["limit"], out var l) ? Math.Clamp(l, 1, 2000) : 500;
@@ -99,18 +99,18 @@ public static class RevenueReportsEndpoints
                     ORDER BY sp.stock_id, sp.valid_from DESC
                 )
                 SELECT 
-                    ts.date                         AS "Date",
-                    ts.warehouse_id::text          AS "WarehouseId",
-                    ts.stock_id::text              AS "StockId",
-                    COALESCE(s.code, '')           AS "StockCode",
-                    COALESCE(s.name, '')           AS "StockName",
-                    COALESCE(s.type, '')           AS "StockType",
-                    COALESCE(s.group_name, '')     AS "StockGroup",
-                    ts.signed_qty                  AS "Quantity",
+                    ts.date                                         AS "Date",
+                    ts.warehouse_id::text                          AS "WarehouseId",
+                    ts.stock_id::text                              AS "StockId",
+                    COALESCE(s.code, '')                           AS "StockCode",
+                    COALESCE(s.name, '')                           AS "StockName",
+                    COALESCE(s.type, '')                           AS "StockType",
+                    COALESCE(s.group_name, '')                     AS "StockGroup",
+                    ts.signed_qty                                  AS "Quantity",
                     (ts.signed_qty * COALESCE(src.price, ap.avg_cost, 0))::numeric(18,4) AS "InitialCosts",
-                    0::numeric(18,4)               AS "OverheadsCosts",
+                    0::numeric(18,4)                               AS "OverheadsCosts",
                     COALESCE(lp.price, 0)::numeric(18,4) AS "RecommendedPrice",
-                    ts.actual_price                AS "ActualPrice"
+                    ts.actual_price                                AS "ActualPrice"
                 FROM target_sales ts
                 LEFT JOIN stocks s ON s.id = ts.stock_id
                 LEFT JOIN invoice_lines src ON src.id = ts.source_id AND src.price > 0
@@ -121,33 +121,32 @@ public static class RevenueReportsEndpoints
 
             var connStr = db.Database.GetConnectionString();
             await using var conn = new NpgsqlConnection(connStr);
-            var results = await conn.QueryAsync<RevenueReportDto>(new CommandDefinition(
+            var rawResults = await conn.QueryAsync(new CommandDefinition(
                 sql,
                 new { whs = whIds, from = dateFrom, till = dateTill, limit, offset },
                 cancellationToken: ct));
+
+            var results = rawResults.Select(r => new
+            {
+                Date = ((DateTime)r.Date).ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО
+                WarehouseId = (string)r.WarehouseId,
+                StockId = (string)r.StockId,
+                StockCode = (string)r.StockCode,
+                StockName = (string)r.StockName,
+                StockUnit = "",
+                StockType = (string)r.StockType,
+                StockGroup = (string)r.StockGroup,
+                StockTags = new List<string>(),
+                Quantity = (decimal)r.Quantity,
+                InitialCosts = (decimal)r.InitialCosts,
+                OverheadsCosts = (decimal)r.OverheadsCosts,
+                RecommendedPrice = (decimal)r.RecommendedPrice,
+                ActualPrice = (decimal)r.ActualPrice
+            }).ToList();
 
             return Results.Ok(results);
         });
 
         return app;
-    }
-
-    public class RevenueReportDto
-    {
-        public DateTime Date { get; set; }
-        public string WarehouseId { get; set; } = string.Empty;
-        public string StockId { get; set; } = string.Empty;
-        public string StockCode { get; set; } = string.Empty;
-        public string StockName { get; set; } = string.Empty;
-        public string StockUnit { get; set; } = string.Empty;
-        public string StockType { get; set; } = string.Empty;
-        public string StockGroup { get; set; } = string.Empty;
-        public List<string> StockTags { get; set; } = new();
-
-        public decimal Quantity { get; set; }
-        public decimal InitialCosts { get; set; }
-        public decimal OverheadsCosts { get; set; }
-        public decimal RecommendedPrice { get; set; }
-        public decimal ActualPrice { get; set; }
     }
 }

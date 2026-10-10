@@ -1,4 +1,6 @@
 @echo off
+chcp 65001 >nul
+cd /d "%~dp0"
 title Mermer ERP Server (Backend API)
 echo ===================================================
 echo   Zapusk servera Mermer ERP...

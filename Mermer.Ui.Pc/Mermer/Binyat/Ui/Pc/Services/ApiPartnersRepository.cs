@@ -79,6 +79,36 @@ public class ApiPartnersRepository :
         return _memoryCache ?? Enumerable.Empty<Partner>();
     }
 
+    public async Task ReloadAsync()
+    {
+        lock (_syncLock)
+        {
+            _memoryCache = null;
+            _cardCache.Clear();
+        }
+
+        try
+        {
+            var remote = await _restClient.GetAsync<List<Partner>>("/api/partners");
+            if (remote != null)
+            {
+                lock (_syncLock)
+                {
+                    _memoryCache = remote.OrderBy(p => p.Name).ToList();
+                    foreach (var p in remote)
+                    {
+                        if (!string.IsNullOrEmpty(p?.Id))
+                        {
+                            _cardCache[p.Id] = p;
+                            LocalSqliteCache.SaveDocument(DocType, p.Id, p, isSynced: true);
+                        }
+                    }
+                }
+            }
+        }
+        catch { }
+    }
+
     public async Task<Partner> GetAsync(string id)
     {
         if (string.IsNullOrEmpty(id)) return null;
@@ -155,6 +185,9 @@ public class ApiPartnersRepository :
 
         LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
 
+        // Мгновенно обновляем реестр контрагентов
+        UiEventBus.NotifyDocumentModified<Partner>(entity.Id);
+
         _ = Task.Run(async () =>
         {
             try
@@ -162,6 +195,7 @@ public class ApiPartnersRepository :
                 if (isNew) await _restClient.PostAsync("/api/partners", entity);
                 else await _restClient.PutAsync($"/api/partners/{entity.Id}", entity);
                 LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
+                UiEventBus.NotifyDocumentModified<Partner>(entity.Id);
             }
             catch (Exception ex)
             {
@@ -179,6 +213,9 @@ public class ApiPartnersRepository :
         {
             _memoryCache?.RemoveAll(x => x.Id == id);
         }
+
+        // Мгновенно удаляем контрагента из открытого списка
+        UiEventBus.NotifyDocumentModified<Partner>(id);
 
         _ = Task.Run(async () =>
         {

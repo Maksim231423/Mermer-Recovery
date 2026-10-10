@@ -63,7 +63,7 @@ namespace Mermer.Ui.Pc.Services
             return result;
         }
 
-        // --- БЫСТРАЯ ВЫБОРКА ПО ДАТАМ (ПРЯМОЙ СРЕЗ С СЕРВЕРА) ---
+        // --- ВЫБОРКА ПО ДАТАМ И ПРЕДИКАТАМ ---
         public async Task<IEnumerable<StockOrder>> GetAsync(params Expression<Func<StockOrder, bool>>[] predicates)
         {
             var (hasDates, from, till) = TryExtractDateRange(predicates);
@@ -75,9 +75,18 @@ namespace Mermer.Ui.Pc.Services
                     var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
                     var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-                    var remoteSlice = await _restClient.GetAsync<List<StockOrder>>($"/api/warehousing/orders?from={fromStr}&till={tillStr}");
+                    var remoteSlice = await _restClient.GetAsync<List<StockOrder>>($"/api/warehousing/orders?from={fromStr}&till={tillStr}&limit=5000");
                     if (remoteSlice != null)
                     {
+                        foreach (var item in remoteSlice)
+                        {
+                            if (!string.IsNullOrEmpty(item?.Id))
+                            {
+                                _cardCache[item.Id] = item;
+                                LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
+                            }
+                        }
+
                         var query = remoteSlice.AsQueryable();
                         if (predicates != null)
                         {
@@ -110,26 +119,53 @@ namespace Mermer.Ui.Pc.Services
                     var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
 
                     var res = await _restClient.GetAsync<CountResponse>($"/api/warehousing/orders/count?from={fromStr}&till={tillStr}");
-                    if (res != null) return res.Count;
+                    if (res != null && res.Count > 0) return res.Count;
                 }
                 catch { }
             }
 
-            var items = await GetAsync(predicates);
-            return items.Count();
+            // Для фильтров списка (Open, Completed, Deleted, My Orders)
+            var all = await GetAllAsync();
+            var query = all.AsQueryable();
+            if (predicates != null)
+            {
+                foreach (var p in predicates.Where(x => x != null))
+                {
+                    query = query.Where(p);
+                }
+            }
+            return query.Count();
         }
 
         public async Task<IEnumerable<StockOrder>> GetAllAsync()
         {
-            if (_cardCache.Count > 0)
-                return _cardCache.Values.ToList();
-
-            var local = LocalSqliteCache.GetAllDocuments<StockOrder>(DocType);
-            if (local != null)
+            if (_cardCache.IsEmpty)
             {
-                foreach (var item in local)
+                try
                 {
-                    if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+                    var remote = await _restClient.GetAsync<List<StockOrder>>("/api/warehousing/orders?limit=5000");
+                    if (remote != null && remote.Any())
+                    {
+                        foreach (var item in remote)
+                        {
+                            if (!string.IsNullOrEmpty(item?.Id))
+                            {
+                                _cardCache[item.Id] = item;
+                                LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
+                            }
+                        }
+                        return _cardCache.Values.ToList();
+                    }
+                }
+                catch { }
+
+                var local = LocalSqliteCache.GetAllDocuments<StockOrder>(DocType);
+                if (local != null)
+                {
+                    foreach (var item in local)
+                    {
+                        if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+                    }
                 }
             }
 
@@ -147,12 +183,15 @@ namespace Mermer.Ui.Pc.Services
             _cardCache[entity.Id] = entity;
             LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
 
+            UiEventBus.NotifyDocumentModified<StockOrder>(entity.Id);
+
             _ = Task.Run(async () =>
             {
                 try
                 {
                     await _restClient.PostAsync("/api/warehousing/orders", entity);
                     LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
+                    UiEventBus.NotifyDocumentModified<StockOrder>(entity.Id);
                 }
                 catch { }
             });
@@ -162,6 +201,8 @@ namespace Mermer.Ui.Pc.Services
         {
             if (string.IsNullOrEmpty(id)) return;
             _cardCache.TryRemove(id, out _);
+
+            UiEventBus.NotifyDocumentModified<StockOrder>(id);
 
             _ = Task.Run(async () =>
             {
@@ -252,6 +293,7 @@ namespace Mermer.Ui.Pc.Services
         private class CountResponse
         {
             public int Count { get; set; }
+            public int count { get => Count; set => Count = value; }
         }
     }
 
@@ -355,12 +397,15 @@ namespace Mermer.Ui.Pc.Services
             _cardCache[entity.Id] = entity;
             LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
 
+            UiEventBus.NotifyDocumentModified<AggregatedStockOrder>(entity.Id);
+
             _ = Task.Run(async () =>
             {
                 try
                 {
                     await _restClient.PostAsync("/api/warehousing/aggregated-orders", entity);
                     LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
+                    UiEventBus.NotifyDocumentModified<AggregatedStockOrder>(entity.Id);
                 }
                 catch { }
             });
@@ -370,6 +415,8 @@ namespace Mermer.Ui.Pc.Services
         {
             if (string.IsNullOrEmpty(id)) return;
             _cardCache.TryRemove(id, out _);
+
+            UiEventBus.NotifyDocumentModified<AggregatedStockOrder>(id);
 
             _ = Task.Run(async () =>
             {

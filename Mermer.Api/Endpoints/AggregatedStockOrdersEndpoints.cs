@@ -48,7 +48,7 @@ public static class AggregatedStockOrdersEndpoints
             {
                 Id = o.Id.ToString(),
                 Code = o.Code ?? "",
-                Date = o.Date.UtcDateTime,
+                Date = o.Date.ToLocalTime().DateTime, // ИСПРАВЛЕНО НА LOCAL TIME
                 WarehouseId = o.WarehouseId?.ToString(),
                 PartnerId = o.PartnerId?.ToString(),
                 UserId = o.UserId?.ToString(),
@@ -87,7 +87,7 @@ public static class AggregatedStockOrdersEndpoints
             {
                 Id = o.Id.ToString(),
                 Code = o.Code ?? "",
-                Date = o.Date.UtcDateTime,
+                Date = o.Date.ToLocalTime().DateTime, // ИСПРАВЛЕНО НА LOCAL TIME
                 WarehouseId = o.WarehouseId?.ToString(),
                 PartnerId = o.PartnerId?.ToString(),
                 UserId = o.UserId?.ToString(),
@@ -110,7 +110,7 @@ public static class AggregatedStockOrdersEndpoints
             });
         });
 
-        // 3. ФАСЕТЫ (БЕЗ ВЫГРУЗКИ ВСЕЙ ТАБЛИЦЫ)
+        // 3. ФАСЕТЫ
         group.MapGet("/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
             string? fields = ctx.Request.Query["fields"].ToString();

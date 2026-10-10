@@ -20,7 +20,13 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                string query = string.IsNullOrEmpty(warehouseId) ? "" : $"?warehouseId={warehouseId}";
+                // Запрашиваем без лимитов, только с фильтром по складу (если он задан)
+                string query = string.Empty;
+                if (!string.IsNullOrEmpty(warehouseId))
+                {
+                    query = $"?warehouseId={warehouseId}";
+                }
+
                 var result = await _restClient.GetAsync<List<StockTurnoverData>>($"/api/stock-turnovers{query}");
                 return result ?? new List<StockTurnoverData>();
             }

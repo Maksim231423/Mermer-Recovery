@@ -1,6 +1,7 @@
 ﻿<mvx:MvxWpfView x:Class="Mermer.Ui.Pc.Views.Authorization.UserDetailsView"
                 xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                xmlns:cnv="clr-namespace:Mermer.Ui.Pc.Converters"
                 xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
                 xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
                 xmlns:dx="http://schemas.devexpress.com/winfx/2008/xaml/core"
@@ -12,7 +13,13 @@
                 xmlns:menu="clr-namespace:Mermer.Ui.Pc.Controls.MenuItems"
                 xmlns:dxg="http://schemas.devexpress.com/winfx/2008/xaml/grid"
                 xmlns:vm="clr-namespace:Mermer.Ui.Core.ViewModels.Authorization;assembly=Mermer.Ui.Core">
-  <DockPanel>
+
+    <!-- ВСТАВЛЯТЬ СЮДА -->
+    <mvx:MvxWpfView.Resources>
+        <cnv:PasswordDisplayConverter x:Key="PasswordDisplayConverter"/>
+    </mvx:MvxWpfView.Resources>
+
+    <DockPanel>
     <dxwui:AppBar DockPanel.Dock="Bottom" Style="{StaticResource MenuStyle}">
       <menu:DetailsSave/>
       <menu:DetailsSaveAndNew/>
@@ -31,12 +38,14 @@
                 <dxe:TextEdit x:Name="FirstFocus" EditValue="{Binding Details.Username, UpdateSourceTrigger=PropertyChanged}"
                               IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"/>
               </dxlc:LayoutItem>
-              <dxlc:LayoutItem Label="{Localize Passowrd}">
-                <dxe:TextEdit EditValue="{Binding Details.Password, UpdateSourceTrigger=PropertyChanged}"
-                              NullText="{Localize 'Leave empty to keep existing password'}"
-                              IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"/>
-              </dxlc:LayoutItem>
-              <dxlc:LayoutItem Label="{Localize IsAdmin}">
+                            <dxlc:LayoutItem Label="{Localize Passowrd}">
+                                <dxe:PasswordBoxEdit EditValue="{Binding Details.Password, 
+                                                         UpdateSourceTrigger=PropertyChanged, 
+                                                         Converter={StaticResource PasswordDisplayConverter}}"
+                                     NullText="{Localize 'Leave empty to keep existing password'}"
+                                     IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"/>
+                            </dxlc:LayoutItem>
+                            <dxlc:LayoutItem Label="{Localize IsAdmin}">
                 <dxe:CheckEdit x:Name="IsAdmin" Content="{Localize 'Check to give admin privileges'}"
                                IsChecked="{Binding Details.IsAdmin, UpdateSourceTrigger=PropertyChanged}"
                                IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"/>

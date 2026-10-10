@@ -27,10 +27,11 @@ public static class UsersEndpoints
                 {
                     Id = u.Id.ToString(),
                     Username = u.Username,
+                    Password = null, // Не отдаем хэш клиенту
                     IsAdmin = u.IsAdmin,
                     IsDisabled = u.IsDisabled,
                     Description = u.Description,
-                    Roles = new List<string>(),
+                    Roles = u.Roles ?? new List<string>(),
                     AccountPrivileges = new Dictionary<string, int>()
                 })
                 .ToListAsync(ct);
@@ -51,10 +52,11 @@ public static class UsersEndpoints
             {
                 Id = user.Id.ToString(),
                 Username = user.Username,
+                Password = null, // Не отдаем хэш клиенту
                 IsAdmin = user.IsAdmin,
                 IsDisabled = user.IsDisabled,
                 Description = user.Description,
-                Roles = new List<string>(),
+                Roles = user.Roles ?? new List<string>(),
                 AccountPrivileges = new Dictionary<string, int>()
             });
         });
@@ -71,10 +73,13 @@ public static class UsersEndpoints
             {
                 Id = userId,
                 Username = model.Username.Trim(),
-                Password = model.Password ?? string.Empty,
+                Password = !string.IsNullOrWhiteSpace(model.Password)
+                    ? AuthEndpoints.HashPasswordSha256Base64(model.Password)
+                    : "0DPiKuNIrrVmD8IUCuw1hQxNqZc=", // пароль "admin" по умолчанию
                 IsAdmin = model.IsAdmin,
                 IsDisabled = model.IsDisabled,
                 Description = model.Description,
+                Roles = model.Roles ?? new List<string>(),
                 CreatedAt = DateTimeOffset.UtcNow,
                 UpdatedAt = DateTimeOffset.UtcNow
             };
@@ -87,26 +92,68 @@ public static class UsersEndpoints
             return Results.Ok(model);
         });
 
-        // 4. PUT /api/users/{id}
+        // 4. PUT /api/users/{id} (Upsert)
         group.MapPut("/{id}", async (string id, UserDto model, MermerDbContext db, CancellationToken ct) =>
         {
             if (!Guid.TryParse(id, out var gId))
                 return Results.NotFound();
 
             var entity = await db.Users.FirstOrDefaultAsync(u => u.Id == gId, ct);
-            if (entity == null) return Results.NotFound();
+            var newUsername = model.Username?.Trim() ?? string.Empty;
 
-            if (!string.IsNullOrWhiteSpace(model.Username))
-                entity.Username = model.Username.Trim();
-
-            entity.IsAdmin = model.IsAdmin;
-            entity.IsDisabled = model.IsDisabled;
-            entity.Description = model.Description;
-            entity.UpdatedAt = DateTimeOffset.UtcNow;
-
-            if (!string.IsNullOrEmpty(model.Password))
+            var usernameTaken = await db.Users.AnyAsync(u => u.Id != gId && u.Username.ToLower() == newUsername.ToLower(), ct);
+            if (usernameTaken)
             {
-                entity.Password = model.Password;
+                return Results.BadRequest(new { message = $"Имя пользователя '{newUsername}' уже занято." });
+            }
+
+            string passwordToSave = null;
+            if (!string.IsNullOrWhiteSpace(model.Password))
+            {
+                // Если клиент уже прислал Base64 SHA-1/SHA-256 (обычно 28 или 44 символа с '=')
+                if (model.Password.EndsWith("=") && (model.Password.Length == 28 || model.Password.Length == 44))
+                {
+                    passwordToSave = model.Password;
+                }
+                else
+                {
+                    // Иначе хэшируем как SHA-1 Base64 (родной формат Couchbase/Binyat)
+                    passwordToSave = AuthEndpoints.HashPasswordSha1Base64(model.Password);
+                }
+            }
+
+            if (entity is null)
+            {
+                entity = new UserEntity
+                {
+                    Id = gId,
+                    Username = newUsername,
+                    Password = passwordToSave ?? "0DPiKuNIrrVmD8IUCuw1hQxNqZc=", // "admin"
+                    IsAdmin = model.IsAdmin,
+                    IsDisabled = model.IsDisabled,
+                    Description = model.Description,
+                    Roles = model.Roles ?? new List<string>(),
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    UpdatedAt = DateTimeOffset.UtcNow
+                };
+
+                db.Users.Add(entity);
+            }
+            else
+            {
+                if (!string.IsNullOrWhiteSpace(newUsername))
+                    entity.Username = newUsername;
+
+                entity.IsAdmin = model.IsAdmin;
+                entity.IsDisabled = model.IsDisabled;
+                entity.Description = model.Description;
+                entity.Roles = model.Roles ?? new List<string>();
+                entity.UpdatedAt = DateTimeOffset.UtcNow;
+
+                if (!string.IsNullOrEmpty(passwordToSave))
+                {
+                    entity.Password = passwordToSave;
+                }
             }
 
             await db.SaveChangesAsync(ct);
@@ -125,7 +172,7 @@ public static class UsersEndpoints
             var entity = await db.Users.FirstOrDefaultAsync(u => u.Id == gId, ct);
             if (entity == null) return Results.NotFound();
 
-            db.Users.Remove(entity);
+            entity.IsDisabled = true;
             await db.SaveChangesAsync(ct);
             return Results.Ok(new { success = true });
         });

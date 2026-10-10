@@ -360,6 +360,20 @@ public class StocksListViewModel :
         this.IsBusy = true;
         try
         {
+            // Вызываем ReloadFromServerAsync, если репозиторий его реализует
+            if (this._repository != null)
+            {
+                var method = this._repository.GetType().GetMethod("ReloadFromServerAsync");
+                if (method != null)
+                {
+                    var task = method.Invoke(this._repository, null) as Task;
+                    if (task != null)
+                    {
+                        await task;
+                    }
+                }
+            }
+
             await this.Currencies.Initialize();
             await this.LoadFacetsAsync();
             await this.OnLoad();

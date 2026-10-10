@@ -159,6 +159,9 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
         _cardCache[entity.Id] = entity;
         LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
 
+        // Мгновенное обновление расхода в списке
+        UiEventBus.NotifyDocumentModified<ExpenseSlip>(entity.Id);
+
         var payload = BuildPayload(entity);
 
         _ = Task.Run(async () =>
@@ -167,6 +170,7 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
             {
                 await _restClient.PostAsync("/api/spending/slips", payload);
                 LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
+                UiEventBus.NotifyDocumentModified<ExpenseSlip>(entity.Id);
             }
             catch (Exception ex)
             {
@@ -181,6 +185,9 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
     {
         if (string.IsNullOrEmpty(id)) return;
         _cardCache.TryRemove(id, out _);
+
+        // Мгновенное удаление из списка
+        UiEventBus.NotifyDocumentModified<ExpenseSlip>(id);
 
         _ = Task.Run(async () =>
         {

@@ -55,6 +55,7 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
         this.StockSearcher = stockSearcher;
         this.StockSearcher.ResultSelected += new SearchResultSelected(this.OnStockSearcherOnResultSelected);
         this.SelectedStockIds = new ObservableCollection<string>();
+        this._list = new ObservableCollection<StockBalanceByWarehouses>();
     }
 
     public StockSearcher StockSearcher { get; }
@@ -162,7 +163,6 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
 
     protected override async Task PreLoad()
     {
-        // ИСПРАВЛЕНИЕ: Загружаем справочники только один раз, чтобы не сбрасывался выбор склада!
         if (!_loaded)
         {
             await Task.WhenAll(base.PreLoad(), this.Currencies.Initialize(), this.Warehouses.Initialize(), this.StockSearcher.Initialize());
@@ -181,11 +181,26 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
 
     protected override async Task OnLoad()
     {
-        this.List = new ObservableCollection<StockBalanceByWarehouses>(await this._balancesRepository.GetByDateAndWarehousesAsync(this.DateFilterInclusive, this.WarehouseIds, this.DisplayCurrencyId, this.ShowAllStocks ? null : this.SelectedStockIds));
+        // Если склады не выбраны — таблица открывается пустой без запроса к базе
+        if (!this.WarehouseIds.Any())
+        {
+            this.List = new ObservableCollection<StockBalanceByWarehouses>();
+            return;
+        }
+
+        var data = await this._balancesRepository.GetByDateAndWarehousesAsync(
+            this.DateFilterInclusive,
+            this.WarehouseIds,
+            this.DisplayCurrencyId,
+            this.ShowAllStocks ? null : this.SelectedStockIds);
+
+        this.List = new ObservableCollection<StockBalanceByWarehouses>(data ?? Enumerable.Empty<StockBalanceByWarehouses>());
     }
 
     private async Task AddLineAsync(string stockId)
     {
+        if (!this.WarehouseIds.Any()) return;
+
         try
         {
             var balances = await this._balancesRepository.GetByDateAndWarehousesAsync(
@@ -197,7 +212,6 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
             var item = balances?.FirstOrDefault();
             if (item != null)
             {
-                // Защита от NRE в CustomUnboundColumnData
                 if (item.Balances == null)
                 {
                     item.Balances = new Dictionary<string, decimal>();
@@ -225,27 +239,6 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
         }
     }
 
-    public ICommand AddAllStocksCommand => new MvxAsyncCommand(this.OnAddAllStocksCommandAsync, () => !this.IsBusy);
-
-    private async Task OnAddAllStocksCommandAsync()
-    {
-        this.IsBusy = true;
-        try
-        {
-            this.SelectedStockIds.Clear();
-            this.ShowAllStocks = true;
-            var balances = await this._balancesRepository.GetByDateAndWarehousesAsync(this.DateFilterInclusive, this.WarehouseIds, this.DisplayCurrencyId);
-            this.List = new ObservableCollection<StockBalanceByWarehouses>(balances);
-            this.SelectedStockIds = new ObservableCollection<string>(this.List.Select(x => x.StockId));
-            this.SubCaption = this["All Records"];
-        }
-        catch (Exception ex)
-        {
-            this.UserInteractionService.ShowExceptionMessage(ex);
-        }
-        this.IsBusy = false;
-    }
-
     public ICommand SelectedLineDeleteCommand => new MvxCommand(this.OnSelectedLineDeleteCommand, () => !this.IsBusy && this.SelectedItem != null);
 
     private void OnSelectedLineDeleteCommand()
@@ -269,11 +262,9 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
         }
         else
         {
-            // Если товар уже был в списке, принудительно подгружаем/обновляем строку
             _ = this.AddLineAsync(result.Id);
         }
 
-        // Очищаем строку поиска после выбора товара
         this.StockSearcher.SearchText = string.Empty;
     }
 
@@ -292,6 +283,9 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
 
     private void GenerateColumns()
     {
-        this.Columns = this.Warehouses.List.Where(x => this.WarehouseIds.Contains(x.Id)).Select(x => new ColumnDescription(x.Id, x.Name)).ToArray();
+        this.Columns = this.Warehouses.List
+            .Where(x => this.WarehouseIds.Contains(x.Id))
+            .Select(x => new ColumnDescription(x.Id, x.Name))
+            .ToArray();
     }
 }

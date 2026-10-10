@@ -33,7 +33,12 @@ public class StockSearchResult
 
   public string LastPurchaseCurrencyId { get; set; }
 
-  public Decimal Balance { get; set; }
+    private decimal _balance;
+    public decimal Balance 
+    { 
+        get => Math.Round(_balance, 2); 
+        set => _balance = value; 
+    }
 
   public string Unit { get; set; }
 

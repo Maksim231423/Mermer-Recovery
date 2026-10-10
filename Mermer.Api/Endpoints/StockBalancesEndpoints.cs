@@ -17,35 +17,23 @@ public static class StockBalancesEndpoints
     {
         var group = app.MapGroup("/api/stock-balances").WithTags("StockBalances");
 
-        // 1. ТЕКУЩИЕ ОСТАТКИ НА СКЛАДАХ (Чистые плоские запросы без спама в логах)
+        var jsonOptions = new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = null };
+
+        // 1. ТЕКУЩИЕ ОСТАТКИ НА СКЛАДАХ
         group.MapGet("/", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             DateTimeOffset date = DateTimeOffset.UtcNow;
             string? dateStr = req.Query["date"].FirstOrDefault();
             if (!string.IsNullOrEmpty(dateStr) && DateTimeOffset.TryParse(dateStr.Replace(" ", "+"), out var pDate))
-                date = pDate.ToUniversalTime();
-
-            var whIds = new HashSet<Guid>();
-            foreach (var val in req.Query["warehouseId"])
             {
-                if (string.IsNullOrWhiteSpace(val)) continue;
-                foreach (var part in val.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
-                {
-                    if (Guid.TryParse(part.Trim(), out var parsedWh))
-                        whIds.Add(parsedWh);
-                }
+                if (pDate.TimeOfDay == TimeSpan.Zero)
+                    date = pDate.Date.AddDays(1).AddTicks(-1).ToUniversalTime();
+                else
+                    date = pDate.ToUniversalTime();
             }
 
-            var stockIds = new HashSet<Guid>();
-            foreach (var val in req.Query["stockId"])
-            {
-                if (string.IsNullOrWhiteSpace(val)) continue;
-                foreach (var part in val.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
-                {
-                    if (Guid.TryParse(part.Trim(), out var parsedSt))
-                        stockIds.Add(parsedSt);
-                }
-            }
+            var whIds = ParseGuids(req.Query["warehouseId"]);
+            var stockIds = ParseGuids(req.Query["stockId"]);
 
             // 1. Накладные (Invoices)
             var invQuery = db.InvoiceLines.AsNoTracking()
@@ -98,7 +86,7 @@ public static class StockBalancesEndpoints
                 QtyRec = l.ReceivedQuantity != 0m ? l.ReceivedQuantity : l.Quantity
             }).ToListAsync(ct);
 
-            // 4. Суммируем остатки в памяти
+            // 4. Суммируем остатки
             var balancesDict = new Dictionary<(Guid Wh, Guid St), BalanceAccumulator>();
 
             BalanceAccumulator GetOrCreate(Guid wh, Guid st)
@@ -156,9 +144,8 @@ public static class StockBalancesEndpoints
                 .Where(x => x.Balance != 0m || x.Income != 0m || x.Expense != 0m)
                 .ToList();
 
-            return Results.Ok(result);
+            return Results.Json(result, jsonOptions);
         });
-
 
         // 2. ОТЧЕТ ПО ТИПАМ ДОКУМЕНТОВ (STOCK BALANCES BY TYPE)
         group.MapGet("/by-type", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
@@ -198,21 +185,11 @@ public static class StockBalancesEndpoints
             string? stockIdStr = req.Query["stockId"].FirstOrDefault();
             Guid? filterStockGuid = Guid.TryParse(stockIdStr, out var sG) ? sG : null;
 
-            // Надежный парсинг Guid складов
-            var whIds = new HashSet<Guid>();
-            foreach (var val in req.Query["warehouseId"])
-            {
-                if (string.IsNullOrWhiteSpace(val)) continue;
-                foreach (var part in val.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
-                {
-                    if (Guid.TryParse(part.Trim(), out var parsedWh))
-                        whIds.Add(parsedWh);
-                }
-            }
+            var whIds = ParseGuids(req.Query["warehouseId"]);
 
             // 1. Инвойсы
             var invQuery = db.InvoiceLines.AsNoTracking()
-                .Where(l => l.StockId.HasValue && l.Invoice != null && !l.Invoice.IsDisabled && l.Invoice.WarehouseId.HasValue);
+                .Where(l => l.StockId.HasValue && l.Invoice != null && !l.Invoice.IsDisabled && l.Invoice.IsCompleted && l.Invoice.WarehouseId.HasValue);
 
             if (whIds.Any())
                 invQuery = invQuery.Where(l => whIds.Contains(l.Invoice.WarehouseId!.Value));
@@ -230,7 +207,7 @@ public static class StockBalancesEndpoints
 
             // 2. Складские ордера
             var slipQuery = db.StockSlipLines.AsNoTracking()
-                .Where(l => l.StockId.HasValue && l.StockSlip != null && l.StockSlip.WarehouseId.HasValue);
+                .Where(l => l.StockId.HasValue && l.StockSlip != null && l.StockSlip.IsCompleted && l.StockSlip.WarehouseId.HasValue);
 
             if (whIds.Any())
                 slipQuery = slipQuery.Where(l => whIds.Contains(l.StockSlip.WarehouseId!.Value));
@@ -248,7 +225,7 @@ public static class StockBalancesEndpoints
 
             // 3. Перемещения
             var trQuery = db.StockTransferLines.AsNoTracking()
-                .Where(l => l.StockId.HasValue && l.StockTransfer != null && !l.StockTransfer.IsDisabled);
+                .Where(l => l.StockId.HasValue && l.StockTransfer != null && !l.StockTransfer.IsDisabled && l.StockTransfer.IsCompleted);
 
             if (whIds.Any())
             {
@@ -290,18 +267,16 @@ public static class StockBalancesEndpoints
 
             foreach (var tr in trData)
             {
-                // Для выбранных складов фиксируем расход только если склад-отправитель входит в выборку
                 if (tr.SrcWhId.HasValue && (!whIds.Any() || whIds.Contains(tr.SrcWhId.Value)))
                     movements.Add(new StockMovementRecord(tr.SrcWhId.Value, tr.StockId, tr.Date.ToUniversalTime(), "StockTransferSource", 0m, tr.QtySent));
 
-                // Фиксируем приход только если склад-получатель входит в выборку
                 if (tr.DstWhId.HasValue && (!whIds.Any() || whIds.Contains(tr.DstWhId.Value)))
                     movements.Add(new StockMovementRecord(tr.DstWhId.Value, tr.StockId, tr.Date.ToUniversalTime(), "StockTransferDestination", tr.QtyRec, 0m));
             }
 
             if (!movements.Any()) return Results.Ok(Array.Empty<object>());
 
-            // 5. Загрузка карточек
+            // 5. Загрузка карточек товаров
             var stocksRaw = await db.Stocks.AsNoTracking()
                 .Where(s => !s.IsDisabled)
                 .Select(s => new
@@ -354,12 +329,14 @@ public static class StockBalancesEndpoints
 
                     if (isAllTime)
                     {
+                        // Для "All Records": скрываем только если вообще никогда не было движений и остаток 0
                         if (starting == 0m && inc == 0m && exp == 0m && resulting == 0m)
                             continue;
                     }
                     else
                     {
-                        // Для периодов дат: отображаем ТОЛЬКО товары с движениями за период
+                        // Для периодов (#Today, #This Week и т.д.): показываем ТОЛЬКО те товары,
+                        // у которых БЫЛО реальное движение за этот период!
                         if (inc == 0m && exp == 0m)
                             continue;
                     }
@@ -439,6 +416,7 @@ public static class StockBalancesEndpoints
                     }
                     else
                     {
+                        // Показываем только товары с движениями за выбранный период
                         if (inc == 0m && exp == 0m)
                             continue;
                     }
@@ -485,40 +463,25 @@ public static class StockBalancesEndpoints
             return Results.Ok(result.OrderBy(x => ((dynamic)x).StockName));
         });
 
-        // 3. ОТЧЕТ ПО СКЛАДАМ НА ДАТУ (Легкий плоский запрос)
+        // 3. ОТЧЕТ ПО СКЛАДАМ НА ДАТУ
         group.MapGet("/by-date-warehouses", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             DateTimeOffset date = DateTimeOffset.UtcNow;
             string? dateStr = req.Query["date"].FirstOrDefault();
             if (!string.IsNullOrEmpty(dateStr) && DateTimeOffset.TryParse(dateStr.Replace(" ", "+"), out var pDate))
-                date = pDate.ToUniversalTime();
+            {
+                if (pDate.TimeOfDay == TimeSpan.Zero)
+                    date = pDate.Date.AddDays(1).AddTicks(-1).ToUniversalTime();
+                else
+                    date = pDate.ToUniversalTime();
+            }
 
             string? displayCurrencyId = req.Query["displayCurrencyId"].FirstOrDefault();
             Guid? displayCurrGuid = Guid.TryParse(displayCurrencyId, out var dcG) ? dcG : null;
 
-            var whIds = new HashSet<Guid>();
-            foreach (var val in req.Query["warehouseId"])
-            {
-                if (string.IsNullOrWhiteSpace(val)) continue;
-                foreach (var part in val.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
-                {
-                    if (Guid.TryParse(part.Trim(), out var parsedWh))
-                        whIds.Add(parsedWh);
-                }
-            }
+            var whIds = ParseGuids(req.Query["warehouseId"]);
+            var stockIds = ParseGuids(req.Query["stockId"]);
 
-            var stockIds = new HashSet<Guid>();
-            foreach (var val in req.Query["stockId"])
-            {
-                if (string.IsNullOrWhiteSpace(val)) continue;
-                foreach (var part in val.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
-                {
-                    if (Guid.TryParse(part.Trim(), out var parsedSt))
-                        stockIds.Add(parsedSt);
-                }
-            }
-
-            // Читаем движения аналогично методу /
             var invQuery = db.InvoiceLines.AsNoTracking()
                 .Where(l => l.StockId.HasValue && l.Invoice != null && l.Invoice.IsCompleted && !l.Invoice.IsDisabled && l.Invoice.WarehouseId.HasValue && l.Invoice.Date <= date);
 
@@ -692,11 +655,26 @@ public static class StockBalancesEndpoints
         return app;
     }
 
+    private static HashSet<Guid> ParseGuids(Microsoft.Extensions.Primitives.StringValues values)
+    {
+        var set = new HashSet<Guid>();
+        foreach (var val in values)
+        {
+            if (string.IsNullOrWhiteSpace(val)) continue;
+            foreach (var part in val.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (Guid.TryParse(part.Trim(), out var parsed))
+                    set.Add(parsed);
+            }
+        }
+        return set;
+    }
 
     private class BalanceAccumulator
     {
         public decimal Income { get; set; }
         public decimal Expense { get; set; }
     }
+
     private record StockMovementRecord(Guid WarehouseId, Guid StockId, DateTimeOffset Date, string Type, decimal Income, decimal Expense);
 }

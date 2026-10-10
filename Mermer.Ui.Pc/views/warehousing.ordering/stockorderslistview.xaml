@@ -70,8 +70,12 @@
         </dxg:GridColumn>
         
         <!-- Колонка с группой -->
-        <dxg:GridColumn FieldName="Group" GroupIndex="0" Header="{Localize Group}"/>
-      </dxg:GridControl.Columns>
+                <dxg:GridColumn FieldName="Group" 
+                Binding="{Binding GroupName, TargetNullValue='', FallbackValue=''}" 
+                GroupIndex="0" 
+                Header="{Localize Group}" 
+                SortMode="DisplayText" />
+            </dxg:GridControl.Columns>
     </ctrl:StyledGridControl>
   </DockPanel>
 </mvx:MvxWpfView>

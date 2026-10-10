@@ -86,7 +86,7 @@ public class BaseApiCacheRepository<T> : IRepository<T>, IReadOnlyRepository<T>,
 
     public async Task<IEnumerable<T>> GetListAsync(params string[] ids) => await GetAsync(ids);
 
-    public async Task<IEnumerable<T>> GetAsync(params Expression<Func<T, bool>>[] predicates)
+    public virtual async Task<IEnumerable<T>> GetAsync(params Expression<Func<T, bool>>[] predicates)
     {
         var all = await GetAllAsync();
         var query = all.AsQueryable();
@@ -114,11 +114,17 @@ public class BaseApiCacheRepository<T> : IRepository<T>, IReadOnlyRepository<T>,
             _ramCache.Add(entity);
         }
 
+        // Мгновенно уведомляем открытые списки данного типа T (Depository, Warehouse, Office и т.д.)
+        UiEventBus.NotifyDocumentModified<T>(entity.Id);
+
         try
         {
             if (isNew) await _restClient.PostAsync($"/api/{ApiRoute}", entity);
             else await _restClient.PutAsync($"/api/{ApiRoute}/{entity.Id}", entity);
             LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
+
+            // Подтверждаем обновление после ответа сервера
+            UiEventBus.NotifyDocumentModified<T>(entity.Id);
         }
         catch { }
     }
@@ -128,11 +134,17 @@ public class BaseApiCacheRepository<T> : IRepository<T>, IReadOnlyRepository<T>,
 
     public async Task DeleteAsync(string id)
     {
+        if (string.IsNullOrEmpty(id)) return;
+
         if (_ramCache != null)
         {
             var existing = _ramCache.FirstOrDefault(x => x.Id == id);
             if (existing != null) _ramCache.Remove(existing);
         }
+
+        // Мгновенно убираем удаленный элемент из открытого списка в UI
+        UiEventBus.NotifyDocumentModified<T>(id);
+
         try { await _restClient.DeleteAsync($"/api/{ApiRoute}/{id}"); } catch { }
     }
 

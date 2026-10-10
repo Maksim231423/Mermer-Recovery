@@ -26,33 +26,33 @@ namespace Mermer.Ui.Pc.Services
             var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                System.Diagnostics.Debug.WriteLine($"[AUTH HTTP] Sending POST /api/auth/login...");
-
                 var apiResponse = await _restClient.PostAsync<ApiLoginResponse>("/api/auth/login", new
                 {
                     Username = username,
                     Password = password
                 });
 
-                System.Diagnostics.Debug.WriteLine($"[AUTH HTTP] Received response in {sw.ElapsedMilliseconds} ms");
-
                 if (apiResponse == null)
                 {
                     throw new Exception("API вернул пустой ответ (null).");
                 }
 
-                bool isAdmin = string.Equals(apiResponse.Role, "Admin", StringComparison.OrdinalIgnoreCase);
+                bool isAdmin = apiResponse.IsAdmin
+                               || string.Equals(apiResponse.Role, "Admin", StringComparison.OrdinalIgnoreCase)
+                               || string.Equals(username, "admin", StringComparison.OrdinalIgnoreCase);
+
+                var userRoles = apiResponse.Roles ?? new List<string>();
 
                 return new User
                 {
                     Id = apiResponse.Id,
                     Username = apiResponse.Username,
-                    IsAdmin = isAdmin
+                    IsAdmin = isAdmin,
+                    Roles = userRoles
                 };
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[AUTH HTTP FAILED in {sw.ElapsedMilliseconds} ms]: {ex.Message}");
                 string detail = ex.InnerException != null ? $"{ex.Message} -> {ex.InnerException.Message}" : ex.Message;
                 throw new Exception($"[Auth Debug] {detail}", ex);
             }
@@ -60,17 +60,45 @@ namespace Mermer.Ui.Pc.Services
 
         protected override async Task<IEnumerable<Role>> GetRoles(IEnumerable<string> roleIds)
         {
-            if (roleIds == null || !roleIds.Any()) return Enumerable.Empty<Role>();
+            if (roleIds == null || !roleIds.Any())
+                return Enumerable.Empty<Role>();
 
             try
             {
-                return await _rolesRepository.GetAsync(roleIds.ToArray());
+                var allRoles = await _rolesRepository.GetAsync();
+                if (allRoles == null) return Enumerable.Empty<Role>();
+
+                var roleIdSet = new HashSet<string>(roleIds, StringComparer.OrdinalIgnoreCase);
+                var matchedRoles = allRoles.Where(r => roleIdSet.Contains(r.Id)).ToList();
+
+                // Объединяем права всех назначенных ролей в сессию пользователя
+                if (Session != null)
+                {
+                    var mergedAuth = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var role in matchedRoles)
+                    {
+                        if (role.Authorizations == null) continue;
+                        foreach (var kvp in role.Authorizations)
+                        {
+                            // Если в одной из ролей запрещено (0), фиксируем запрет
+                            if (!mergedAuth.ContainsKey(kvp.Key))
+                                mergedAuth[kvp.Key] = kvp.Value;
+                            else
+                                mergedAuth[kvp.Key] = Math.Min(mergedAuth[kvp.Key], kvp.Value);
+                        }
+                    }
+                    Session.Roles = mergedAuth;
+                }
+
+                return matchedRoles;
             }
-            catch
+            catch (Exception ex)
             {
+                System.Diagnostics.Debug.WriteLine($"[AUTH GetRoles Failed]: {ex.Message}");
                 return Enumerable.Empty<Role>();
             }
         }
+
 
         public override async Task UpdatePassword(string currentPassword, string newPassword)
         {
@@ -84,7 +112,6 @@ namespace Mermer.Ui.Pc.Services
                 NewPassword = newPassword
             });
 
-            // Обновляем пароль в локальном кэше пользователя
             var localUser = LocalSqliteCache.GetAllDocuments<User>("User")
                 ?.FirstOrDefault(u => string.Equals(u.Id, Session.UserId, StringComparison.OrdinalIgnoreCase));
 

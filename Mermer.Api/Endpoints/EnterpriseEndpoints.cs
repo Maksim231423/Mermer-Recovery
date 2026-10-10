@@ -1,17 +1,18 @@
-﻿using System;
+﻿using Dapper;
+using Mermer.Data.Postgres;
+using Mermer.Data.Postgres.Entities;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.EntityFrameworkCore;
+using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Globalization;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Routing;
-using Microsoft.EntityFrameworkCore;
-using Mermer.Data.Postgres;
-using Mermer.Data.Postgres.Entities;
 
 namespace Mermer.Api.Endpoints;
 
@@ -64,13 +65,18 @@ public static class EnterpriseEndpoints
         routes.MapGet("/api/enterprise/warehouses", GetWarehouses).WithTags("Enterprise");
         routes.MapGet("/api/warehouses", GetWarehouses).WithTags("Enterprise");
 
-        // Валюты: список (с кэшированием)
-        routes.MapGet("/api/currencies", async (MermerDbContext db, CancellationToken ct) =>
+        // Валюты: список (активные по умолчанию, все — только при includeDisabled=true)
+        routes.MapGet("/api/currencies", async (bool? includeDisabled, MermerDbContext db, CancellationToken ct) =>
         {
-            if (_cachedCurrencies != null)
-                return Results.Json(_cachedCurrencies, jsonOptions);
+            bool showDisabled = includeDisabled ?? false;
 
-            var currencies = await db.Currencies.Include(c => c.Rates).AsNoTracking().ToListAsync(ct);
+            var query = db.Currencies.Include(c => c.Rates).AsNoTracking();
+            if (!showDisabled)
+            {
+                query = query.Where(c => !c.IsDisabled);
+            }
+
+            var currencies = await query.OrderBy(c => c.Name).ToListAsync(ct);
             var result = currencies.Select(c => new
             {
                 Id = c.Id.ToString(),
@@ -89,8 +95,7 @@ public static class EnterpriseEndpoints
                 }).ToList() : new List<object>()
             }).ToList();
 
-            _cachedCurrencies = result;
-            return Results.Json(_cachedCurrencies, jsonOptions);
+            return Results.Json(result, jsonOptions);
         }).WithTags("Enterprise");
 
         // Валюты: по ID
@@ -120,32 +125,29 @@ public static class EnterpriseEndpoints
             return Results.Json(result, jsonOptions);
         }).WithTags("Enterprise");
 
-        // Сохранение валюты
-        Func<HttpRequest, MermerDbContext, Task<IResult>> saveCurrencyHandler = async (request, db) =>
+        // Сохранение валюты (Атомарный UPSERT без ошибок 23505)
+        Func<HttpContext, MermerDbContext, CancellationToken, Task<IResult>> saveCurrencyHandler = async (context, db, ct) =>
         {
-            using var reader = new StreamReader(request.Body);
-            var body = await reader.ReadToEndAsync();
+            using var reader = new StreamReader(context.Request.Body);
+            var body = await reader.ReadToEndAsync(ct);
             if (string.IsNullOrEmpty(body)) return Results.BadRequest("Empty body");
 
             using var doc = JsonDocument.Parse(body);
             var root = doc.RootElement;
 
-            string? idStr = GetStringProperty(root, "id", "Id");
-            Guid currencyId = Guid.TryParse(idStr, out var parsedGuid) && parsedGuid != Guid.Empty ? parsedGuid : Guid.NewGuid();
+            string? routeId = context.GetRouteValue("id")?.ToString();
+            string? jsonId = GetStringProperty(root, "id", "Id");
+            string? effectiveIdStr = !string.IsNullOrWhiteSpace(routeId) ? routeId : jsonId;
 
-            var existing = await db.Currencies.Include(c => c.Rates).FirstOrDefaultAsync(c => c.Id == currencyId);
+            Guid currencyId = Guid.TryParse(effectiveIdStr, out var parsedGuid) && parsedGuid != Guid.Empty
+                ? parsedGuid
+                : Guid.NewGuid();
 
             string name = GetStringProperty(root, "name", "Name") ?? "Currency";
             string description = GetStringProperty(root, "description", "Description") ?? string.Empty;
             bool isDefault = GetBoolProperty(root, "isDefault", "IsDefault");
             bool isDisabled = GetBoolProperty(root, "isDisabled", "IsDisabled");
             int decimals = GetIntProperty(root, "decimals", "Decimals", 2);
-
-            if (isDefault)
-            {
-                var currentDefaults = await db.Currencies.Where(c => c.IsDefault && c.Id != currencyId).ToListAsync();
-                foreach (var cd in currentDefaults) cd.IsDefault = false;
-            }
 
             var incomingRates = new List<CurrencyRateEntity>();
             if (TryGetPropertyCaseInsensitive(root, "rates", out var ratesProp) && ratesProp.ValueKind == JsonValueKind.Array)
@@ -181,53 +183,74 @@ public static class EnterpriseEndpoints
                 }
             }
 
-            if (existing == null)
-            {
-                var entity = new CurrencyEntity
-                {
-                    Id = currencyId,
-                    Name = name,
-                    Description = description,
-                    IsDefault = isDefault,
-                    IsDisabled = isDisabled,
-                    Decimals = decimals,
-                    CreatedAt = DateTime.UtcNow,
-                    UpdatedAt = DateTime.UtcNow,
-                    Rates = incomingRates
-                };
-                await db.Currencies.AddAsync(entity);
-            }
-            else
-            {
-                existing.Name = name;
-                existing.Description = description;
-                existing.IsDefault = isDefault;
-                existing.IsDisabled = isDisabled;
-                existing.Decimals = decimals;
-                existing.UpdatedAt = DateTime.UtcNow;
+            var connStr = db.Database.GetConnectionString();
+            await using var conn = new Npgsql.NpgsqlConnection(connStr);
+            await conn.OpenAsync(ct);
+            await using var tx = await conn.BeginTransactionAsync(ct);
 
-                if (existing.Rates != null && existing.Rates.Any())
+            try
+            {
+                // 1. Снимаем признак Default у остальных, если эта валюта выбрана по умолчанию
+                if (isDefault)
                 {
-                    db.CurrencyRates.RemoveRange(existing.Rates);
+                    await conn.ExecuteAsync(
+                        "UPDATE currencies SET is_default = false WHERE id != @id AND is_default = true;",
+                        new { id = currencyId }, tx);
                 }
 
-                foreach (var inc in incomingRates)
+                // 2. Атомарный UPSERT валюты (гарантирует отсутствие ошибки 23505 pkey)
+                const string upsertCurrencySql = """
+                    INSERT INTO currencies (id, name, description, is_default, is_disabled, decimals, created_at, updated_at)
+                    VALUES (@id, @name, @description, @isDefault, @isDisabled, @decimals, @now, @now)
+                    ON CONFLICT (id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        description = EXCLUDED.description,
+                        is_default = EXCLUDED.is_default,
+                        is_disabled = EXCLUDED.is_disabled,
+                        decimals = EXCLUDED.decimals,
+                        updated_at = EXCLUDED.updated_at;
+                    """;
+
+                await conn.ExecuteAsync(upsertCurrencySql, new
                 {
-                    inc.CurrencyId = existing.Id;
-                    db.CurrencyRates.Add(inc);
+                    id = currencyId,
+                    name,
+                    description,
+                    isDefault,
+                    isDisabled,
+                    decimals,
+                    now = DateTimeOffset.UtcNow
+                }, tx);
+
+                // 3. Обновляем курсы
+                await conn.ExecuteAsync("DELETE FROM currency_rates WHERE currency_id = @id;", new { id = currencyId }, tx);
+
+                if (incomingRates.Count > 0)
+                {
+                    const string insertRateSql = """
+                        INSERT INTO currency_rates (id, currency_id, valid_from, multiplier, divider, created_at)
+                        VALUES (@Id, @CurrencyId, @ValidFrom, @Multiplier, @Divider, @CreatedAt);
+                        """;
+                    await conn.ExecuteAsync(insertRateSql, incomingRates, tx);
                 }
+
+                await tx.CommitAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                await tx.RollbackAsync(ct);
+                Console.WriteLine($"[CURRENCY SAVE ERROR]: {ex}");
+                return Results.Problem(ex.Message);
             }
 
-            await db.SaveChangesAsync();
-
-            // Инвалидация кэша валют при изменении/добавлении
+            // Инвалидация кэша валют
             _cachedCurrencies = null;
 
             return Results.Json(new { Id = currencyId.ToString(), Name = name }, jsonOptions);
         };
 
-        routes.MapPost("/api/currencies", saveCurrencyHandler).WithTags("Enterprise");
-        routes.MapPut("/api/currencies/{id}", saveCurrencyHandler).WithTags("Enterprise");
+        routes.MapPost("/api/currencies", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) => await saveCurrencyHandler(ctx, db, ct)).WithTags("Enterprise");
+        routes.MapPut("/api/currencies/{id}", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) => await saveCurrencyHandler(ctx, db, ct)).WithTags("Enterprise");
     }
 
     #region Helpers

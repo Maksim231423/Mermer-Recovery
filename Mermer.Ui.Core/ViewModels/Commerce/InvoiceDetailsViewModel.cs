@@ -162,6 +162,83 @@ public class InvoiceDetailsViewModel :
         if (Details.Changes == null) Details.Changes = new WatchedObservableCollection<InvoicePayment>();
         if (Details.Discounts == null) Details.Discounts = new WatchedObservableCollection<InvoiceDiscount>();
 
+        // --- ГАРАНТИРОВАННАЯ АКТУАЛИЗАЦИЯ КУРСОВ ВАЛЮТ ДЛЯ ПРОДАЖИ ---
+        if (string.IsNullOrEmpty(ItemId))
+        {
+            if (Details.CurrencyConvertions == null)
+                Details.CurrencyConvertions = new WatchedObservableCollection<CurrencyConvertion>();
+
+            IEnumerable<Currency> currenciesSource = Currencies?.List;
+
+            // Если в Reference курсы не загрузились — запрашиваем через стандартный IRepository<Currency>
+            if (currenciesSource == null || !currenciesSource.Any(c => c.Rates != null && c.Rates.Any(r => r.Multiplier != 1m || r.Divider != 1m)))
+            {
+                try
+                {
+                    if (MvvmCross.Platform.Mvx.CanResolve<IRepository<Currency>>())
+                    {
+                        var repo = MvvmCross.Platform.Mvx.Resolve<IRepository<Currency>>();
+                        var fresh = await repo.GetAsync();
+                        if (fresh != null && fresh.Any())
+                        {
+                            currenciesSource = fresh;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            var activeCurrencies = currenciesSource?.Where(c => !c.IsDisabled).ToList();
+
+            if (activeCurrencies != null && activeCurrencies.Any())
+            {
+                var docDate = Details.Date != default ? Details.Date.Date : DateTime.Today;
+
+                foreach (var currency in activeCurrencies)
+                {
+                    // Ищем курс на дату документа или берем самый последний доступный курс
+                    CurrencyRate matchedRate = null;
+                    if (currency.Rates != null && currency.Rates.Any())
+                    {
+                        matchedRate = currency.Rates
+                            .Where(r => r.ValidFrom.Date <= docDate)
+                            .OrderByDescending(r => r.ValidFrom)
+                            .FirstOrDefault()
+                            ?? currency.Rates.OrderByDescending(r => r.ValidFrom).FirstOrDefault();
+                    }
+
+                    decimal mult = (matchedRate != null && matchedRate.Multiplier != 0m) ? matchedRate.Multiplier : 1m;
+                    decimal div = (matchedRate != null && matchedRate.Divider != 0m) ? matchedRate.Divider : 1m;
+
+                    var existingConv = Details.CurrencyConvertions.FirstOrDefault(c => string.Equals(c.CurrencyId, currency.Id, StringComparison.OrdinalIgnoreCase));
+                    if (existingConv != null)
+                    {
+                        existingConv.Multiplier = mult;
+                        existingConv.Divider = div;
+                    }
+                    else
+                    {
+                        Details.CurrencyConvertions.Add(new CurrencyConvertion
+                        {
+                            CurrencyId = currency.Id,
+                            Multiplier = mult,
+                            Divider = div
+                        });
+                    }
+                }
+
+                // Удаляем отключенные и пустые валюты из списка конверсий
+                var activeIds = new HashSet<string>(activeCurrencies.Select(c => c.Id), StringComparer.OrdinalIgnoreCase);
+                var toRemove = Details.CurrencyConvertions.Where(c => string.IsNullOrEmpty(c.CurrencyId) || !activeIds.Contains(c.CurrencyId)).ToList();
+                foreach (var item in toRemove)
+                {
+                    Details.CurrencyConvertions.Remove(item);
+                }
+
+                Details.UpdateCurrencyConvertion();
+            }
+        }
+
         RaisePropertyChanged(() => CanCreateAggregatedStockOrder);
         RaisePropertyChanged(() => CanShowNewPrices);
 
@@ -184,7 +261,6 @@ public class InvoiceDetailsViewModel :
 
         UpdateFacilityFilters();
 
-        // Если это новый документ и пользователь ещё ничего не добавлял в строки
         if (string.IsNullOrEmpty(ItemId) && (Details.Lines == null || Details.Lines.Count == 0))
         {
             this.IsDirty = false;
@@ -230,16 +306,41 @@ public class InvoiceDetailsViewModel :
     {
         Warehouses.Filter = x =>
         {
-            // Безопасное сравнение GUID без учета регистра
-            if (!string.Equals(x.OfficeId, Details?.OfficeId, StringComparison.OrdinalIgnoreCase)) return false;
-            return !x.IsDisabled || string.Equals(x.Id, Details?.WarehouseId, StringComparison.OrdinalIgnoreCase);
+            if (x.IsDisabled && !string.Equals(x.Id, Details?.WarehouseId, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            // Если офис в документе не выбран — показываем все склады
+            if (string.IsNullOrWhiteSpace(Details?.OfficeId))
+                return true;
+
+            // Если склад общий (нет привязки к офису) — показываем
+            if (string.IsNullOrWhiteSpace(x.OfficeId))
+                return true;
+
+            // Иначе проверяем совпадение с выбранным офисом
+            return string.Equals(x.OfficeId, Details.OfficeId, StringComparison.OrdinalIgnoreCase);
         };
 
         Depositories.Filter = x =>
         {
-            if (!string.Equals(x.OfficeId, Details?.OfficeId, StringComparison.OrdinalIgnoreCase)) return false;
-            return !x.IsDisabled || string.Equals(x.Id, Details?.DepositoryId, StringComparison.OrdinalIgnoreCase);
+            if (x.IsDisabled && !string.Equals(x.Id, Details?.DepositoryId, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            // Если офис в документе не выбран — показываем все кассы
+            if (string.IsNullOrWhiteSpace(Details?.OfficeId))
+                return true;
+
+            // Если касса общая — показываем
+            if (string.IsNullOrWhiteSpace(x.OfficeId))
+                return true;
+
+            // Иначе проверяем совпадение с выбранным офисом
+            return string.Equals(x.OfficeId, Details.OfficeId, StringComparison.OrdinalIgnoreCase);
         };
+
+        // Уведомляем интерфейс об обновлении списков
+        Warehouses?.RaisePropertyChanged("List");
+        Depositories?.RaisePropertyChanged("List");
     }
 
     private async void UpdatePartnerBalance()
@@ -288,11 +389,31 @@ public class InvoiceDetailsViewModel :
     {
         try
         {
-            // --- НОВАЯ ПРОВЕРКА НА ОПЛАТУ ---
-            // Если есть неоплаченный остаток (Left) и не стоит галочка "На запись"
+            // 1. Check required fields
+            if (string.IsNullOrWhiteSpace(Details.OfficeId) || Details.OfficeId == Guid.Empty.ToString())
+            {
+                throw new Exception("Office is not selected! Please select an office.");
+            }
+
+            if (string.IsNullOrWhiteSpace(Details.WarehouseId) || Details.WarehouseId == Guid.Empty.ToString())
+            {
+                throw new Exception("Warehouse is not selected! Please select a warehouse.");
+            }
+
+            if (string.IsNullOrWhiteSpace(Details.DepositoryId) || Details.DepositoryId == Guid.Empty.ToString())
+            {
+                throw new Exception("Depository/Account is not selected! Please select a depository.");
+            }
+
+            if (string.IsNullOrWhiteSpace(Details.PartnerId) || Details.PartnerId == Guid.Empty.ToString())
+            {
+                throw new Exception("Partner/Customer is not selected! Please select a partner.");
+            }
+
+            // 2. Payment verification
             if (Details.DisplayLeftTotal > 0 && !Details.DebitCreditLeftAmount)
             {
-                throw new Exception("Оплата не принята полностью! Внесите сумму оплаты или поставьте галочку 'На запись' (Debit/Credit Left Amount).");
+                throw new Exception("Payment has not been fully received! Please enter the payment amount or check the 'Debit/Credit Left Amount' box.");
             }
 
             if (!string.IsNullOrEmpty(Details.PartnerId))
@@ -318,8 +439,6 @@ public class InvoiceDetailsViewModel :
         catch (Exception ex)
         {
             UserInteractionService.ShowExceptionMessage(ex);
-
-            // Блокируем сохранность!
             return false;
         }
 

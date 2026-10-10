@@ -34,22 +34,20 @@ public class PgInvoicesRepository : IInvoicesRepository
             .Include(i => i.Discounts)
             .Include(i => i.Payments)
             .Include(i => i.Overheads)
-            .AsSplitQuery() // <-- Устраняет предупреждение 20504 MultipleCollectionIncludeWarning
+            .AsSplitQuery()
             .FirstOrDefaultAsync(i => i.Id == guid, ct);
 
         return entity == null ? null : MapToModel(entity);
     }
 
     public async Task<IReadOnlyList<InvoiceInfo>> GetInfoAsync(
-    DateTime from, DateTime till,
-    string? displayCurrencyId = null,
-    CancellationToken ct = default)
+        DateTime from, DateTime till,
+        string? displayCurrencyId = null,
+        CancellationToken ct = default)
     {
-        var safeFrom = from == default || from == DateTime.MinValue ? new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc) : from.ToUniversalTime();
-        var safeTill = till >= DateTime.MaxValue.AddDays(-2) ? new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Utc) : till.AddDays(1).ToUniversalTime();
+        var safeFrom = ToSafeUtcFrom(from);
+        var safeTill = ToSafeUtcTill(till);
 
-        // ОПТИМИЗАЦИЯ: Сначала отбираем только нужные ID накладных через индекс,
-        // а агрегации делаем ТОЛЬКО по отобранным накладным!
         const string sql = """
         WITH target_invoices AS (
             SELECT 
@@ -60,7 +58,7 @@ public class PgInvoicesRepository : IInvoicesRepository
             WHERE i.date >= @from AND i.date < @till
               AND i.is_disabled = false
             ORDER BY i.date DESC
-            LIMIT 500 -- Защита: не даем выгрузить больше 500 записей за раз без пагинации
+            LIMIT 500
         ),
         lines_agg AS (
             SELECT 
@@ -173,25 +171,52 @@ public class PgInvoicesRepository : IInvoicesRepository
 
     public async Task<int> CountInfoAsync(DateTime from, DateTime till, CancellationToken ct = default)
     {
-        var safeFrom = from == default || from == DateTime.MinValue ? new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc) : from.ToUniversalTime();
-        var safeTill = till >= DateTime.MaxValue.AddDays(-2) ? new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Utc) : till.AddDays(1).ToUniversalTime();
+        var safeFrom = ToSafeUtcFrom(from);
+        var safeTill = ToSafeUtcTill(till);
 
         return await _db.Invoices
-            .Where(i => i.Date >= safeFrom && i.Date < safeTill)
+            .Where(i => i.Date >= safeFrom && i.Date < safeTill && !i.IsDisabled)
             .CountAsync(ct);
     }
 
+    private static DateTime ToSafeUtcFrom(DateTime dt)
+    {
+        if (dt == default || dt == DateTime.MinValue)
+            return new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        return dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
+    }
+
+    private static DateTime ToSafeUtcTill(DateTime dt)
+    {
+        if (dt == default || dt >= DateTime.MaxValue.AddDays(-2))
+            return new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
+
+        // Если клиент прислал строго полночь без времени (00:00:00.000), 
+        // значит это дата-фильтр по одному дню, и нужно взять до конца дня (+1 день).
+        // Если же клиент передал время (например 21:00:00Z или 23:59:59Z), 
+        // значит клиент УЖЕ сам рассчитал точную границу — сдвигать НЕЛЬЗЯ!
+        if (dt.TimeOfDay == TimeSpan.Zero && dt.Kind != DateTimeKind.Utc)
+        {
+            return utc.AddDays(1);
+        }
+
+        return utc;
+    }
+
     public async Task<IReadOnlyList<InvoicePaymentInfo>> GetPaymentInfoAsync(
-     DateTime from, DateTime till, string? officeId, string? partnerId,
-     string? displayCurrencyId = null,
-     CancellationToken ct = default)
+        DateTime from, DateTime till, string? officeId, string? partnerId,
+        string? displayCurrencyId = null,
+        CancellationToken ct = default)
     {
         Guid? officeGuid = Guid.TryParse(officeId, out var og) ? og : null;
         Guid? partnerGuid = Guid.TryParse(partnerId, out var pg) ? pg : null;
         Guid? displayGuid = Guid.TryParse(displayCurrencyId, out var dg) ? dg : null;
 
-        var safeFrom = from == default || from == DateTime.MinValue ? new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc) : from.ToUniversalTime();
-        var safeTill = till >= DateTime.MaxValue.AddDays(-2) ? new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Utc) : till.AddDays(1).ToUniversalTime();
+        var safeFrom = ToSafeUtcFrom(from);
+        var safeTill = ToSafeUtcTill(till);
 
         const string sql = """
         WITH conv AS (
@@ -273,7 +298,7 @@ public class PgInvoicesRepository : IInvoicesRepository
             i.invoice_type,
             i.is_completed,
             i.partner_id,
-            p.name                                              AS partner_name,
+            p.name                                                              AS partner_name,
 
             (COALESCE(la.subtotal, 0)
              - COALESCE(da.discount_total, 0)
@@ -344,8 +369,8 @@ public class PgInvoicesRepository : IInvoicesRepository
         Guid? officeGuid = Guid.TryParse(officeId, out var og) ? og : null;
         Guid? partnerGuid = Guid.TryParse(partnerId, out var pg) ? pg : null;
 
-        var safeFrom = from == default || from == DateTime.MinValue ? new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc) : from.ToUniversalTime();
-        var safeTill = till >= DateTime.MaxValue.AddDays(-2) ? new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Utc) : till.AddDays(1).ToUniversalTime();
+        var safeFrom = ToSafeUtcFrom(from);
+        var safeTill = ToSafeUtcTill(till);
 
         return await _db.Invoices
             .Where(i => i.Date >= safeFrom && i.Date < safeTill
@@ -377,15 +402,13 @@ public class PgInvoicesRepository : IInvoicesRepository
         if (!Guid.TryParse(model.Id, out var guid))
             throw new ArgumentException("Invalid invoice ID", nameof(model));
 
-        var entity = await _db.Invoices
-            .Include(i => i.Lines)
-            .Include(i => i.Discounts)
-            .Include(i => i.Payments)
-            .Include(i => i.Overheads)
-            .AsSplitQuery() // <-- Устраняет предупреждение 20504 MultipleCollectionIncludeWarning
-            .FirstOrDefaultAsync(i => i.Id == guid, ct)
-            ?? throw new InvalidOperationException($"Invoice {guid} not found");
+        var entity = await _db.Invoices.FirstOrDefaultAsync(i => i.Id == guid, ct);
+        if (entity == null)
+        {
+            return await CreateAsync(model, ct);
+        }
 
+        // 1. Обновляем реквизиты шапки
         entity.Code = model.Code;
         entity.Date = model.Date.ToUniversalTime();
         entity.DueDate = model.DueDate?.ToUniversalTime();
@@ -396,27 +419,64 @@ public class PgInvoicesRepository : IInvoicesRepository
         entity.DebitCreditLeftAmount = model.DebitCreditLeftAmount;
         entity.Description = model.Description;
         entity.Group = model.Group;
-        // <-- Гарантируем корректный маппинг в PostgreSQL массив
         entity.Tags = model.Tags != null && model.Tags.Count > 0 ? model.Tags.ToArray() : Array.Empty<string>();
         entity.UpdatedAt = DateTimeOffset.UtcNow;
 
-        entity.Lines.Clear();
-        foreach (var l in model.Lines ?? Enumerable.Empty<InvoiceLine>())
-            entity.Lines.Add(MapLineToEntity(l, guid));
+        if (Guid.TryParse(model.OfficeId, out var officeId)) entity.OfficeId = officeId == Guid.Empty ? null : officeId;
+        if (Guid.TryParse(model.WarehouseId, out var warehouseId)) entity.WarehouseId = warehouseId == Guid.Empty ? null : warehouseId;
+        if (Guid.TryParse(model.DepositoryId, out var depositoryId)) entity.DepositoryId = depositoryId == Guid.Empty ? null : depositoryId;
+        if (Guid.TryParse(model.PartnerId, out var partnerId)) entity.PartnerId = partnerId == Guid.Empty ? null : partnerId;
+        if (Guid.TryParse(model.DisplayCurrencyId, out var dispCur)) entity.DisplayCurrencyId = dispCur == Guid.Empty ? null : dispCur;
+        if (Guid.TryParse(model.UserId, out var userId)) entity.UserId = userId == Guid.Empty ? null : userId;
+        entity.UserName = model.UserName;
 
-        entity.Discounts.Clear();
-        foreach (var d in model.Discounts ?? Enumerable.Empty<InvoiceDiscount>())
-            entity.Discounts.Add(MapDiscountToEntity(d, guid));
+        // 2. Удаляем старые связанные данные в базе через прямые запросы
+        await _db.InvoiceLines.Where(x => x.InvoiceId == guid).ExecuteDeleteAsync(ct);
+        await _db.InvoiceDiscounts.Where(x => x.InvoiceId == guid).ExecuteDeleteAsync(ct);
+        await _db.InvoicePayments.Where(x => x.InvoiceId == guid).ExecuteDeleteAsync(ct);
+        await _db.InvoiceOverheads.Where(x => x.InvoiceId == guid).ExecuteDeleteAsync(ct);
 
-        entity.Payments.Clear();
-        foreach (var p in model.Payments ?? Enumerable.Empty<InvoicePayment>())
-            entity.Payments.Add(MapPaymentToEntity(p, guid, "Payment"));
-        foreach (var c in model.Changes ?? Enumerable.Empty<InvoicePayment>())
-            entity.Payments.Add(MapPaymentToEntity(c, guid, "Change"));
+        // 3. Сбрасываем отслеживание дочерних сущностей в памяти ChangeTracker
+        foreach (var entry in _db.ChangeTracker.Entries().ToList())
+        {
+            if (entry.Entity is InvoiceLineEntity ||
+                entry.Entity is InvoiceDiscountEntity ||
+                entry.Entity is InvoicePaymentEntity ||
+                entry.Entity is InvoiceOverheadEntity)
+            {
+                entry.State = EntityState.Detached;
+            }
+        }
 
-        entity.Overheads.Clear();
-        foreach (var o in model.Overheads ?? Enumerable.Empty<InvoiceOverhead>())
-            entity.Overheads.Add(MapOverheadToEntity(o, guid));
+        // 4. Добавляем новые коллекции с чистыми идентификаторами
+        if (model.Lines != null && model.Lines.Count > 0)
+        {
+            var newLines = model.Lines.Select(l => MapLineToEntity(l, guid)).ToList();
+            await _db.InvoiceLines.AddRangeAsync(newLines, ct);
+        }
+
+        if (model.Discounts != null && model.Discounts.Count > 0)
+        {
+            var newDiscounts = model.Discounts.Select(d => MapDiscountToEntity(d, guid)).ToList();
+            await _db.InvoiceDiscounts.AddRangeAsync(newDiscounts, ct);
+        }
+
+        var newPayments = new List<InvoicePaymentEntity>();
+        if (model.Payments != null && model.Payments.Count > 0)
+            newPayments.AddRange(model.Payments.Select(p => MapPaymentToEntity(p, guid, "Payment")));
+        if (model.Changes != null && model.Changes.Count > 0)
+            newPayments.AddRange(model.Changes.Select(c => MapPaymentToEntity(c, guid, "Change")));
+
+        if (newPayments.Count > 0)
+        {
+            await _db.InvoicePayments.AddRangeAsync(newPayments, ct);
+        }
+
+        if (model.Overheads != null && model.Overheads.Count > 0)
+        {
+            var newOverheads = model.Overheads.Select(o => MapOverheadToEntity(o, guid)).ToList();
+            await _db.InvoiceOverheads.AddRangeAsync(newOverheads, ct);
+        }
 
         await _db.SaveChangesAsync(ct);
         return model;
@@ -444,25 +504,25 @@ public class PgInvoicesRepository : IInvoicesRepository
 
         const string sql = """
             SELECT
-                i.date                                       AS date,
-                i.id::text                                   AS invoice_id,
-                i.code                                       AS invoice_code,
-                i.invoice_type                               AS invoice_type,
+                i.date                                                       AS date,
+                i.id::text                                                   AS invoice_id,
+                i.code                                                       AS invoice_code,
+                i.invoice_type                                               AS invoice_type,
 
-                il.id::text                                  AS line_id,
-                il.source_id::text                           AS source_line_id,
-                il.stock_id::text                            AS stock_id,
-                s.code                                       AS stock_code,
-                s.name                                       AS stock_name,
+                il.id::text                                                  AS line_id,
+                il.source_id::text                                           AS source_line_id,
+                il.stock_id::text                                            AS stock_id,
+                s.code                                                       AS stock_code,
+                s.name                                                       AS stock_name,
 
-                i.warehouse_id::text                         AS warehouse_id,
-                w.name                                       AS warehouse_name,
+                i.warehouse_id::text                                         AS warehouse_id,
+                w.name                                                       AS warehouse_name,
 
-                il.quantity                                  AS quantity,
-                il.price                                     AS unit_price
+                il.quantity                                                  AS quantity,
+                il.price                                                     AS unit_price
             FROM invoices i
             JOIN invoice_lines il ON il.invoice_id = i.id
-            LEFT JOIN stocks     s ON s.id = il.stock_id
+            LEFT JOIN stocks      s ON s.id = il.stock_id
             LEFT JOIN warehouses w ON w.id = i.warehouse_id
             WHERE i.is_completed = true
               AND i.is_disabled  = false
@@ -520,7 +580,6 @@ public class PgInvoicesRepository : IInvoicesRepository
             UserId = e.UserId?.ToString(),
             UserName = e.UserName,
             Group = e.Group,
-            // <-- Гарантируем, что список никогда не равен null
             Tags = e.Tags != null ? e.Tags.ToList() : new List<string>(),
             Lines = e.Lines.Select(l => new InvoiceLine
             {
@@ -599,7 +658,6 @@ public class PgInvoicesRepository : IInvoicesRepository
             StockPriceGroup = m.StockPriceGroup,
             DebitCreditLeftAmount = m.DebitCreditLeftAmount,
             Group = m.Group,
-            // <-- Конвертируем в совместимый с PostgreSQL массив
             Tags = m.Tags != null && m.Tags.Count > 0 ? m.Tags.ToArray() : Array.Empty<string>(),
             Description = m.Description,
             CreatedAt = DateTimeOffset.UtcNow,
@@ -613,9 +671,12 @@ public class PgInvoicesRepository : IInvoicesRepository
         Guid.TryParse(l.UnitId, out var unitId);
         Guid.TryParse(l.CurrencyId, out var currencyId);
         Guid.TryParse(l.SourceId, out var sourceId);
+
+        var lineId = (Guid.TryParse(l.Id, out var lid) && lid != Guid.Empty) ? lid : Guid.NewGuid();
+
         return new InvoiceLineEntity
         {
-            Id = Guid.TryParse(l.Id, out var lid) ? lid : Guid.NewGuid(),
+            Id = lineId,
             InvoiceId = invoiceId,
             SourceId = sourceId == Guid.Empty ? null : sourceId,
             StockId = stockId == Guid.Empty ? null : stockId,

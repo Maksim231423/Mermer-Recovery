@@ -160,6 +160,9 @@ public class ApiFundsSlipsRepository : IRepositoryWithFacets<FundsSlip>, IReposi
         _cardCache[model.Id] = model;
         LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
 
+        // Мгновенное обновление ордеров кассы в UI
+        UiEventBus.NotifyDocumentModified<FundsSlip>(model.Id);
+
         _ = Task.Run(async () =>
         {
             try
@@ -170,6 +173,7 @@ public class ApiFundsSlipsRepository : IRepositoryWithFacets<FundsSlip>, IReposi
                     await _restClient.PutAsync($"/api/finance/slips/{model.Id}", model);
 
                 LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
+                UiEventBus.NotifyDocumentModified<FundsSlip>(model.Id);
             }
             catch (Exception ex)
             {
@@ -182,6 +186,9 @@ public class ApiFundsSlipsRepository : IRepositoryWithFacets<FundsSlip>, IReposi
     {
         if (string.IsNullOrEmpty(id)) return;
         _cardCache.TryRemove(id, out _);
+
+        // Мгновенное удаление из списка ордеров
+        UiEventBus.NotifyDocumentModified<FundsSlip>(id);
 
         _ = Task.Run(async () =>
         {

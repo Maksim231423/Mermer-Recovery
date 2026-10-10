@@ -19,7 +19,13 @@ public class PgStockSearchResult
     public decimal Price { get; set; }
     public string? Currency { get; set; }
     public string? CurrencyId { get; set; }
-    public decimal Balance { get; set; }
+
+    private decimal _balance;
+    public decimal Balance
+    {
+        get => Math.Round(_balance, 2);
+        set => _balance = value;
+    }
     public string? Unit { get; set; }
     public string? UnitId { get; set; }
     public bool IsDisabled { get; set; }

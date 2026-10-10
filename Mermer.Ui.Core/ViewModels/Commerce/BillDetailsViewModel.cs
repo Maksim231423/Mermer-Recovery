@@ -18,6 +18,7 @@ using Mermer.Ui.Core.ViewModels.Transactions;
 using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Threading.Tasks;
@@ -105,9 +106,27 @@ public class BillDetailsViewModel :
             Details.CurrencyConvertions = new WatchedObservableCollection<CurrencyConvertion>();
         }
 
-        if (!Details.CurrencyConvertions.Any() && Currencies?.List != null)
+        // Берем только активные валюты
+        var activeCurrencies = Currencies?.List?
+            .Where(c => !c.IsDisabled)
+            .ToList() ?? new List<Currency>();
+
+        var activeIds = activeCurrencies.Select(c => c.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // 1. Очищаем все строки, у которых CurrencyId пустой, null или ссылается на удаленную валюту
+        var invalidItems = Details.CurrencyConvertions
+            .Where(c => string.IsNullOrEmpty(c.CurrencyId) || !activeIds.Contains(c.CurrencyId))
+            .ToList();
+
+        foreach (var item in invalidItems)
         {
-            foreach (var curr in Currencies.List)
+            Details.CurrencyConvertions.Remove(item);
+        }
+
+        // 2. Если для какой-то активной валюты строки нет — добавляем её
+        foreach (var curr in activeCurrencies)
+        {
+            if (!Details.CurrencyConvertions.Any(c => string.Equals(c.CurrencyId, curr.Id, StringComparison.OrdinalIgnoreCase)))
             {
                 Details.CurrencyConvertions.Add(new CurrencyConvertion
                 {
@@ -126,6 +145,25 @@ public class BillDetailsViewModel :
         if (string.IsNullOrEmpty(ItemId))
             Details.BillType = _newSlipType;
 
+        // --- ОЧИСТКА УДАЛЕННЫХ / ПУСТЫХ ВАЛЮТ ИЗ КОНВЕРСИЙ ---
+        if (Details?.CurrencyConvertions != null && Currencies?.List != null)
+        {
+            var activeCurrencyIds = Currencies.List
+                .Where(c => !c.IsDisabled)
+                .Select(c => c.Id)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            // Удаляем любые строки конверсий, у которых CurrencyId пустой, null или валюта отключена
+            var toRemove = Details.CurrencyConvertions
+                .Where(c => string.IsNullOrEmpty(c.CurrencyId) || !activeCurrencyIds.Contains(c.CurrencyId))
+                .ToList();
+
+            foreach (var item in toRemove)
+            {
+                Details.CurrencyConvertions.Remove(item);
+            }
+        }
+
         UpdatePartnerBalance();
 
         Details.RaisePropertyChanged("DisplayDebitCreditTotal");
@@ -140,7 +178,6 @@ public class BillDetailsViewModel :
 
         UpdateFacilityFilters();
 
-        // Сбрасываем флаг изменений после полной привязки и отрисовки UI
         if (string.IsNullOrEmpty(ItemId))
         {
             System.Windows.Application.Current?.Dispatcher.BeginInvoke(

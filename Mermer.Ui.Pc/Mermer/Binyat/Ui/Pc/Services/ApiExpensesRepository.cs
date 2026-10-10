@@ -150,12 +150,16 @@ public class ApiExpensesRepository : IRepositoryWithFacets<Expense>, IRepository
 
         LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
 
+        // Мгновенное обновление статей расходов в UI
+        UiEventBus.NotifyDocumentModified<Expense>(model.Id);
+
         _ = Task.Run(async () =>
         {
             try
             {
                 await _restClient.PostAsync("/api/expenses", model);
                 LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
+                UiEventBus.NotifyDocumentModified<Expense>(model.Id);
             }
             catch (Exception ex)
             {
@@ -173,6 +177,9 @@ public class ApiExpensesRepository : IRepositoryWithFacets<Expense>, IRepository
         {
             _memoryCache?.RemoveAll(x => x.Id == id);
         }
+
+        // Мгновенное удаление статьи расхода из списка
+        UiEventBus.NotifyDocumentModified<Expense>(id);
 
         _ = Task.Run(async () =>
         {

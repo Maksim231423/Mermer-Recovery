@@ -96,11 +96,17 @@ namespace Mermer.Ui.Pc.Services
 
         public async Task<IEnumerable<StockBalanceByWarehouses>> GetByDateAndWarehousesAsync(DateTime date, IEnumerable<string> warehouseIds, string displayCurrencyId, IEnumerable<string> stockIds = null)
         {
+            var whList = warehouseIds?.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
+            if (whList == null || !whList.Any())
+            {
+                return Enumerable.Empty<StockBalanceByWarehouses>();
+            }
+
             try
             {
                 var query = $"?date={date.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}&displayCurrencyId={displayCurrencyId}";
-                if (warehouseIds != null) foreach (var w in warehouseIds) query += $"&warehouseId={w}";
-                if (stockIds != null) foreach (var s in stockIds) query += $"&stockId={s}";
+                foreach (var w in whList) query += $"&warehouseId={w}";
+                if (stockIds != null) foreach (var s in stockIds.Where(x => !string.IsNullOrWhiteSpace(x))) query += $"&stockId={s}";
 
                 var remote = await _restClient.GetAsync<List<StockBalanceByWarehouses>>($"/api/stock-balances/by-date-warehouses{query}");
                 return remote ?? new List<StockBalanceByWarehouses>();

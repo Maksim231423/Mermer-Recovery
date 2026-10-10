@@ -264,6 +264,9 @@ namespace Mermer.Ui.Pc.Services
             _cardCache[entity.Id] = entity;
             LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
 
+            // Мгновенно обновляем открытый список накладных
+            UiEventBus.NotifyDocumentModified<Invoice>(entity.Id);
+
             _ = Task.Run(async () =>
             {
                 try
@@ -271,6 +274,9 @@ namespace Mermer.Ui.Pc.Services
                     if (isNew) await _restClient.PostAsync("/api/invoices", entity);
                     else await _restClient.PutAsync($"/api/invoices/{entity.Id}", entity);
                     LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
+
+                    // Подтверждаем обновление после ответа сервера
+                    UiEventBus.NotifyDocumentModified<Invoice>(entity.Id);
                 }
                 catch { }
             });
@@ -283,6 +289,10 @@ namespace Mermer.Ui.Pc.Services
         {
             if (string.IsNullOrEmpty(id)) return;
             _cardCache.TryRemove(id, out _);
+
+            // Мгновенно удаляем накладную из списка в UI
+            UiEventBus.NotifyDocumentModified<Invoice>(id);
+
             _ = Task.Run(async () =>
             {
                 try { await _restClient.DeleteAsync($"/api/invoices/{id}"); } catch { }

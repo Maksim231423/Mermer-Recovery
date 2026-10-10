@@ -72,7 +72,7 @@ public class ApiPartnerTransfersRepository : IRepositoryWithFacets<PartnerTransf
                 var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
                 var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-                var remoteSlice = await _restClient.GetAsync<List<PartnerTransfer>>($"/api/partners/transfers?from={fromStr}&till={tillStr}");
+                var remoteSlice = await _restClient.GetAsync<List<PartnerTransfer>>($"/api/partners/transfers?from={fromStr}&till={tillStr}&limit=5000");
                 if (remoteSlice != null)
                 {
                     var query = remoteSlice.AsQueryable();
@@ -86,6 +86,7 @@ public class ApiPartnerTransfersRepository : IRepositoryWithFacets<PartnerTransf
             catch { }
         }
 
+        // Для фильтра All Time запрашиваем список через GetAllAsync (который гарантированно подгрузит данные с бэкенда)
         var all = await GetAllAsync();
         var fallbackQuery = all.AsQueryable();
         if (predicates != null)
@@ -99,18 +100,20 @@ public class ApiPartnerTransfersRepository : IRepositoryWithFacets<PartnerTransf
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
 
-        if (hasDates)
+        try
         {
-            try
+            string url = "/api/partners/transfers/count";
+            if (hasDates)
             {
                 var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
                 var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-
-                var res = await _restClient.GetAsync<CountResponse>($"/api/partners/transfers/count?from={fromStr}&till={tillStr}");
-                if (res != null) return res.Count;
+                url += $"?from={fromStr}&till={tillStr}";
             }
-            catch { }
+
+            var res = await _restClient.GetAsync<CountResponse>(url);
+            if (res != null) return res.Count;
         }
+        catch { }
 
         var items = await GetAsync(predicates);
         return items.Count();
@@ -121,14 +124,34 @@ public class ApiPartnerTransfersRepository : IRepositoryWithFacets<PartnerTransf
         if (_cardCache.Count > 0)
             return _cardCache.Values.ToList();
 
+        // 1. Пытаемся взять из локального кэша
         var local = LocalSqliteCache.GetAllDocuments<PartnerTransfer>(DocType);
-        if (local != null)
+        if (local != null && local.Any())
         {
             foreach (var item in local)
             {
                 if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
             }
+            return _cardCache.Values.ToList();
         }
+
+        // 2. Если в кэше пусто — подгружаем с сервера
+        try
+        {
+            var remote = await _restClient.GetAsync<List<PartnerTransfer>>("/api/partners/transfers?limit=5000");
+            if (remote != null)
+            {
+                foreach (var item in remote)
+                {
+                    if (!string.IsNullOrEmpty(item?.Id))
+                    {
+                        _cardCache[item.Id] = item;
+                        LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
+                    }
+                }
+            }
+        }
+        catch { }
 
         return _cardCache.Values.ToList();
     }
@@ -144,12 +167,16 @@ public class ApiPartnerTransfersRepository : IRepositoryWithFacets<PartnerTransf
         _cardCache[model.Id] = model;
         LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
 
+        // Мгновенно обновляем список взаиморасчетов/переводов контрагентов
+        UiEventBus.NotifyDocumentModified<PartnerTransfer>(model.Id);
+
         _ = Task.Run(async () =>
         {
             try
             {
                 await _restClient.PostAsync("/api/partners/transfers", model);
                 LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
+                UiEventBus.NotifyDocumentModified<PartnerTransfer>(model.Id);
             }
             catch (Exception ex)
             {
@@ -162,6 +189,9 @@ public class ApiPartnerTransfersRepository : IRepositoryWithFacets<PartnerTransf
     {
         if (string.IsNullOrEmpty(id)) return;
         _cardCache.TryRemove(id, out _);
+
+        // Мгновенно удаляем из открытого списка в UI
+        UiEventBus.NotifyDocumentModified<PartnerTransfer>(id);
 
         _ = Task.Run(async () =>
         {

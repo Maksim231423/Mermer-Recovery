@@ -80,7 +80,11 @@ public class StockActionsListViewModel :
         this.StockSearcher = stockSearcher;
         this.StockSearcher.ResultSelected += new SearchResultSelected(this.StockSearcher_ResultSelected);
         this.Types = new LocalizedTransactionTypes("Repricing");
-
+        this.Currencies = currencies;
+        if (this.Currencies != null)
+        {
+            this.Currencies.Filter = c => !c.IsDisabled;
+        }
         this.Currencies = currencies; 
     }
 
@@ -156,6 +160,11 @@ public class StockActionsListViewModel :
 
     protected override async Task PreLoad()
     {
+        if (this.Currencies != null)
+        {
+            this.Currencies.Filter = c => !c.IsDisabled;
+        }
+
         await Task.WhenAll(
             base.PreLoad(),
             Warehouses.Initialize(),

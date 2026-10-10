@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -16,15 +17,14 @@ public static class StockRepriceEndpoints
     public static IEndpointRouteBuilder MapStockRepriceEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/stock-reprice-effects").WithTags("StockReprice");
+        var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
 
-        // 1. ПОДСЧЕТ КОЛИЧЕСТВА СОБЫТИЙ С УЧЕТОМ СКЛАДА И ОСТАТКОВ
         group.MapGet("/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             var effects = await CalculateEffectsAsync(req, db, ct);
-            return Results.Ok(effects.Count);
+            return Results.Json(effects.Count, jsonOptions);
         });
 
-        // 2. ДАТЫ ПЕРЕОЦЕНОК (ТОЧЕЧНАЯ ВЫБОРКА ИЗ ТАБЛИЦЫ ЦЕН И КУРСОВ)
         group.MapGet("/dates", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             var (fUtc, tUtc) = ParseDates(req);
@@ -45,17 +45,16 @@ public static class StockRepriceEndpoints
 
             var allDates = priceDates.Union(rateDates)
                 .OrderByDescending(d => d)
-                .Select(d => DateTime.SpecifyKind(d, DateTimeKind.Utc))
+                .Select(d => d.ToLocalTime())
                 .ToList();
 
-            return Results.Ok(allDates);
+            return Results.Json(allDates, jsonOptions);
         });
 
-        // 3. ПОЛНЫЙ РАСЧЕТ ЭФФЕКТОВ (С ПАГИНАЦИЕЙ И ЗАЩИТОЙ ПО ПАМЯТИ)
         group.MapGet("/", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             var effects = await CalculateEffectsAsync(req, db, ct);
-            return Results.Ok(effects);
+            return Results.Json(effects, jsonOptions);
         });
 
         return app;
@@ -63,16 +62,28 @@ public static class StockRepriceEndpoints
 
     private static (DateTime from, DateTime till) ParseDates(HttpRequest req)
     {
-        DateTime fUtc = DateTime.UtcNow.AddMonths(-1).Date;
-        DateTime tUtc = DateTime.UtcNow.Date;
+        // Безопасные границы для PostgreSQL timestamptz
+        DateTime fUtc = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        DateTime tUtc = new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc);
 
         string? fromStr = req.Query["from"].FirstOrDefault();
         if (!string.IsNullOrEmpty(fromStr) && DateTime.TryParse(fromStr.Replace(" ", "+"), out var pf))
-            fUtc = DateTime.SpecifyKind(pf.Date, DateTimeKind.Utc);
+        {
+            if (pf.Year > 2000)
+                fUtc = pf.ToUniversalTime();
+        }
 
         string? tillStr = req.Query["till"].FirstOrDefault();
         if (!string.IsNullOrEmpty(tillStr) && DateTime.TryParse(tillStr.Replace(" ", "+"), out var pt))
-            tUtc = DateTime.SpecifyKind(pt.Date, DateTimeKind.Utc);
+        {
+            if (pt.Year < 2099)
+            {
+                if (pt.TimeOfDay == TimeSpan.Zero)
+                    tUtc = pt.Date.AddDays(1).AddTicks(-1).ToUniversalTime();
+                else
+                    tUtc = pt.ToUniversalTime();
+            }
+        }
 
         return (fUtc, tUtc);
     }
@@ -80,7 +91,6 @@ public static class StockRepriceEndpoints
     private static async Task<List<StockRepriceEffectDto>> CalculateEffectsAsync(HttpRequest req, MermerDbContext db, CancellationToken ct)
     {
         var (fUtc, tUtc) = ParseDates(req);
-        
 
         var whIds = req.Query["warehouseId"]
             .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
@@ -102,7 +112,6 @@ public static class StockRepriceEndpoints
 
         var affectedStockIds = new HashSet<Guid>();
 
-        // 1. Прямые изменения цен за период
         var priceChanges = await db.StockPrices
             .Where(p => p.ValidFrom >= fUtc && p.ValidFrom <= tUtc)
             .AsNoTracking()
@@ -111,7 +120,6 @@ public static class StockRepriceEndpoints
         foreach (var p in priceChanges)
             affectedStockIds.Add(p.StockId);
 
-        // 2. Изменения курсов валют
         var rateChanges = rates.Where(r => r.ValidFrom >= fUtc && r.ValidFrom <= tUtc).OrderBy(r => r.ValidFrom).ToList();
         var allPricesForRates = await db.StockPrices.AsNoTracking().ToListAsync(ct);
 
@@ -151,7 +159,6 @@ public static class StockRepriceEndpoints
         var results = new List<StockRepriceEffectDto>();
         if (!sIds.Any()) return results;
 
-        // 3. Поднимаем историю движений строго для затронутых товаров
         var allMovements = new List<Movement>();
 
         var invs = await db.InvoiceLines
@@ -193,7 +200,6 @@ public static class StockRepriceEndpoints
             if (tr.WhTo.HasValue) allMovements.Add(new Movement { Wh = tr.WhTo.Value, St = tr.St.Value, Dt = tr.Dt.UtcDateTime, Qty = tr.RecQty });
         }
 
-        // Индексация движений в памяти по (StockId, WarehouseId) для устранения O(N*M) фриза
         var movesLookup = allMovements
             .GroupBy(m => (m.St, m.Wh))
             .ToDictionary(g => g.Key, g => g.OrderBy(m => m.Dt).ToList());
@@ -221,7 +227,6 @@ public static class StockRepriceEndpoints
         var targetWhIds = whIds.Any() ? whIds : allMovements.Select(m => m.Wh).Distinct().ToList();
         var allPricesList = await db.StockPrices.Where(p => sIds.Contains(p.StockId)).AsNoTracking().ToListAsync(ct);
 
-        // Переоценка цен товаров
         foreach (var nextP in priceChanges)
         {
             var prevP = allPricesList.Where(p => p.StockId == nextP.StockId && p.ValidFrom < nextP.ValidFrom)
@@ -248,15 +253,14 @@ public static class StockRepriceEndpoints
                     StockCode = stock?.Code ?? "",
                     StockName = stock?.Name ?? "",
                     PriceChange = diff,
-                    ChangeDate = DateTime.SpecifyKind(nextP.ValidFrom, DateTimeKind.Utc),
-                    ChangeReason = 0, // PriceChanged
+                    ChangeDate = nextP.ValidFrom, // ВАЖНО: передаем DateTime, а не string!
+                    ChangeReason = 0,
                     WarehouseId = w.ToString(),
                     Balance = bal
                 });
             }
         }
 
-        // Переоценка по изменению курсов валют
         foreach (var rcEvt in rateChangeEvents)
         {
             stocksDict.TryGetValue(rcEvt.StockId, out var stock);
@@ -272,8 +276,8 @@ public static class StockRepriceEndpoints
                     StockCode = stock?.Code ?? "",
                     StockName = stock?.Name ?? "",
                     PriceChange = rcEvt.PriceChange,
-                    ChangeDate = DateTime.SpecifyKind(rcEvt.Date, DateTimeKind.Utc),
-                    ChangeReason = 1, // RateChanged
+                    ChangeDate = rcEvt.Date, // ВАЖНО: DateTime
+                    ChangeReason = 1,
                     WarehouseId = w.ToString(),
                     Balance = bal
                 });
@@ -306,7 +310,7 @@ public static class StockRepriceEndpoints
         public string StockCode { get; set; } = string.Empty;
         public string StockName { get; set; } = string.Empty;
         public decimal PriceChange { get; set; }
-        public DateTime ChangeDate { get; set; }
+        public DateTime ChangeDate { get; set; } // ВАЖНО: DateTime для совместимости с клиентом!
         public int ChangeReason { get; set; }
         public string WarehouseId { get; set; } = string.Empty;
         public decimal Balance { get; set; }

@@ -48,7 +48,31 @@ public class PartnersListViewModel : ListViewModel<Partner>
     }
   }
 
-  protected virtual async Task OnImportCommandAsync()
+    private ICommand _reloadCommand;
+    public new ICommand ReloadCommand => _reloadCommand ??= new MvxAsyncCommand(OnReloadAsync, () => !this.IsBusy);
+
+    private async Task OnReloadAsync()
+    {
+        this.IsBusy = true;
+        try
+        {
+            // Вызываем ReloadAsync через рефлексию, если репозиторий его поддерживает
+            var reloadMethod = this.Repository?.GetType().GetMethod("ReloadAsync");
+            if (reloadMethod != null)
+            {
+                var task = reloadMethod.Invoke(this.Repository, null) as Task;
+                if (task != null) await task;
+            }
+
+            await this.Initialize();
+        }
+        finally
+        {
+            this.IsBusy = false;
+        }
+    }
+
+    protected virtual async Task OnImportCommandAsync()
   {
     PartnersListViewModel partnersListViewModel = this;
     IEnumerable<object> source1 = await partnersListViewModel.NavigationService.Navigate<DataImportViewModel, Type, IEnumerable<object>>(typeof (PartnersListViewModel.PartnerImport));
