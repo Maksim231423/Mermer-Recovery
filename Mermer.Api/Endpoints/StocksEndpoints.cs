@@ -250,8 +250,8 @@ public static class StocksEndpoints
         })
         .WithName("StocksFacets");
 
-        // 6. ЖУРНАЛ ДВИЖЕНИЯ ТОВАРОВ (ОПТИМИЗИРОВАННЫЙ БЫСТРЫЙ ЗАПРОС)
-        group.MapGet("/actions/count", async (DateTime? from, DateTime? till, string? stockId, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        // 6. ЖУРНАЛ ДВИЖЕНИЯ ТОВАРОВ (ПОДСЧЕТ КОЛИЧЕСТВА)
+        group.MapGet("/actions/count", async (DateTime? from, DateTime? till, string? stockId, bool? completed, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             DateTimeOffset startDate = from.HasValue && from.Value.Year > 2000
                 ? new DateTimeOffset(from.Value.ToUniversalTime())
@@ -271,20 +271,26 @@ public static class StocksEndpoints
 
             Guid? filterStockGuid = Guid.TryParse(stockId, out var sG) ? sG : null;
 
+            // 1. Складские ордера
             var slipsQuery = db.StockSlipLines.AsNoTracking()
                 .Where(l => l.StockSlip != null && l.StockSlip.Date >= startDate && l.StockSlip.Date <= endDate);
+            if (completed.HasValue) slipsQuery = slipsQuery.Where(l => l.StockSlip!.IsCompleted == completed.Value);
             if (filterStockGuid.HasValue) slipsQuery = slipsQuery.Where(l => l.StockId == filterStockGuid);
             if (whIds.Any()) slipsQuery = slipsQuery.Where(l => l.StockSlip!.WarehouseId.HasValue && whIds.Contains(l.StockSlip.WarehouseId.Value));
             int countSlips = await slipsQuery.CountAsync(ct);
 
+            // 2. Накладные (Invoices)
             var invQuery = db.InvoiceLines.AsNoTracking()
                 .Where(l => l.Invoice != null && !l.Invoice.IsDisabled && l.Invoice.Date >= startDate && l.Invoice.Date <= endDate);
+            if (completed.HasValue) invQuery = invQuery.Where(l => l.Invoice!.IsCompleted == completed.Value);
             if (filterStockGuid.HasValue) invQuery = invQuery.Where(l => l.StockId == filterStockGuid);
             if (whIds.Any()) invQuery = invQuery.Where(l => l.Invoice!.WarehouseId.HasValue && whIds.Contains(l.Invoice.WarehouseId.Value));
             int countInvoices = await invQuery.CountAsync(ct);
 
+            // 3. Перемещения (Transfers)
             var trBaseQuery = db.StockTransferLines.AsNoTracking()
                 .Where(l => l.StockTransfer != null && !l.StockTransfer.IsDisabled && l.StockTransfer.Date >= startDate && l.StockTransfer.Date <= endDate);
+            if (completed.HasValue) trBaseQuery = trBaseQuery.Where(l => l.StockTransfer!.IsCompleted == completed.Value);
             if (filterStockGuid.HasValue) trBaseQuery = trBaseQuery.Where(l => l.StockId == filterStockGuid);
 
             int countTransfers = 0;
@@ -303,9 +309,11 @@ public static class StocksEndpoints
         })
         .WithName("StockActionsCount");
 
-        group.MapGet("/actions", async (DateTime? from, DateTime? till, string? stockId, int? limit, int? offset, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        // ЖУРНАЛ ДВИЖЕНИЯ ТОВАРОВ (СПИСОК)
+        group.MapGet("/actions", async (DateTime? from, DateTime? till, string? stockId, bool? completed, int? limit, int? offset, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 5000) : 500;
+            // Снимаем ограничение в 500 записей — отдаем до 100000 записей
+            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 100000) : 100000;
             int skip = offset.GetValueOrDefault(0);
 
             DateTimeOffset startDate = from.HasValue && from.Value.Year > 2000
@@ -338,7 +346,7 @@ public static class StocksEndpoints
                         'admin' AS "TransactionUserName",
                         'admin' AS "Author",
                         'admin' AS "UserName",
-                        true AS "TransactionIsCompleted",
+                        s.is_completed AS "TransactionIsCompleted",
                         false AS "TransactionIsDisabled",
                         false AS "TransactionIsCash",
                         COALESCE(s.tags, ARRAY[]::text[]) AS "TransactionTags",
@@ -366,6 +374,7 @@ public static class StocksEndpoints
                     LEFT JOIN stocks stk ON stk.id = l.stock_id
                     WHERE s.date >= @start AND s.date <= @end
                       AND (@stockGuid IS NULL OR l.stock_id = @stockGuid)
+                      AND (@comp IS NULL OR s.is_completed = @comp)
                       AND (cardinality(@whs) = 0 OR s.warehouse_id = ANY(@whs))
 
                     UNION ALL
@@ -380,7 +389,7 @@ public static class StocksEndpoints
                         COALESCE(t.user_name, 'admin') AS "TransactionUserName",
                         COALESCE(t.user_name, 'admin') AS "Author",
                         COALESCE(t.user_name, 'admin') AS "UserName",
-                        true AS "TransactionIsCompleted",
+                        t.is_completed AS "TransactionIsCompleted",
                         false AS "TransactionIsDisabled",
                         false AS "TransactionIsCash",
                         COALESCE(t.tags, ARRAY[]::text[]) AS "TransactionTags",
@@ -409,6 +418,7 @@ public static class StocksEndpoints
                     WHERE t.is_disabled = false
                       AND t.date >= @start AND t.date <= @end
                       AND (@stockGuid IS NULL OR l.stock_id = @stockGuid)
+                      AND (@comp IS NULL OR t.is_completed = @comp)
                       AND (cardinality(@whs) = 0 OR t.warehouse_id = ANY(@whs))
 
                     UNION ALL
@@ -423,7 +433,7 @@ public static class StocksEndpoints
                         COALESCE(t.user_name, 'admin') AS "TransactionUserName",
                         COALESCE(t.user_name, 'admin') AS "Author",
                         COALESCE(t.user_name, 'admin') AS "UserName",
-                        true AS "TransactionIsCompleted",
+                        t.is_completed AS "TransactionIsCompleted",
                         false AS "TransactionIsDisabled",
                         false AS "TransactionIsCash",
                         COALESCE(t.tags, ARRAY[]::text[]) AS "TransactionTags",
@@ -452,6 +462,7 @@ public static class StocksEndpoints
                     WHERE t.is_disabled = false
                       AND t.date >= @start AND t.date <= @end
                       AND (@stockGuid IS NULL OR l.stock_id = @stockGuid)
+                      AND (@comp IS NULL OR t.is_completed = @comp)
                       AND (cardinality(@whs) = 0 OR t.destination_warehouse_id = ANY(@whs))
 
                     UNION ALL
@@ -466,7 +477,7 @@ public static class StocksEndpoints
                         COALESCE(i.user_name, 'admin') AS "TransactionUserName",
                         COALESCE(i.user_name, 'admin') AS "Author",
                         COALESCE(i.user_name, 'admin') AS "UserName",
-                        true AS "TransactionIsCompleted",
+                        i.is_completed AS "TransactionIsCompleted",
                         false AS "TransactionIsDisabled",
                         false AS "TransactionIsCash",
                         COALESCE(i.tags, ARRAY[]::text[]) AS "TransactionTags",
@@ -496,6 +507,7 @@ public static class StocksEndpoints
                     WHERE i.is_disabled = false
                       AND i.date >= @start AND i.date <= @end
                       AND (@stockGuid IS NULL OR l.stock_id = @stockGuid)
+                      AND (@comp IS NULL OR i.is_completed = @comp)
                       AND (cardinality(@whs) = 0 OR i.warehouse_id = ANY(@whs))
                 )
                 SELECT * 
@@ -508,7 +520,7 @@ public static class StocksEndpoints
             await using var conn = new Npgsql.NpgsqlConnection(connStr);
             var results = await Dapper.SqlMapper.QueryAsync(conn, new Dapper.CommandDefinition(
                 sql,
-                new { start = startDate, end = endDate, stockGuid = filterStockGuid, whs = whIds, take, skip },
+                new { start = startDate, end = endDate, stockGuid = filterStockGuid, comp = completed, whs = whIds, take, skip },
                 cancellationToken: ct));
 
             return Results.Json(results, jsonOptions);
@@ -526,13 +538,13 @@ public static class StocksEndpoints
             var root = doc.RootElement;
 
             string? idStr = GetStringProp(root, "id", "Id");
-            Guid stockId = Guid.TryParse(idStr, out var parsedGuid) && parsedGuid != Guid.Empty ? parsedGuid : Guid.NewGuid();
+            Guid parsedStockId = Guid.TryParse(idStr, out var g) ? g : Guid.Empty;
 
-            string code = GetStringProp(root, "code", "Code") ?? $"ST-{DateTime.UtcNow:yyMMddHHmmss}";
+            string code = (GetStringProp(root, "code", "Code") ?? string.Empty).Trim();
             string name = GetStringProp(root, "name", "Name") ?? "Новый товар";
             string shortName = GetStringProp(root, "shortName", "ShortName") ?? string.Empty;
-            string type = GetStringProp(root, "type", "Type") ?? string.Empty;
-            string groupName = GetStringProp(root, "group", "Group", "groupName", "GroupName") ?? string.Empty;
+            string type = (GetStringProp(root, "type", "Type") ?? string.Empty).Trim();
+            string groupName = (GetStringProp(root, "group", "Group", "groupName", "GroupName") ?? string.Empty).Trim();
             string description = GetStringProp(root, "description", "Description") ?? string.Empty;
             bool isDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
 
@@ -551,7 +563,28 @@ public static class StocksEndpoints
             var tagsList = ExtractArrayProp(root, "tags", "Tags");
             var barcodesList = ExtractArrayProp(root, "barcodes", "Barcodes");
 
-            var pricesList = new List<StockPriceEntity>();
+            // Ищем существующий товар БЕЗ трекинга коллекций, чтобы не ломать ChangeTracker EF Core
+            StockEntity? existing = null;
+            if (parsedStockId != Guid.Empty)
+            {
+                existing = await db.Stocks.FirstOrDefaultAsync(p => p.Id == parsedStockId, request.HttpContext.RequestAborted);
+            }
+
+            if (existing == null && !string.IsNullOrWhiteSpace(code))
+            {
+                existing = await db.Stocks.FirstOrDefaultAsync(p => p.Code == code, request.HttpContext.RequestAborted);
+            }
+
+            Guid stockId = existing?.Id ?? (parsedStockId != Guid.Empty ? parsedStockId : Guid.NewGuid());
+
+            if (existing == null && string.IsNullOrWhiteSpace(code))
+            {
+                var count = await db.Stocks.CountAsync(request.HttpContext.RequestAborted);
+                code = $"ST-{(count + 1):D6}";
+            }
+
+            // --- ПАРСИНГ ЦЕН ---
+            var incomingPrices = new List<(Guid Id, decimal Price, Guid? CurrencyId, string Group, DateTime ValidFrom)>();
             if (TryGetPropCaseInsensitive(root, "prices", out var pricesProp) && pricesProp.ValueKind == JsonValueKind.Array)
             {
                 foreach (var pJson in pricesProp.EnumerateArray())
@@ -568,15 +601,10 @@ public static class StocksEndpoints
                     if (!string.IsNullOrEmpty(vfStr) && DateTime.TryParse(vfStr, out var parsedVf))
                         validFrom = parsedVf.ToUniversalTime();
 
-                    pricesList.Add(new StockPriceEntity
-                    {
-                        Id = Guid.NewGuid(),
-                        StockId = stockId,
-                        Price = priceVal,
-                        CurrencyId = curGuid,
-                        PriceGroup = GetStringProp(pJson, "priceGroup", "PriceGroup", "group", "Group") ?? string.Empty,
-                        ValidFrom = validFrom
-                    });
+                    string? pIdStr = GetStringProp(pJson, "id", "Id");
+                    Guid pId = Guid.TryParse(pIdStr, out var parsedPId) && parsedPId != Guid.Empty ? parsedPId : Guid.NewGuid();
+
+                    incomingPrices.Add((pId, priceVal, curGuid, GetStringProp(pJson, "priceGroup", "PriceGroup", "group", "Group") ?? string.Empty, validFrom));
                 }
             }
 
@@ -587,20 +615,13 @@ public static class StocksEndpoints
             string? rootCurStr = GetStringProp(root, "currencyId", "CurrencyId");
             Guid? rootCurGuid = Guid.TryParse(rootCurStr, out var rcG) ? rcG : null;
 
-            if (!pricesList.Any() && rootPrice > 0)
+            if (!incomingPrices.Any() && rootPrice > 0)
             {
-                pricesList.Add(new StockPriceEntity
-                {
-                    Id = Guid.NewGuid(),
-                    StockId = stockId,
-                    Price = rootPrice,
-                    CurrencyId = rootCurGuid,
-                    PriceGroup = string.Empty,
-                    ValidFrom = DateTime.UtcNow.Date
-                });
+                incomingPrices.Add((Guid.NewGuid(), rootPrice, rootCurGuid, string.Empty, DateTime.UtcNow.Date));
             }
 
-            var unitsList = new List<StockUnitEntity>();
+            // --- ПАРСИНГ ЕДИНИЦ ИЗМЕРЕНИЯ ---
+            var incomingUnits = new List<(Guid Id, string Name, decimal Multiplier, decimal Divider, bool IsDefault)>();
             if (TryGetPropCaseInsensitive(root, "units", out var unitsProp) && unitsProp.ValueKind == JsonValueKind.Array)
             {
                 foreach (var uJson in unitsProp.EnumerateArray())
@@ -616,40 +637,23 @@ public static class StocksEndpoints
 
                     bool isDef = GetBoolProp(uJson, "isDefault", "IsDefault");
 
-                    unitsList.Add(new StockUnitEntity
-                    {
-                        Id = Guid.NewGuid(),
-                        StockId = stockId,
-                        Name = uName,
-                        Multiplier = mult,
-                        Divider = div,
-                        IsDefault = isDef
-                    });
+                    string? uIdStr = GetStringProp(uJson, "id", "Id");
+                    Guid uId = Guid.TryParse(uIdStr, out var parsedUId) && parsedUId != Guid.Empty ? parsedUId : Guid.NewGuid();
+
+                    incomingUnits.Add((uId, uName, mult, div, isDef));
                 }
             }
 
             string? rootUnit = GetStringProp(root, "unit", "Unit");
-            if (!unitsList.Any() && !string.IsNullOrEmpty(rootUnit))
+            if (!incomingUnits.Any() && !string.IsNullOrEmpty(rootUnit))
             {
-                unitsList.Add(new StockUnitEntity
-                {
-                    Id = Guid.NewGuid(),
-                    StockId = stockId,
-                    Name = rootUnit,
-                    Multiplier = 1m,
-                    Divider = 1m,
-                    IsDefault = true
-                });
+                incomingUnits.Add((Guid.NewGuid(), rootUnit, 1m, 1m, true));
             }
 
-            var existing = await db.Stocks
-                .Include(s => s.Prices)
-                .Include(s => s.Units)
-                .FirstOrDefaultAsync(p => p.Id == stockId || (!string.IsNullOrEmpty(code) && p.Code == code), request.HttpContext.RequestAborted);
-
+            // 1. СОХРАНЯЕМ САМ ТОВАР ЧЕРЕЗ EF CORE
             if (existing == null)
             {
-                var newEntity = new StockEntity
+                existing = new StockEntity
                 {
                     Id = stockId,
                     Code = code,
@@ -664,16 +668,12 @@ public static class StocksEndpoints
                     Barcodes = barcodesList.ToArray(),
                     IsDisabled = isDisabled,
                     CreatedAt = DateTime.UtcNow,
-                    UpdatedAt = DateTime.UtcNow,
-                    Prices = pricesList,
-                    Units = unitsList
+                    UpdatedAt = DateTime.UtcNow
                 };
-                await db.Stocks.AddAsync(newEntity, request.HttpContext.RequestAborted);
+                await db.Stocks.AddAsync(existing, request.HttpContext.RequestAborted);
             }
             else
             {
-                stockId = existing.Id;
-
                 existing.Code = code;
                 existing.Name = name;
                 existing.ShortName = shortName;
@@ -686,29 +686,70 @@ public static class StocksEndpoints
                 existing.Barcodes = barcodesList.ToArray();
                 existing.IsDisabled = isDisabled;
                 existing.UpdatedAt = DateTime.UtcNow;
-
-                if (existing.Prices != null && existing.Prices.Any())
-                {
-                    db.StockPrices.RemoveRange(existing.Prices);
-                }
-                foreach (var p in pricesList)
-                {
-                    p.StockId = existing.Id;
-                    await db.StockPrices.AddAsync(p, request.HttpContext.RequestAborted);
-                }
-
-                if (existing.Units != null && existing.Units.Any())
-                {
-                    db.StockUnits.RemoveRange(existing.Units);
-                }
-                foreach (var u in unitsList)
-                {
-                    u.StockId = existing.Id;
-                    await db.StockUnits.AddAsync(u, request.HttpContext.RequestAborted);
-                }
             }
 
             await db.SaveChangesAsync(request.HttpContext.RequestAborted);
+
+            // 2. БЕЗОПАСНЫЙ UPSERT ДЛЯ ЕДИНИЦ ИЗМЕРЕНИЯ И ЦЕН ЧЕРЕЗ ПРЯМЫЕ SQL ЗАПРОСЫ
+            // Это исключает любые ошибки Concurrency и не нарушает внешние ключи накладных!
+            var connStr = db.Database.GetConnectionString();
+            await using var conn = new Npgsql.NpgsqlConnection(connStr);
+            await conn.OpenAsync(request.HttpContext.RequestAborted);
+
+            // А. Обработка Stock Units
+            var currentDbUnits = (await Dapper.SqlMapper.QueryAsync<StockUnitEntity>(conn,
+                "SELECT * FROM stock_units WHERE stock_id = @stockId",
+                new { stockId })).ToList();
+
+            foreach (var inUnit in incomingUnits)
+            {
+                var match = currentDbUnits.FirstOrDefault(u => u.Id == inUnit.Id)
+                            ?? currentDbUnits.FirstOrDefault(u => string.Equals(u.Name, inUnit.Name, StringComparison.OrdinalIgnoreCase));
+
+                if (match != null)
+                {
+                    await Dapper.SqlMapper.ExecuteAsync(conn,
+                        @"UPDATE stock_units 
+                          SET name = @Name, multiplier = @Multiplier, divider = @Divider, is_default = @IsDefault 
+                          WHERE id = @Id",
+                        new { inUnit.Name, inUnit.Multiplier, inUnit.Divider, inUnit.IsDefault, match.Id });
+                }
+                else
+                {
+                    await Dapper.SqlMapper.ExecuteAsync(conn,
+                        @"INSERT INTO stock_units (id, stock_id, name, multiplier, divider, is_default)
+                          VALUES (@Id, @stockId, @Name, @Multiplier, @Divider, @IsDefault)",
+                        new { inUnit.Id, stockId, inUnit.Name, inUnit.Multiplier, inUnit.Divider, inUnit.IsDefault });
+                }
+            }
+
+            // Б. Обработка Stock Prices
+            var currentDbPrices = (await Dapper.SqlMapper.QueryAsync<StockPriceEntity>(conn,
+                "SELECT * FROM stock_prices WHERE stock_id = @stockId",
+                new { stockId })).ToList();
+
+            foreach (var inPrice in incomingPrices)
+            {
+                var match = currentDbPrices.FirstOrDefault(p => p.Id == inPrice.Id)
+                            ?? currentDbPrices.FirstOrDefault(p => p.PriceGroup == inPrice.Group && p.CurrencyId == inPrice.CurrencyId);
+
+                if (match != null)
+                {
+                    await Dapper.SqlMapper.ExecuteAsync(conn,
+                        @"UPDATE stock_prices 
+                          SET price = @Price, currency_id = @CurrencyId, price_group = @Group, valid_from = @ValidFrom 
+                          WHERE id = @Id",
+                        new { inPrice.Price, inPrice.CurrencyId, inPrice.Group, inPrice.ValidFrom, match.Id });
+                }
+                else
+                {
+                    await Dapper.SqlMapper.ExecuteAsync(conn,
+                        @"INSERT INTO stock_prices (id, stock_id, price, currency_id, price_group, valid_from, created_at)
+                          VALUES (@Id, @stockId, @Price, @CurrencyId, @Group, @ValidFrom, NOW())",
+                        new { inPrice.Id, stockId, inPrice.Price, inPrice.CurrencyId, inPrice.Group, inPrice.ValidFrom });
+                }
+            }
+
             return Results.Json(new { id = stockId, code }, jsonOptions);
         };
 

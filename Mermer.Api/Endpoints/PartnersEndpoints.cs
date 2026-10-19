@@ -154,73 +154,180 @@ public static class PartnersEndpoints
             return Results.Ok(new { code = nextCode });
         });
 
-        // 4. РАСЧЕТ БАЛАНСОВ ПАРТНЕРОВ
-        group.MapGet("/balances/by-type", async (string? partnerId, DateTime? from, DateTime? till, [Microsoft.AspNetCore.Mvc.FromQuery] string[]? officeIds, MermerDbContext db, CancellationToken ct) =>
+        // 4. РАСЧЕТ БАЛАНСОВ ПАРТНЕРОВ (ОБОРОТНО-САЛЬДОВАЯ ВЕДОМОСТЬ)
+        group.MapGet("/balances/by-type", async (string? partnerId, DateTime? from, DateTime? till, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTime fUtc = from?.ToUniversalTime() ?? DateTime.UtcNow.AddMonths(-1);
-            DateTime tUtc = till?.ToUniversalTime() ?? DateTime.UtcNow;
+            DateTime fUtc = DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+            if (from.HasValue && from.Value.Year > 2000)
+            {
+                fUtc = from.Value.Kind == DateTimeKind.Utc ? from.Value : from.Value.ToUniversalTime();
+            }
+
+            DateTime tUtc = DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
+            if (till.HasValue && till.Value.Year < 2099)
+            {
+                var localTill = till.Value;
+                if (localTill.TimeOfDay == TimeSpan.Zero)
+                    localTill = localTill.Date.AddDays(1).AddTicks(-1);
+
+                tUtc = localTill.Kind == DateTimeKind.Utc ? localTill : localTill.ToUniversalTime();
+            }
 
             Guid? singlePartnerGuid = Guid.TryParse(partnerId, out var pG) ? pG : null;
 
-            var targetOfficeGuids = officeIds?
+            var officeParamValues = req.Query["officeIds"].Concat(req.Query["officeId"]);
+            var targetOfficeGuids = officeParamValues
                 .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
                 .Where(x => x.HasValue)
                 .Select(x => x!.Value)
-                .ToArray() ?? Array.Empty<Guid>();
+                .Distinct()
+                .ToArray();
+
+            var firstOffice = await db.Offices.AsNoTracking().Where(o => !o.IsDisabled).FirstOrDefaultAsync(ct);
+            Guid defaultOfficeGuid = firstOffice?.Id ?? Guid.Empty;
 
             const string sql = """
                 WITH raw_moves AS (
+                    -- 1. Накладные (Invoices)
                     SELECT 
                         i.partner_id,
+                        COALESCE(i.office_id, @defOffice) AS office_id,
                         i.date,
                         CASE WHEN i.invoice_type = 'Sales' THEN (il.quantity * il.price) ELSE 0 END AS sales,
                         CASE WHEN i.invoice_type = 'SalesReturn' THEN (il.quantity * il.price) ELSE 0 END AS sales_return,
                         CASE WHEN i.invoice_type = 'Purchase' THEN (il.quantity * il.price) ELSE 0 END AS purchase,
                         CASE WHEN i.invoice_type = 'PurchaseReturn' THEN (il.quantity * il.price) ELSE 0 END AS purchase_return,
-                        0 AS opening,
-                        0 AS revision
+                        0::numeric AS opening,
+                        0::numeric AS revision,
+                        0::numeric AS transfer,
+                        0::numeric AS payment,
+                        0::numeric AS collection
                     FROM invoice_lines il
                     JOIN invoices i ON i.id = il.invoice_id
                     WHERE i.partner_id IS NOT NULL 
-                      AND i.is_completed = true 
                       AND i.is_disabled = false
                       AND (@singlePartner::uuid IS NULL OR i.partner_id = @singlePartner)
-                      AND (cardinality(@offices::uuid[]) = 0 OR i.office_id = ANY(@offices))
+                      AND (cardinality(@offices::uuid[]) = 0 OR COALESCE(i.office_id, @defOffice) = ANY(@offices))
 
                     UNION ALL
 
+                    -- 2. Акты сверки и начальные остатки (Partner Slips)
                     SELECT 
                         psl.partner_id,
+                        COALESCE(ps.office_id, @defOffice) AS office_id,
                         ps.date,
-                        0 AS sales, 0 AS sales_return, 0 AS purchase, 0 AS purchase_return,
+                        0, 0, 0, 0,
                         CASE WHEN ps.slip_type = 'PartnerOpeningBalance' THEN (psl.debit_amount - psl.credit_amount) ELSE 0 END AS opening,
-                        CASE WHEN ps.slip_type = 'PartnerBalanceRevision' THEN (psl.debit_amount - psl.credit_amount) ELSE 0 END AS revision
+                        CASE WHEN ps.slip_type = 'PartnerBalanceRevision' THEN (psl.debit_amount - psl.credit_amount) ELSE 0 END AS revision,
+                        0, 0, 0
                     FROM partner_slip_lines psl
                     JOIN partner_slips ps ON ps.id = psl.partner_slip_id
-                    WHERE psl.partner_id IS NOT NULL
+                    WHERE psl.partner_id IS NOT NULL 
                       AND ps.is_disabled = false
                       AND (@singlePartner::uuid IS NULL OR psl.partner_id = @singlePartner)
-                      AND (cardinality(@offices::uuid[]) = 0 OR ps.office_id = ANY(@offices))
+                      AND (cardinality(@offices::uuid[]) = 0 OR COALESCE(ps.office_id, @defOffice) = ANY(@offices))
+
+                    UNION ALL
+
+                    -- 3. Взаимозачеты и переводы долга (Partner Transfers)
+                    SELECT 
+                        ptl.partner_id,
+                        COALESCE(ptl.office_id, @defOffice) AS office_id,
+                        pt.date,
+                        0, 0, 0, 0, 0, 0,
+                        (ptl.debit_amount - ptl.credit_amount) AS transfer,
+                        0, 0
+                    FROM partner_transfer_lines ptl
+                    JOIN partner_transfers pt ON pt.id = ptl.partner_transfer_id
+                    WHERE ptl.partner_id IS NOT NULL 
+                      AND pt.is_disabled = false
+                      AND (@singlePartner::uuid IS NULL OR ptl.partner_id = @singlePartner)
+                      AND (cardinality(@offices::uuid[]) = 0 OR COALESCE(ptl.office_id, @defOffice) = ANY(@offices))
+
+                    UNION ALL
+
+                    -- 4. Оплаты и приходы денег (Funds Slips) с точной колонкой funds_slip_type
+                    SELECT 
+                        fs.partner_id,
+                        COALESCE(fs.office_id, @defOffice) AS office_id,
+                        fs.date,
+                        0, 0, 0, 0, 0, 0, 0,
+                        CASE WHEN fs.funds_slip_type = 'Expense' OR fs.funds_slip_type = 'Payment' THEN fsl.amount ELSE 0 END AS payment,
+                        CASE WHEN fs.funds_slip_type = 'Income' OR fs.funds_slip_type = 'Collection' THEN fsl.amount ELSE 0 END AS collection
+                    FROM funds_slip_lines fsl
+                    JOIN funds_slips fs ON fs.id = fsl.funds_slip_id
+                    WHERE fs.partner_id IS NOT NULL 
+                      AND fs.is_disabled = false
+                      AND (@singlePartner::uuid IS NULL OR fs.partner_id = @singlePartner)
+                      AND (cardinality(@offices::uuid[]) = 0 OR COALESCE(fs.office_id, @defOffice) = ANY(@offices))
+                ),
+                aggregated AS (
+                    SELECT 
+                        rm.partner_id,
+                        rm.office_id,
+                        -- Сальдо ДО начала периода
+                        COALESCE(SUM(CASE WHEN rm.date < @from THEN 
+                            (rm.opening + rm.revision + rm.transfer + rm.sales - rm.sales_return - rm.purchase + rm.purchase_return + rm.payment - rm.collection) 
+                        ELSE 0 END), 0)::numeric(18,4) AS "StartingBalance",
+
+                        -- Обороты ВНУТРИ периода
+                        COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.opening ELSE 0 END), 0)::numeric(18,4) AS "PartnerOpeningBalance",
+                        COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.revision ELSE 0 END), 0)::numeric(18,4) AS "PartnerBalanceRevision",
+                        COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.transfer ELSE 0 END), 0)::numeric(18,4) AS "PartnerTransfer",
+                        COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.sales ELSE 0 END), 0)::numeric(18,4) AS "Sales",
+                        COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.sales_return ELSE 0 END), 0)::numeric(18,4) AS "SalesReturn",
+                        COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.purchase ELSE 0 END), 0)::numeric(18,4) AS "Purchase",
+                        COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.purchase_return ELSE 0 END), 0)::numeric(18,4) AS "PurchaseReturn",
+                        COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.payment ELSE 0 END), 0)::numeric(18,4) AS "Payment",
+                        COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.collection ELSE 0 END), 0)::numeric(18,4) AS "Collection"
+                    FROM raw_moves rm
+                    GROUP BY rm.partner_id, rm.office_id
                 )
                 SELECT 
-                    p.id::text AS "PartnerId",
-                    COALESCE(@firstOffice::text, '') AS "OfficeId",
-                    COALESCE(SUM(CASE WHEN rm.date < @from THEN (rm.opening + rm.revision + rm.sales - rm.sales_return - rm.purchase + rm.purchase_return) ELSE 0 END), 0)::numeric(18,4) AS "StartingBalance",
-                    COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.opening ELSE 0 END), 0)::numeric(18,4) AS "Opening",
-                    COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.revision ELSE 0 END), 0)::numeric(18,4) AS "Revision",
-                    0::numeric(18,4) AS "Transfer",
-                    COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.sales ELSE 0 END), 0)::numeric(18,4) AS "Sales",
-                    COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.sales_return ELSE 0 END), 0)::numeric(18,4) AS "SalesReturn",
-                    COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.purchase ELSE 0 END), 0)::numeric(18,4) AS "Purchase",
-                    COALESCE(SUM(CASE WHEN rm.date >= @from AND rm.date <= @till THEN rm.purchase_return ELSE 0 END), 0)::numeric(18,4) AS "PurchaseReturn",
-                    0::numeric(18,4) AS "Payment",
-                    0::numeric(18,4) AS "Collection",
-                    COALESCE(SUM(rm.opening + rm.revision + rm.sales - rm.sales_return - rm.purchase + rm.purchase_return), 0)::numeric(18,4) AS "ResultingBalance"
-                FROM partners p
-                LEFT JOIN raw_moves rm ON rm.partner_id = p.id
+                    a.partner_id::text AS "PartnerId",
+                    a.office_id::text AS "OfficeId",
+                    a."StartingBalance",
+                    a."PartnerOpeningBalance",
+                    a."PartnerBalanceRevision",
+                    a."PartnerTransfer",
+                    a."Sales",
+                    a."SalesReturn",
+                    a."Purchase",
+                    a."PurchaseReturn",
+                    a."Payment",
+                    a."Collection",
+                    -- Явные поля Debit и Credit (необходимы для десериализации базового класса C# PartnerBalanceByType!)
+                    (a."Sales" + a."PurchaseReturn" + a."Payment" + 
+                     CASE WHEN a."PartnerOpeningBalance" > 0 THEN a."PartnerOpeningBalance" ELSE 0 END + 
+                     CASE WHEN a."PartnerBalanceRevision" > 0 THEN a."PartnerBalanceRevision" ELSE 0 END + 
+                     CASE WHEN a."PartnerTransfer" > 0 THEN a."PartnerTransfer" ELSE 0 END
+                    )::numeric(18,4) AS "Debit",
+                    (a."Purchase" + a."SalesReturn" + a."Collection" + 
+                     CASE WHEN a."PartnerOpeningBalance" < 0 THEN -a."PartnerOpeningBalance" ELSE 0 END + 
+                     CASE WHEN a."PartnerBalanceRevision" < 0 THEN -a."PartnerBalanceRevision" ELSE 0 END + 
+                     CASE WHEN a."PartnerTransfer" < 0 THEN -a."PartnerTransfer" ELSE 0 END
+                    )::numeric(18,4) AS "Credit",
+                    -- Итоговый баланс для колонки ResultingBalanceInCustomCurrency
+                    (a."StartingBalance" + 
+                     (a."PartnerOpeningBalance" + a."PartnerBalanceRevision" + a."PartnerTransfer" + a."Sales" - a."SalesReturn" - a."Purchase" + a."PurchaseReturn" + a."Payment" - a."Collection")
+                    )::numeric(18,4) AS "ResultingBalanceInCustomCurrency"
+                FROM aggregated a
+                JOIN partners p ON p.id = a.partner_id
                 WHERE NOT p.is_disabled
-                  AND (@singlePartner::uuid IS NULL OR p.id = @singlePartner)
-                GROUP BY p.id;
+                  -- Исключаем контрагентов-пустышек без сальдо и операций
+                  AND (
+                      a."StartingBalance" != 0 OR 
+                      a."Sales" != 0 OR 
+                      a."SalesReturn" != 0 OR 
+                      a."Purchase" != 0 OR 
+                      a."PurchaseReturn" != 0 OR 
+                      a."Payment" != 0 OR 
+                      a."Collection" != 0 OR 
+                      a."PartnerOpeningBalance" != 0 OR 
+                      a."PartnerBalanceRevision" != 0 OR 
+                      a."PartnerTransfer" != 0
+                  )
+                ORDER BY a."Sales" DESC;
                 """;
 
             var connStr = db.Database.GetConnectionString();
@@ -231,13 +338,14 @@ public static class PartnersEndpoints
                 {
                     singlePartner = singlePartnerGuid,
                     offices = targetOfficeGuids,
-                    firstOffice = targetOfficeGuids.FirstOrDefault(),
+                    defOffice = defaultOfficeGuid,
                     from = fUtc,
                     till = tUtc
                 },
                 cancellationToken: ct));
 
-            return Results.Ok(result);
+            var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
+            return Results.Json(result, jsonOptions);
         });
 
         group.MapGet("/balances", () => Results.Ok(Array.Empty<object>()));

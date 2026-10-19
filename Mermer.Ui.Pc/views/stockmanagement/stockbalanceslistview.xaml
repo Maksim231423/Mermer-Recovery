@@ -77,6 +77,15 @@
                                     PrintButton="{Binding ElementName=PrintButton, Mode=OneWay}"
                                     FilterButton="{Binding ElementName=FilterButton, Mode=OneWay}"
                                     SearchControl="{Binding ElementName=SearchControl, Mode=OneWay}">
+                
+                <!-- ДОБАВЛЕНО: Обработка двойного клика мыши по строке таблицы -->
+                <dxg:GridControl.View>
+                    <dxg:TableView AutoWidth="False" 
+                                   ShowTotalSummary="True" 
+                                   AllowEditing="False" 
+                                   NavigationStyle="Row" />
+                </dxg:GridControl.View>
+
                 <dxg:GridControl.Bands>
                     <dxg:GridControlBand Header="{Localize Stock}">
                         <dxg:GridColumn FieldName="StockCode" ReadOnly="true" AllowEditing="False" AllowCellMerge="True"

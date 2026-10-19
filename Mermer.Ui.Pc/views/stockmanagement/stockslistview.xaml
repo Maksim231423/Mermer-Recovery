@@ -72,15 +72,23 @@
             <dxg:GridColumn FieldName="Name" SortOrder="Ascending" Width="700" Header="{Localize Name}"/>
             <dxg:GridColumn FieldName="ShortName" Header="{Localize ShortName}"/>
             <dxg:GridColumn FieldName="Unit" Header="{Localize Unit}"/>
-            <dxg:GridColumn FieldName="Price" Header="{Localize Price}"/>
-            <dxg:GridColumn FieldName="CurrencyId" Header="{Localize Currency}">
+                        <dxg:GridColumn FieldName="Price" Header="{Localize Price}">
+                            <dxg:ColumnBase.EditSettings>
+                                <dxe:TextEditSettings DisplayFormat="n2" MaskType="Numeric" Mask="n2"/>
+                            </dxg:ColumnBase.EditSettings>
+                        </dxg:GridColumn>
+                        <dxg:GridColumn FieldName="CurrencyId" Header="{Localize Currency}">
               <dxg:ColumnBase.EditSettings>
                 <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Currencies.List}"/>
               </dxg:ColumnBase.EditSettings>
             </dxg:GridColumn>
-            <dxg:GridColumn FieldName="AdditionalPrice" Header="{Localize 'Additional Price'}"
-                            Visible="{Binding ShowAdditionalPrice}"/>
-            <dxg:GridColumn FieldName="AdditionalPriceCurrencyId" Header="{Localize 'Additional Price Currency'}"
+                        <dxg:GridColumn FieldName="AdditionalPrice" Header="{Localize 'Additional Price'}"
+                Visible="{Binding ShowAdditionalPrice}">
+                            <dxg:ColumnBase.EditSettings>
+                                <dxe:TextEditSettings DisplayFormat="n2" MaskType="Numeric" Mask="n2"/>
+                            </dxg:ColumnBase.EditSettings>
+                        </dxg:GridColumn>
+                        <dxg:GridColumn FieldName="AdditionalPriceCurrencyId" Header="{Localize 'Additional Price Currency'}"
                             Visible="{Binding ShowAdditionalPrice}">
               <dxg:ColumnBase.EditSettings>
                 <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Currencies.List}"/>
@@ -112,9 +120,12 @@
             </dxg:GridColumn>
 
             <!-- Группировка -->
-            <dxg:GridColumn FieldName="Group" GroupIndex="1" Header="{Localize Group}"/>
-            <dxg:GridColumn FieldName="Type" GroupIndex="0" Header="{Localize Type}"/>
-          </dxg:GridControl.Columns>
+                        <!-- Группировка: объединяем null и пустые строки через SortMode="DisplayText" -->
+                        <dxg:GridColumn FieldName="Group" GroupIndex="1" Header="{Localize Group}"
+                SortMode="DisplayText"/>
+                        <dxg:GridColumn FieldName="Type" GroupIndex="0" Header="{Localize Type}"
+                SortMode="DisplayText"/>
+                    </dxg:GridControl.Columns>
           <dxg:GridControl.TotalSummary>
             <dxg:GridSummaryItem FieldName="Code" DisplayFormat="{}{0}" SummaryType="Count"/>
           </dxg:GridControl.TotalSummary>

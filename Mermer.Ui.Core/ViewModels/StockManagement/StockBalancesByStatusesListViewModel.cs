@@ -321,27 +321,14 @@ public class StockBalancesByStatusesListViewModel : ListViewModelBaseWithFilter<
         this._messageToken?.Dispose();
     }
 
-    public ICommand SelectOrViewDetailsCommand => new MvxAsyncCommand(OnSelectOrViewDetailsCommandAsync, () => !IsBusy);
+    public ICommand SelectOrViewDetailsCommand => new MvxAsyncCommand(OnSelectOrViewDetailsCommandAsync, () => !IsBusy && this.SelectedItem != null);
 
-    protected virtual Task OnSelectOrViewDetailsCommandAsync()
+    protected virtual async Task OnSelectOrViewDetailsCommandAsync()
     {
-        try
-        {
-            var type = this.GetType();
-            var editCmd = type.GetProperty("EditCommand")?.GetValue(this) as ICommand;
-            var selectCmd = type.GetProperty("SelectCommand")?.GetValue(this) as ICommand;
+        if (this.SelectedItem == null || string.IsNullOrEmpty(this.SelectedItem.StockId))
+            return;
 
-            if (selectCmd != null && selectCmd.CanExecute(null))
-            {
-                selectCmd.Execute(null);
-            }
-            else if (editCmd != null && editCmd.CanExecute(null))
-            {
-                editCmd.Execute(null);
-            }
-        }
-        catch { }
-
-        return Task.CompletedTask;
+        // Открываем окно редактирования выбранного товара по его StockId
+        await this.NavigationService.Navigate<StockDetailsViewModel, string>(this.SelectedItem.StockId);
     }
 }

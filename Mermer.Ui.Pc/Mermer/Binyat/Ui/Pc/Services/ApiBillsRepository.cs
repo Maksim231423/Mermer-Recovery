@@ -18,6 +18,8 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
 
     // In-memory кэш открытых карточек
     private static readonly ConcurrentDictionary<string, Bill> _cardCache = new(StringComparer.OrdinalIgnoreCase);
+    private static volatile bool _isAllLoaded = false;
+    private static readonly object _syncLock = new();
 
     public ApiBillsRepository(RestClient restClient)
     {
@@ -87,7 +89,7 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
                     {
                         foreach (var p in predicates.Where(x => x != null)) query = query.Where(p);
                     }
-                    return query.ToList();
+                    return query.OrderByDescending(b => b.Date).ToList();
                 }
             }
             catch { }
@@ -100,7 +102,7 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
         {
             foreach (var p in predicates.Where(x => x != null)) fallbackQuery = fallbackQuery.Where(p);
         }
-        return fallbackQuery.ToList();
+        return fallbackQuery.OrderByDescending(b => b.Date).ToList();
     }
 
     public async Task<int> CountAsync(params Expression<Func<Bill, bool>>[] predicates)
@@ -134,38 +136,69 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
 
     public async Task<IEnumerable<Bill>> GetAllAsync()
     {
-        // Если кэш пуст — скачиваем все счета с сервера
-        if (_cardCache.IsEmpty)
+        // 1. Если RAM-кэш уже содержит данные полного списка — отдаем немедленно
+        if (_isAllLoaded && !_cardCache.IsEmpty)
         {
-            try
-            {
-                var remote = await _restClient.GetAsync<List<Bill>>("/api/bills?limit=50000");
-                if (remote != null && remote.Any())
-                {
-                    foreach (var item in remote)
-                    {
-                        if (!string.IsNullOrEmpty(item?.Id))
-                        {
-                            _cardCache[item.Id] = item;
-                            LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
-                        }
-                    }
-                    return _cardCache.Values.ToList();
-                }
-            }
-            catch { }
-
-            var local = LocalSqliteCache.GetAllDocuments<Bill>(DocType);
-            if (local != null)
-            {
-                foreach (var item in local)
-                {
-                    if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
-                }
-            }
+            return _cardCache.Values.OrderByDescending(b => b.Date).ToList();
         }
 
-        return _cardCache.Values.ToList();
+        // 2. Мгновенно забираем документы из локального SQLite
+        var local = LocalSqliteCache.GetAllDocuments<Bill>(DocType)?.ToList();
+        if (local != null && local.Any())
+        {
+            foreach (var item in local)
+            {
+                if (!string.IsNullOrEmpty(item?.Id))
+                    _cardCache[item.Id] = item;
+            }
+
+            _isAllLoaded = true;
+
+            // Фоновая тихая подгрузка свежих данных с сервера без зависания интерфейса
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var remote = await _restClient.GetAsync<List<Bill>>("/api/bills?limit=50000");
+                    if (remote != null && remote.Any())
+                    {
+                        foreach (var item in remote)
+                        {
+                            if (!string.IsNullOrEmpty(item?.Id))
+                            {
+                                _cardCache[item.Id] = item;
+                                LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
+                            }
+                        }
+                    }
+                }
+                catch { }
+            });
+
+            return _cardCache.Values.OrderByDescending(b => b.Date).ToList();
+        }
+
+        // 3. Только если в SQLite совсем пусто (первый запуск) — загружаем с сервера
+        try
+        {
+            var remote = await _restClient.GetAsync<List<Bill>>("/api/bills?limit=50000");
+            if (remote != null && remote.Any())
+            {
+                foreach (var item in remote)
+                {
+                    if (!string.IsNullOrEmpty(item?.Id))
+                    {
+                        _cardCache[item.Id] = item;
+                        LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
+                    }
+                }
+                _isAllLoaded = true;
+                return _cardCache.Values.OrderByDescending(b => b.Date).ToList();
+            }
+        }
+        catch { }
+
+        return _cardCache.Values.OrderByDescending(b => b.Date).ToList();
     }
 
     public Task CreateAsync(Bill model) => SaveAsync(model);
@@ -178,6 +211,9 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
 
         _cardCache[entity.Id] = entity;
         LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
+
+        // Сбрасываем флаг полноты кэша при сохранении
+        _isAllLoaded = false;
 
         // Мгновенное обновление списка Bills в UI
         UiEventBus.NotifyDocumentModified<Bill>(entity.Id);
@@ -203,6 +239,7 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
         if (string.IsNullOrEmpty(id)) return;
 
         _cardCache.TryRemove(id, out _);
+        _isAllLoaded = false;
 
         // Уведомляем открытое окно Bills об удалении записи
         UiEventBus.NotifyDocumentModified<Bill>(id);

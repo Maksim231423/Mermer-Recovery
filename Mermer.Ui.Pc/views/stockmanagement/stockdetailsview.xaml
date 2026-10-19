@@ -59,9 +59,13 @@
               </dxlc:LayoutItem>
               <dxlc:LayoutItem Label="{Localize Price}">
                 <dxlc:LayoutGroup>
-                  <dxe:SpinEdit MinValue="0" EditValue="{Binding Details.Price, UpdateSourceTrigger=PropertyChanged}"
-                                IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"/>
-                  <dxg:LookUpEdit DisplayMember="Name" ValueMember="Id" AutoPopulateColumns="false"
+                                    <dxe:SpinEdit MinValue="0" 
+              MaskType="Numeric" 
+              Mask="n2" 
+              MaskUseAsDisplayFormat="True"
+              EditValue="{Binding Details.Price, UpdateSourceTrigger=PropertyChanged}"
+              IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"/>
+                                    <dxg:LookUpEdit DisplayMember="Name" ValueMember="Id" AutoPopulateColumns="false"
                                   EditValue="{Binding Details.CurrencyId, UpdateSourceTrigger=PropertyChanged}"
                                   IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"
                                   ItemsSource="{Binding Currencies.List}">
@@ -107,13 +111,15 @@
               <dxlc:LayoutGroup Orientation="Vertical" Width="400">
                 <dxlc:LayoutItem Label="{Localize 'Balance Limit'}">
                   <dxlc:LayoutGroup>
-                    <dxe:SpinEdit MinValue="0" NullValueButtonPlacement="EditBox"
-                                  EditValue="{Binding Details.LimitMin, UpdateSourceTrigger=PropertyChanged}"
-                                  NullText="{Localize Min}"/>
-                    <dxe:SpinEdit MinValue="0" NullValueButtonPlacement="EditBox"
-                                  EditValue="{Binding Details.LimitMax, UpdateSourceTrigger=PropertyChanged}"
-                                  NullText="{Localize Max}"/>
-                  </dxlc:LayoutGroup>
+                                        <dxe:SpinEdit MinValue="0" NullValueButtonPlacement="EditBox"
+              MaskType="Numeric" Mask="n2" MaskUseAsDisplayFormat="True"
+              EditValue="{Binding Details.LimitMin, UpdateSourceTrigger=PropertyChanged}"
+              NullText="{Localize Min}"/>
+                                        <dxe:SpinEdit MinValue="0" NullValueButtonPlacement="EditBox"
+              MaskType="Numeric" Mask="n2" MaskUseAsDisplayFormat="True"
+              EditValue="{Binding Details.LimitMax, UpdateSourceTrigger=PropertyChanged}"
+              NullText="{Localize Max}"/>
+                                    </dxlc:LayoutGroup>
                 </dxlc:LayoutItem>
                 <dxlc:LayoutItem Height="10"/>
                 <dxlc:LayoutItem Label="{Localize Type}">

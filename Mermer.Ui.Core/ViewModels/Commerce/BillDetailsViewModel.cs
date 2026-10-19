@@ -88,7 +88,12 @@ public class BillDetailsViewModel :
 
     protected override Task PreLoad()
     {
-        return Task.WhenAll(base.PreLoad(), Offices.Initialize(), Partners.Initialize());
+        return Task.WhenAll(
+            base.PreLoad(),
+            Offices.Initialize(),
+            Partners.Initialize(),
+            Depositories.Initialize()
+        );
     }
 
     protected override async Task OnLoad()
@@ -246,9 +251,22 @@ public class BillDetailsViewModel :
     {
         Depositories.Filter = x =>
         {
-            if (x.OfficeId != Details?.OfficeId) return false;
-            return !x.IsDisabled || x.Id == Details?.DepositoryId;
+            if (x.IsDisabled && !string.Equals(x.Id, Details?.DepositoryId, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            // Если офис в документе не выбран — показываем все кассы
+            if (string.IsNullOrWhiteSpace(Details?.OfficeId))
+                return true;
+
+            // Если касса общая (без привязки к конкретному офису) — показываем
+            if (string.IsNullOrWhiteSpace(x.OfficeId))
+                return true;
+
+            // Иначе проверяем совпадение с выбранным офисом
+            return string.Equals(x.OfficeId, Details.OfficeId, StringComparison.OrdinalIgnoreCase);
         };
+
+        Depositories?.RaisePropertyChanged("List");
     }
 
     private async void UpdatePartnerBalance()

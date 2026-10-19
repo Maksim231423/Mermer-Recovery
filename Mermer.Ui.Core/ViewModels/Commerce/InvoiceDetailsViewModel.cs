@@ -405,9 +405,16 @@ public class InvoiceDetailsViewModel :
                 throw new Exception("Depository/Account is not selected! Please select a depository.");
             }
 
+            // Partner теперь НЕ обязателен. 
+            // Но если клиент не выбран, запрещено оформлять продажу в долг/кредит!
             if (string.IsNullOrWhiteSpace(Details.PartnerId) || Details.PartnerId == Guid.Empty.ToString())
             {
-                throw new Exception("Partner/Customer is not selected! Please select a partner.");
+                Details.PartnerId = null; // сбрасываем пустую строку/Guid.Empty в null
+
+                if (Details.DebitCreditLeftAmount || Details.DisplayLeftTotal > 0)
+                {
+                    throw new Exception("Cannot sell on credit without a selected customer! Please specify the customer or pay the full amount.");
+                }
             }
 
             // 2. Payment verification

@@ -19,23 +19,33 @@ namespace Mermer.Ui.Pc.Services
 
         public async Task<int> CountAsync(DateTime? startDate, DateTime? endDate, string stockId, params string[] warehouseIds)
         {
+            return await CountAsync(startDate, endDate, stockId, null, warehouseIds);
+        }
+
+        public async Task<int> CountAsync(DateTime? startDate, DateTime? endDate, string stockId, bool? completed, params string[] warehouseIds)
+        {
             try
             {
-                var query = BuildQueryString(startDate, endDate, stockId, warehouseIds);
+                var query = BuildQueryString(startDate, endDate, stockId, completed, warehouseIds);
                 var res = await _restClient.GetAsync<CountResponse>($"/api/stocks/actions/count{query}");
                 if (res != null) return res.Count;
             }
             catch { }
 
-            var results = await GetAsync(startDate, endDate, stockId, warehouseIds);
+            var results = await GetAsync(startDate, endDate, stockId, completed, warehouseIds);
             return results.Count();
         }
 
         public async Task<IEnumerable<StockActionWithData>> GetAsync(DateTime? startDate, DateTime? endDate, string stockId, params string[] warehouseIds)
         {
+            return await GetAsync(startDate, endDate, stockId, null, warehouseIds);
+        }
+
+        public async Task<IEnumerable<StockActionWithData>> GetAsync(DateTime? startDate, DateTime? endDate, string stockId, bool? completed, params string[] warehouseIds)
+        {
             try
             {
-                string url = "/api/stocks/actions" + BuildQueryString(startDate, endDate, stockId, warehouseIds);
+                string url = "/api/stocks/actions" + BuildQueryString(startDate, endDate, stockId, completed, warehouseIds);
                 var remote = await _restClient.GetAsync<List<StockActionWithData>>(url);
                 return remote ?? Enumerable.Empty<StockActionWithData>();
             }
@@ -46,23 +56,17 @@ namespace Mermer.Ui.Pc.Services
             }
         }
 
-        public Task<StockTracking> TrackByLineIdAsync(string lineId)
-        {
-            return Task.FromResult(new StockTracking());
-        }
+        public Task<StockTracking> TrackByLineIdAsync(string lineId) => Task.FromResult(new StockTracking());
+        public Task<IEnumerable<StockTracking>> TrackByTransactionIdAsync(string transactionId) => Task.FromResult(Enumerable.Empty<StockTracking>());
 
-        public Task<IEnumerable<StockTracking>> TrackByTransactionIdAsync(string transactionId)
-        {
-            return Task.FromResult(Enumerable.Empty<StockTracking>());
-        }
-
-        private static string BuildQueryString(DateTime? startDate, DateTime? endDate, string stockId, string[] warehouseIds)
+        private static string BuildQueryString(DateTime? startDate, DateTime? endDate, string stockId, bool? completed, string[] warehouseIds)
         {
             var queryParams = new List<string>();
 
             if (startDate.HasValue) queryParams.Add($"from={startDate.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
             if (endDate.HasValue) queryParams.Add($"till={endDate.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
             if (!string.IsNullOrEmpty(stockId)) queryParams.Add($"stockId={stockId}");
+            if (completed.HasValue) queryParams.Add($"completed={completed.Value.ToString().ToLower()}");
 
             if (warehouseIds != null && warehouseIds.Any())
             {
@@ -74,6 +78,7 @@ namespace Mermer.Ui.Pc.Services
 
             return queryParams.Any() ? "?" + string.Join("&", queryParams) : "";
         }
+        
 
         private class CountResponse
         {

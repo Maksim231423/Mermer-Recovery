@@ -33,6 +33,7 @@ public class StocksListViewModel :
     private readonly IListAuthorizer<Stock> _authorizer;
     private readonly IStockCodeGenerationService _codeGenerationService;
     private string _additionalPriceCurrencyId;
+    private readonly MvxSubscriptionToken _stockModifiedToken;
     private string _additionalPriceGroup;
     private string[] _priceGroupNames;
 
@@ -50,6 +51,11 @@ public class StocksListViewModel :
         this._authorizer = authorizer;
         this._codeGenerationService = codeGenerationService;
         this.Currencies = currencyReference;
+
+        // ПОДПИСКА: когда сохраняется сущность Stock, перезагружаем список товаров
+        this._stockModifiedToken = messenger.Subscribe<Mermer.Mvvm.Messages.DocumentModified<Stock>>(
+            async m => await this.Initialize(),
+            MvxReference.Strong);
 
         // Исключаем удаленные валюты из выпадающего списка
         if (this.Currencies != null)
@@ -169,9 +175,10 @@ public class StocksListViewModel :
         }
     }
 
-    protected virtual Task OnCreateNewAsync()
+    protected virtual async Task OnCreateNewAsync()
     {
-        return this.NavigationService.Navigate<DetailsViewModel<Stock>, string>(string.Empty);
+        await this.NavigationService.Navigate<DetailsViewModel<Stock>, string>(string.Empty);
+        await this.Initialize(); // Гарантированная перезагрузка после закрытия окна создания
     }
 
     public ICommand ViewDetailsCommand
@@ -182,9 +189,11 @@ public class StocksListViewModel :
         }
     }
 
-    protected virtual Task OnViewDetailsAsync()
+    protected virtual async Task OnViewDetailsAsync()
     {
-        return this.NavigationService.Navigate<DetailsViewModel<Stock>, string>(this.SelectedItem.Id);
+        if (this.SelectedItem == null) return;
+        await this.NavigationService.Navigate<DetailsViewModel<Stock>, string>(this.SelectedItem.Id);
+        await this.Initialize(); // Гарантированная перезагрузка после закрытия окна деталей
     }
 
     public ICommand SelectOrViewDetailsCommand
@@ -388,6 +397,12 @@ public class StocksListViewModel :
         {
             this.IsBusy = false;
         }
+    }
+
+    public override void Dispose()
+    {
+        base.Dispose();
+        this._stockModifiedToken?.Dispose();
     }
 
     public class StockImport
