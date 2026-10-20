@@ -528,7 +528,7 @@ public static class PartnersEndpoints
             return Results.Json(result, jsonOptions);
         });
 
-        // 8. СОХРАНЕНИЕ PARTNER SLIPS
+        // 8. СОХРАНЕНИЕ PARTNER SLIPS (ИСПРАВЛЕННЫЙ ВАРИАНТ БЕЗ CONCURRENCY EXCEPTION)
         Func<HttpRequest, MermerDbContext, Task<IResult>> saveSlipHandler = async (request, db) =>
         {
             using var reader = new StreamReader(request.Body);
@@ -555,7 +555,10 @@ public static class PartnersEndpoints
             string userName = GetJsonString(root, "userName", "UserName") ?? "admin";
             var tagsList = ExtractTagsFromRawJson(root);
 
-            var existing = await db.PartnerSlips.FirstOrDefaultAsync(s => s.Id == slipId);
+            // 1. Подгружаем документ СРАЗУ с его строками
+            var existing = await db.PartnerSlips
+                .Include(s => s.Lines)
+                .FirstOrDefaultAsync(s => s.Id == slipId);
 
             var linesList = new List<PartnerSlipLineEntity>();
             if (TryGetPropertyCaseInsensitive(root, "lines", out var linesProp) && linesProp.ValueKind == JsonValueKind.Array)
@@ -602,6 +605,7 @@ public static class PartnersEndpoints
                     Description = description,
                     IsCompleted = true,
                     IsDisabled = false,
+                    Lines = linesList,
                     CreatedAt = DateTime.UtcNow,
                     UpdatedAt = DateTime.UtcNow
                 };
@@ -618,17 +622,22 @@ public static class PartnersEndpoints
                 existing.Tags = tagsList.ToArray();
                 existing.Description = description;
                 existing.UpdatedAt = DateTime.UtcNow;
+
+                // Удаляем старые строки через EF ChangeTracker (без сырого SQL!)
+                if (existing.Lines != null && existing.Lines.Any())
+                {
+                    db.PartnerSlipLines.RemoveRange(existing.Lines);
+                }
+
+                // Добавляем новые
+                if (linesList.Any())
+                {
+                    await db.PartnerSlipLines.AddRangeAsync(linesList);
+                }
             }
 
+            // ЕДИНСТВЕННЫЙ вызов сохранения, который гарантированно проходит в одной транзакции
             await db.SaveChangesAsync();
-
-            await db.Database.ExecuteSqlRawAsync("DELETE FROM partner_slip_lines WHERE partner_slip_id = {0}", slipId);
-
-            if (linesList.Any())
-            {
-                await db.PartnerSlipLines.AddRangeAsync(linesList);
-                await db.SaveChangesAsync();
-            }
 
             return Results.Content($"{{\"id\":\"{slipId}\",\"code\":\"{code}\"}}", "application/json");
         };
@@ -803,7 +812,9 @@ public static class PartnersEndpoints
             string userName = GetJsonString(root, "userName", "UserName") ?? "admin";
             var tagsList = ExtractTagsFromRawJson(root);
 
-            var existing = await db.PartnerTransfers.FirstOrDefaultAsync(t => t.Id == transferId);
+            var existing = await db.PartnerTransfers
+                .Include(t => t.Lines)
+                .FirstOrDefaultAsync(t => t.Id == transferId);
 
             var linesList = new List<PartnerTransferLineEntity>();
             if (TryGetPropertyCaseInsensitive(root, "lines", out var linesProp) && linesProp.ValueKind == JsonValueKind.Array)
@@ -871,7 +882,19 @@ public static class PartnersEndpoints
 
             await db.SaveChangesAsync();
 
-            await db.Database.ExecuteSqlRawAsync("DELETE FROM partner_transfer_lines WHERE partner_transfer_id = {0}", transferId);
+            if (existing != null)
+            {
+                if (existing.Lines != null && existing.Lines.Any())
+                {
+                    db.PartnerTransferLines.RemoveRange(existing.Lines);
+                }
+                if (linesList.Any())
+                {
+                    await db.PartnerTransferLines.AddRangeAsync(linesList);
+                }
+            }
+
+            await db.SaveChangesAsync();
 
             if (linesList.Any())
             {

@@ -140,7 +140,7 @@ public static class InvoicesEndpoints
         .WithName("InvoicesGetNextCode");
 
         // 6. СОЗДАНИЕ И ОБНОВЛЕНИЕ
-        Func<HttpRequest, IInvoicesRepository, CancellationToken, Task<IResult>> saveInvoiceHandler = async (request, repo, ct) =>
+        Func<HttpRequest, IInvoicesRepository, MermerDbContext, CancellationToken, Task<IResult>> saveInvoiceHandler = async (request, repo, db, ct) =>
         {
             using var reader = new StreamReader(request.Body);
             var body = await reader.ReadToEndAsync(ct);
@@ -159,6 +159,46 @@ public static class InvoicesEndpoints
 
             // Обеспечиваем UTC при сохранении в базу
             pgInvoice.Date = EnsureUtc(pgInvoice.Date);
+
+            // =========================================================================
+            // ЗАЩИТА ВНЕШНЕГО КЛЮЧА invoice_lines_unit_id_fkey
+            // =========================================================================
+            if (pgInvoice.Lines != null && pgInvoice.Lines.Any())
+            {
+                foreach (var line in pgInvoice.Lines)
+                {
+                    // 1. Пустой GUID переводим в null
+                    if (string.IsNullOrWhiteSpace(line.UnitId) ||
+                        line.UnitId == Guid.Empty.ToString() ||
+                        !Guid.TryParse(line.UnitId, out var parsedUnitGuid))
+                    {
+                        line.UnitId = null;
+                        continue;
+                    }
+
+                    // 2. Проверяем, существует ли переданный UnitId в таблице stock_units
+                    bool unitExists = await db.StockUnits.AsNoTracking().AnyAsync(u => u.Id == parsedUnitGuid, ct);
+
+                    if (!unitExists)
+                    {
+                        // 3. Если такого unit_id нет, пробуем подвязать дефолтную единицу этого товара
+                        Guid? fallbackUnitId = null;
+                        if (Guid.TryParse(line.StockId, out var parsedStockGuid))
+                        {
+                            var defaultUnit = await db.StockUnits.AsNoTracking()
+                                .Where(u => u.StockId == parsedStockGuid)
+                                .OrderByDescending(u => u.IsDefault)
+                                .FirstOrDefaultAsync(ct);
+
+                            fallbackUnitId = defaultUnit?.Id;
+                        }
+
+                        // Если нашли дефолтную единицу товара — ставим её, иначе сбрасываем в null
+                        line.UnitId = fallbackUnitId?.ToString();
+                    }
+                }
+            }
+            // =========================================================================
 
             var existing = await repo.GetAsync(pgInvoice.Id, ct);
 
@@ -182,8 +222,12 @@ public static class InvoicesEndpoints
             }
         };
 
-        group.MapPost("/", saveInvoiceHandler).WithName("InvoicesCreate");
-        group.MapPut("/{id}", async (string id, HttpRequest request, IInvoicesRepository repo, CancellationToken ct) => await saveInvoiceHandler(request, repo, ct)).WithName("InvoicesUpdate");
+        group.MapPost("/", saveInvoiceHandler)
+             .WithName("InvoicesCreate");
+
+        group.MapPut("/{id}", async (string id, HttpRequest request, IInvoicesRepository repo, MermerDbContext db, CancellationToken ct) =>
+            await saveInvoiceHandler(request, repo, db, ct))
+            .WithName("InvoicesUpdate");
 
         // 7. УДАЛЕНИЕ
         group.MapDelete("/{id}", async (string id, IInvoicesRepository repo, CancellationToken ct) =>

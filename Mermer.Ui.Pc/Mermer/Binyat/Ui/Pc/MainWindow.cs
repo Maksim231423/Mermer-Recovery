@@ -1,4 +1,5 @@
-﻿using DevExpress.Xpf.Core;
+﻿using AutoUpdaterDotNET;
+using DevExpress.Xpf.Core;
 using DevExpress.Xpf.WindowsUI;
 using Mermer.Common.Settings;
 using Mermer.Services;
@@ -44,65 +45,77 @@ public partial class MainWindow : DXTabbedWindow
         await CheckForUpdates(false);
     }
 
-    public async Task CheckForUpdates(bool report = true)
+    public Task CheckForUpdates(bool report = true)
     {
         try
         {
-            var localizer = Mermer.Mvvm.Tools.LocalizationManager.Instance;
+            // Сбрасываем старые подписки, чтобы не плодить дубли
+            AutoUpdater.CheckForUpdateEvent -= AutoUpdaterOnCheckForUpdateEvent;
 
-            bool? hasUpdates = await AppUpdaterService.CheckForUpdatesAsync();
+            AutoUpdater.ShowSkipButton = false;
+            AutoUpdater.ShowRemindLaterButton = false;
+            AutoUpdater.Mandatory = true;
+            AutoUpdater.UpdateMode = Mode.ForcedDownload;
 
-            if (!hasUpdates.HasValue)
+            // Считываем реальную версию запущенного exe-файла
+            var currentVersion = Assembly.GetExecutingAssembly().GetName().Version;
+            AutoUpdater.InstalledVersion = currentVersion;
+
+            // Логируем текущую версию для отладки
+            Console.WriteLine($"[UPDATER] Current Client Version: {currentVersion}");
+
+            // Подписываемся на результат проверки
+            AutoUpdater.CheckForUpdateEvent += AutoUpdaterOnCheckForUpdateEvent;
+
+            string updateUrl = "http://localhost:5050/api/updates/version.xml";
+            AutoUpdater.Start(updateUrl);
+        }
+        catch (Exception ex)
+        {
+            if (report)
             {
-                if (report)
+                ShowMessage("Update Error", $"Ошибка при инициализации обновления:\n{ex.Message}");
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private void AutoUpdaterOnCheckForUpdateEvent(UpdateInfoEventArgs args)
+    {
+        // Отписываемся сразу после разового срабатывания
+        AutoUpdater.CheckForUpdateEvent -= AutoUpdaterOnCheckForUpdateEvent;
+
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            if (args.Error != null)
+            {
+                Console.WriteLine($"[UPDATER ERROR] {args.Error.Message}");
+                ShowMessage("Update Error", $"Не удалось проверить обновление:\n{args.Error.Message}");
+                return;
+            }
+
+            Console.WriteLine($"[UPDATER] Server Version: {args.CurrentVersion}, IsAvailable: {args.IsUpdateAvailable}");
+
+            if (args.IsUpdateAvailable)
+            {
+                // Явный запуск окна обновления AutoUpdater.NET
+                try
                 {
-                    ShowMessage(
-                        localizer.Get("Error Checking For Updates"),
-                        localizer.Get("An error ocured while checking for updates, try again later!")
-                    );
+                    AutoUpdater.ShowUpdateForm(args);
+                }
+                catch (Exception ex)
+                {
+                    // Запасной запуск тихого скачивания, если форму заблокировал стек DevExpress
+                    Console.WriteLine($"[UPDATER FORM ERROR] {ex.Message}");
+                    AutoUpdater.DownloadUpdate(args);
                 }
             }
             else
             {
-                if (hasUpdates.Value)
-                {
-                    
-                    string updatePrompt = localizer.Get(
-                        "An updated version of this application is available.\nWould you like to update now?\n\nNew Version: {0}",
-                        AppUpdaterService.UpdateVersion
-                    );
-
-                    bool? doUpdate = ShowMessage(
-                        localizer.Get("Update Available"),
-                        updatePrompt,
-                        System.Windows.MessageBoxButton.YesNo
-                    );
-
-                    if (doUpdate.HasValue && doUpdate.Value)
-                    {
-                        ReleaseEntry releaseEntry = await AppUpdaterService.UpdateAsync();
-
-                        string successMessage = localizer.Get(
-                            "Application has been updated to version: {0}\nYou must restart application for changes to take effect.",
-                            releaseEntry.Version
-                        );
-
-                        ShowMessage(localizer.Get("Application Updated"), successMessage);
-                    }
-                }
-                else if (report)
-                {
-                    ShowMessage(
-                        localizer.Get("No Updates Available"),
-                        localizer.Get("No updates found, Application is up to date!")
-                    );
-                }
+                ShowMessage("No Updates", "У вас установлена самая актуальная версия программы.");
             }
-        }
-        catch (Exception ex)
-        {
-            ShowMessage("Update Error", $"Failed to check for updates.\nDetails: {ex.Message}");
-        }
+        });
     }
 
     private bool? ShowMessage(string caption, string message, MessageBoxButton button = MessageBoxButton.OK)

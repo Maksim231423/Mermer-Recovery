@@ -122,6 +122,9 @@ using (var scope = app.Services.CreateScope())
 
 app.UseCors();
 
+// ВСТАВКА 1: разрешаем раздачу статических файлов (zip-архива с обновлением)
+app.UseStaticFiles();
+
 // Формируем спецификацию строго в формате Swagger 2.0
 app.UseSwagger(c =>
 {
@@ -171,6 +174,26 @@ app.MapReportEndpoints();
 app.MapOfficeEndpoints();
 app.MapWarehouseEndpoints();
 
+
+// ВСТАВКА 2: Эндпоинт автообновления для десктопного клиента
+app.MapGet("/api/updates/version.xml", (HttpRequest request) =>
+{
+    var baseUrl = $"{request.Scheme}://{request.Host}";
+
+    // Версию повышаете при каждом обновлении клиента (например 1.0.1.0)
+    string xml = $"""
+    <?xml version="1.0" encoding="UTF-8"?>
+    <item>
+        <version>1.0.1.0</version>
+        <url>{baseUrl}/updates/client_update.zip</url>
+        <mandatory>true</mandatory>
+    </item>
+    """;
+
+    return Results.Content(xml, "application/xml");
+})
+.WithTags("Updates")
+.WithName("GetClientUpdateVersion");
 
 app.Run();
 

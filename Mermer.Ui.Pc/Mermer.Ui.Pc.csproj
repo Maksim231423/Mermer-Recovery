@@ -206,6 +206,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Autoupdater.NET.Official" Version="1.9.3" />
     <PackageReference Include="Humanizer" Version="2.14.1" />
     <PackageReference Include="AutoMapper" Version="8.1.1" />
     <PackageReference Include="Castle.Core" Version="4.4.1" />
