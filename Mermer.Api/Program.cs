@@ -184,7 +184,7 @@ app.MapGet("/api/updates/version.xml", (HttpRequest request) =>
     string xml = $"""
     <?xml version="1.0" encoding="UTF-8"?>
     <item>
-        <version>1.0.1.0</version>
+        <version>1.0.2.0</version>
         <url>{baseUrl}/updates/client_update.zip</url>
         <mandatory>true</mandatory>
     </item>
