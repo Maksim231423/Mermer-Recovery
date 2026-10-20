@@ -3,28 +3,37 @@ chcp 65001 > nul
 cd /d "%~dp0"
 
 echo ===================================================
-echo   Proverka i ustanovka obnovleniya servera...
+echo    Proverka i ustanovka obnovleniya servera...
 echo ===================================================
 
-:: 1. Завершаем работу запущенного сервера, если он открыт
+:: 1. Zavershaem rabotu zapushchennogo servera, esli on otkryt
+echo [1/3] Ostanovka rabotayushchego servera...
 taskkill /f /im Mermer.Api.exe >nul 2>&1
 
-:: 2. Скачиваем свежий архив сервера из GitHub Releases (или вашего источника)
-echo Zagruzka svezhego servera...
-curl -L -o server_update.zip "https://github.com/Maksim231423/Mermer-Recovery/releases/latest/download/server_update.zip"
+:: 2. Poluchaem svezhiy kod i client_update.zip cherez Git
+echo [2/3] Zagruzka obnovleniy iz Git...
+git fetch origin migration/net8-upgrade
+git reset --hard origin/migration/net8-upgrade
 
 if %ERRORLEVEL% NEQ 0 (
-    echo [OSHIBKA] Ne udalos skachat obnovlenie servera.
+    echo [OSHIBKA] Ne udalos poluchit obnovlenie iz Git.
     pause
-    exit /b 1
+    exit /b %ERRORLEVEL%
 )
 
-:: 3. Распаковываем файлы с заменой (без затирания appsettings.json, если исключить его из архива)
-echo Ustanovka obnovleniya...
-tar -xf server_update.zip -C "%~dp0"
-del /f /q server_update.zip
+:: 3. Publikuem svezhuyu versiyu API v tekushchuyu papku
+echo [3/3] Sborka i obnovlenie servera...
+dotnet publish Mermer.Api\Mermer.Api.csproj -c Release -o .
+
+if %ERRORLEVEL% NEQ 0 (
+    echo [OSHIBKA] Ne udalos sobrat API!
+    pause
+    exit /b %ERRORLEVEL%
+)
 
 echo.
-echo Obnovlenie servera uspeshno ustanovleno!
-echo Zapusk...
+echo ===================================================
+echo    Obnovlenie uspeshno ustanovleno!
+echo    Zapusk servera...
+echo ===================================================
 call RUN_SERVER.bat
