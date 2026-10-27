@@ -54,9 +54,35 @@ namespace Mermer.Ui.Pc.Services
             return Enumerable.Empty<PartnerBalanceByTypeWithBalance>();
         }
 
-        public Task<PartnerBalanceResult> GetBalanceToDateAsync(string officeId, string partnerId, DateTime date, string excludeTransactionId = null)
+        public async Task<PartnerBalanceResult> GetBalanceToDateAsync(string officeId, string partnerId, DateTime date, string excludeTransactionId = null)
         {
-            return Task.FromResult(new PartnerBalanceResult { Balance = 0 });
+            if (string.IsNullOrEmpty(officeId) || string.IsNullOrEmpty(partnerId))
+                return new PartnerBalanceResult { Balance = 0m };
+
+            try
+            {
+                var queryParams = new List<string>
+        {
+            $"officeId={officeId}",
+            $"partnerId={partnerId}",
+            $"date={date.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}"
+        };
+
+                if (!string.IsNullOrEmpty(excludeTransactionId))
+                    queryParams.Add($"excludeId={excludeTransactionId}");
+
+                string url = "/api/partners/balance-to-date?" + string.Join("&", queryParams);
+
+                var result = await _restClient.GetAsync<PartnerBalanceResult>(url);
+                if (result != null)
+                    return result;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[GetBalanceToDate Error]: {ex.Message}");
+            }
+
+            return new PartnerBalanceResult { Balance = 0m };
         }
 
         public Task<PartnerBalanceAggregated> GetByTypeAggregatedAsync(string[] officeIds, DateTime dateFrom, DateTime dateTill)

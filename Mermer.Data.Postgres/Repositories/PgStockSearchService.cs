@@ -148,8 +148,8 @@ SELECT
 
     -- Current price (latest valid price entry)
     COALESCE(sp.price, 0)       AS ""Price"",
-    c.name                       AS ""Currency"",
-    sp.currency_id::text         AS ""CurrencyId"",
+    COALESCE(c.name, (SELECT name FROM currencies WHERE is_default = true AND is_disabled = false LIMIT 1)) AS ""Currency"",
+    COALESCE(sp.currency_id::text, (SELECT id::text FROM currencies WHERE is_default = true AND is_disabled = false LIMIT 1)) AS ""CurrencyId"",
 
     -- Default unit
     su.id::text     AS ""UnitId"",

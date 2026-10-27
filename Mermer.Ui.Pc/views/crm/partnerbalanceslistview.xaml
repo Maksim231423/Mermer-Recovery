@@ -31,12 +31,13 @@
     <dxlc:LayoutControl Margin="0" Orientation="Vertical">
       <dxlc:LayoutGroup Orientation="Vertical" Margin="10, 10, 10, 0">
                 <dxlc:LayoutItem HorizontalAlignment="Left" Width="300" Label="{Localize Office}">
-                    <dxe:ComboBoxEdit ShowCustomItems="False"
-                    DisplayMember="Name"
-                    NullText="{Localize 'All Offices'}"
-                    SeparatorString=", "
-                    EditValue="{Binding SelectedOfficesList, UpdateSourceTrigger=PropertyChanged}"
-                    ItemsSource="{Binding Offices.List}">
+                    <dxe:ComboBoxEdit ShowCustomItems="True"
+                      DisplayMember="Name"
+                      ValueMember="Id"
+                      NullText="{Localize 'All Offices'}"
+                      SeparatorString=", "
+                      EditValue="{Binding SelectedOfficeIds, UpdateSourceTrigger=PropertyChanged}"
+                      ItemsSource="{Binding Offices.List}">
                         <dxe:ComboBoxEdit.StyleSettings>
                             <dxe:CheckedComboBoxStyleSettings/>
                         </dxe:ComboBoxEdit.StyleSettings>

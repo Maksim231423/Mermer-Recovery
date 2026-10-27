@@ -241,10 +241,26 @@ public static class StockRevisionsEndpoints
             var existing = await db.StockRevisions.FirstOrDefaultAsync(r => r.Id == revId);
 
             string code = GetStringProp(root, "code", "Code") ?? $"REV-{DateTime.UtcNow:yyMMddHHmmss}";
-            Guid? wId = Guid.TryParse(GetStringProp(root, "warehouseId", "WarehouseId"), out var wG) ? wG : null;
-            Guid? exceedSlipId = Guid.TryParse(GetStringProp(root, "exceedSlipId", "ExceedSlipId"), out var eG) ? eG : null;
-            Guid? deficitSlipId = Guid.TryParse(GetStringProp(root, "deficitSlipId", "DeficitSlipId"), out var dG) ? dG : null;
-            Guid? userId = Guid.TryParse(GetStringProp(root, "userId", "UserId"), out var uG) ? uG : null;
+            Guid? wId = Guid.TryParse(GetStringProp(root, "warehouseId", "WarehouseId"), out var wG) && wG != Guid.Empty ? wG : null;
+
+            // =========================================================================
+            // ПОДСТАНОВКА DEFAULT СКЛАДА (если склад не передан из UI)
+            // =========================================================================
+            if (!wId.HasValue)
+            {
+                var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled);
+                var defWh = (defOffice != null
+                                ? await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => w.OfficeId == defOffice.Id && !w.IsDisabled)
+                                : null)
+                            ?? await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => !w.IsDisabled);
+
+                wId = defWh?.Id;
+            }
+            // =========================================================================
+
+            Guid? exceedSlipId = Guid.TryParse(GetStringProp(root, "exceedSlipId", "ExceedSlipId"), out var eG) && eG != Guid.Empty ? eG : null;
+            Guid? deficitSlipId = Guid.TryParse(GetStringProp(root, "deficitSlipId", "DeficitSlipId"), out var dG) && dG != Guid.Empty ? dG : null;
+            Guid? userId = Guid.TryParse(GetStringProp(root, "userId", "UserId"), out var uG) && uG != Guid.Empty ? uG : null;
             string userName = GetStringProp(root, "userName", "UserName") ?? "admin";
             string groupName = GetStringProp(root, "group", "Group", "groupName", "GroupName") ?? string.Empty;
             string description = GetStringProp(root, "description", "Description") ?? string.Empty;

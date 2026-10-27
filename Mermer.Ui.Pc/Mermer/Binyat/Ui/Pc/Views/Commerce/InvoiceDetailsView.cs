@@ -50,13 +50,5 @@ public partial class InvoiceDetailsView : MvxWpfView
                 return;
             }
         }
-
-        if (DataContext is Mermer.Mvvm.ViewModels.BaseViewModel viewModel)
-        {
-            if (viewModel.CloseCommand != null && viewModel.CloseCommand.CanExecute(null))
-            {
-                viewModel.CloseCommand.Execute(null);
-            }
-        }
     }
 }

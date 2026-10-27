@@ -609,11 +609,20 @@ public static class StockBalancesEndpoints
                 if (!stockBals.Any() && !stockIds.Contains(stock.Id)) return null;
 
                 decimal convertedPrice = 0m;
-                if (stock.CurrencyId.HasValue && stock.Price > 0m)
+                if (stock.Price > 0m)
                 {
-                    var currRate = rates.Where(r => r.CurrencyId == stock.CurrencyId.Value && r.ValidFrom <= date).OrderByDescending(r => r.ValidFrom).FirstOrDefault();
-                    decimal currMult = currRate?.Multiplier ?? 1m;
-                    decimal currDiv = currRate?.Divider ?? 1m;
+                    // Если у товара валюта не указана, считаем ее базовой валютой USD (множитель 1 / 1)
+                    decimal currMult = 1m;
+                    decimal currDiv = 1m;
+
+                    if (stock.CurrencyId.HasValue)
+                    {
+                        var currRate = rates.Where(r => r.CurrencyId == stock.CurrencyId.Value && r.ValidFrom <= date)
+                                            .OrderByDescending(r => r.ValidFrom)
+                                            .FirstOrDefault();
+                        currMult = currRate?.Multiplier ?? 1m;
+                        currDiv = currRate?.Divider ?? 1m;
+                    }
 
                     if (currDiv != 0 && dispMult != 0)
                     {

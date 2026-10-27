@@ -145,7 +145,36 @@ public class StockBalancesListViewModel :
                 this.StockSearcher.Initialize()
             );
 
-            this.SelectedWarehouseIds = new List<object>();
+            // Читаем настройки приложения
+            AppSettings config = await _configurator.GetConfigAsync<AppSettings>();
+
+            // 1. Проверяем склад из настроек
+            string targetWhId = config?.DefaultWarehouseId;
+
+            // 2. Если не задан — ищем склад, принадлежащий выбранному офису
+            if (string.IsNullOrEmpty(targetWhId) && !string.IsNullOrEmpty(config?.DefaultOfficeId))
+            {
+                targetWhId = this.Warehouses?.List?
+                    .FirstOrDefault(w => !w.IsDisabled && string.Equals(w.OfficeId, config.DefaultOfficeId, StringComparison.OrdinalIgnoreCase))?.Id;
+            }
+
+            // 3. Fallback: первый активный склад
+            if (string.IsNullOrEmpty(targetWhId))
+            {
+                targetWhId = this.Warehouses?.List?.FirstOrDefault(w => !w.IsDisabled)?.Id;
+            }
+
+            if (!string.IsNullOrEmpty(targetWhId))
+            {
+                this._selectedWarehouseIds = new List<object> { targetWhId };
+                this.RaisePropertyChanged(() => this.SelectedWarehouseIds);
+                this.RaisePropertyChanged(() => this.WarehouseIds);
+            }
+            else
+            {
+                this._selectedWarehouseIds = new List<object>();
+            }
+
             this._initialized = true;
         }
         else

@@ -47,9 +47,15 @@ public static class WarehouseEndpoints
             var existing = await db.Warehouses.FirstOrDefaultAsync(w => w.Id == id, ct);
 
             Guid? officeId = null;
-            if (!string.IsNullOrWhiteSpace(dto.OfficeId) && Guid.TryParse(dto.OfficeId, out var parsedOfficeId))
+            if (!string.IsNullOrWhiteSpace(dto.OfficeId) && Guid.TryParse(dto.OfficeId, out var parsedOfficeId) && parsedOfficeId != Guid.Empty)
             {
                 officeId = parsedOfficeId;
+            }
+            else
+            {
+                // Подстановка дефолтного офиса предприятия
+                var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled, ct);
+                officeId = defOffice?.Id;
             }
 
             if (existing is null)

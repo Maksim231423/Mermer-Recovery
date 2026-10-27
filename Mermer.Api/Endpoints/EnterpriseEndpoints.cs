@@ -50,12 +50,16 @@ public static class EnterpriseEndpoints
             if (_cachedWarehouses != null)
                 return Results.Json(_cachedWarehouses, jsonOptions);
 
+            var defaultOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled, ct);
+            var defaultOfficeIdStr = defaultOffice?.Id.ToString();
+
             var warehouses = await db.Warehouses.AsNoTracking().Where(w => !w.IsDisabled).ToListAsync(ct);
+
             _cachedWarehouses = warehouses.Select(w => new
             {
                 Id = w.Id.ToString(),
                 Name = w.Name,
-                OfficeId = w.OfficeId.HasValue ? w.OfficeId.Value.ToString() : null,
+                OfficeId = w.OfficeId.HasValue ? w.OfficeId.Value.ToString() : defaultOfficeIdStr,
                 IsDisabled = w.IsDisabled
             }).ToList();
 

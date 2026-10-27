@@ -161,6 +161,51 @@ public static class InvoicesEndpoints
             pgInvoice.Date = EnsureUtc(pgInvoice.Date);
 
             // =========================================================================
+            // ПОДСТАНОВКА ЗНАЧЕНИЙ ПО УМОЛЧАНИЮ (OFFICE, WAREHOUSE, DEPOSITORY, CURRENCY)
+            // =========================================================================
+            // 1. Дефолтный офис предприятия
+            var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled, ct);
+            Guid? defaultOfficeId = defOffice?.Id;
+
+            if (string.IsNullOrWhiteSpace(pgInvoice.OfficeId) || pgInvoice.OfficeId == Guid.Empty.ToString())
+            {
+                pgInvoice.OfficeId = defaultOfficeId?.ToString();
+            }
+
+            Guid.TryParse(pgInvoice.OfficeId, out var currentOfficeGuid);
+
+            // 2. Дефолтный склад (приоритет складу выбранного/дефолтного офиса)
+            if (string.IsNullOrWhiteSpace(pgInvoice.WarehouseId) || pgInvoice.WarehouseId == Guid.Empty.ToString())
+            {
+                var defWh = (currentOfficeGuid != Guid.Empty
+                                ? await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => w.OfficeId == currentOfficeGuid && !w.IsDisabled, ct)
+                                : null)
+                            ?? await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => !w.IsDisabled, ct);
+
+                pgInvoice.WarehouseId = defWh?.Id.ToString();
+            }
+
+            // 3. Дефолтная касса (приоритет кассе выбранного/дефолтного офиса)
+            if (string.IsNullOrWhiteSpace(pgInvoice.DepositoryId) || pgInvoice.DepositoryId == Guid.Empty.ToString())
+            {
+                var defDep = (currentOfficeGuid != Guid.Empty
+                                 ? await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => d.OfficeId == currentOfficeGuid && !d.IsDisabled, ct)
+                                 : null)
+                             ?? await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => !d.IsDisabled, ct);
+
+                pgInvoice.DepositoryId = defDep?.Id.ToString();
+            }
+
+            // 4. Дефолтная валюта накладной
+            if (string.IsNullOrWhiteSpace(pgInvoice.DisplayCurrencyId) || pgInvoice.DisplayCurrencyId == Guid.Empty.ToString())
+            {
+                var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
+                             ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => !c.IsDisabled, ct);
+
+                pgInvoice.DisplayCurrencyId = defCur?.Id.ToString();
+            }
+
+            // =========================================================================
             // ЗАЩИТА ВНЕШНЕГО КЛЮЧА invoice_lines_unit_id_fkey
             // =========================================================================
             if (pgInvoice.Lines != null && pgInvoice.Lines.Any())
@@ -193,7 +238,6 @@ public static class InvoicesEndpoints
                             fallbackUnitId = defaultUnit?.Id;
                         }
 
-                        // Если нашли дефолтную единицу товара — ставим её, иначе сбрасываем в null
                         line.UnitId = fallbackUnitId?.ToString();
                     }
                 }

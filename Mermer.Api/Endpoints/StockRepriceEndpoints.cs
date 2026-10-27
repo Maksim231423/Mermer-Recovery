@@ -232,10 +232,11 @@ public static class StockRepriceEndpoints
             var prevP = allPricesList.Where(p => p.StockId == nextP.StockId && p.ValidFrom < nextP.ValidFrom)
                                      .OrderByDescending(p => p.ValidFrom)
                                      .FirstOrDefault();
-            if (prevP == null || !prevP.CurrencyId.HasValue || !nextP.CurrencyId.HasValue) continue;
+            if (prevP == null) continue;
 
-            decimal r1 = GetRateValue(prevP.CurrencyId.Value, nextP.ValidFrom);
-            decimal r2 = GetRateValue(nextP.CurrencyId.Value, nextP.ValidFrom);
+            // Если CurrencyId равен null, считаем валюту базовой USD (курс 1.0)
+            decimal r1 = prevP.CurrencyId.HasValue ? GetRateValue(prevP.CurrencyId.Value, nextP.ValidFrom) : 1.0m;
+            decimal r2 = nextP.CurrencyId.HasValue ? GetRateValue(nextP.CurrencyId.Value, nextP.ValidFrom) : 1.0m;
 
             decimal diff = Math.Round((nextP.Price * r2) - (prevP.Price * r1), 2);
             if (diff == 0) continue;
@@ -253,7 +254,7 @@ public static class StockRepriceEndpoints
                     StockCode = stock?.Code ?? "",
                     StockName = stock?.Name ?? "",
                     PriceChange = diff,
-                    ChangeDate = nextP.ValidFrom, // ВАЖНО: передаем DateTime, а не string!
+                    ChangeDate = nextP.ValidFrom,
                     ChangeReason = 0,
                     WarehouseId = w.ToString(),
                     Balance = bal

@@ -313,7 +313,22 @@ public static class StockSlipsEndpoints
             string groupName = GetStringProperty(root, "group", "Group", "groupName", "GroupName") ?? "";
 
             string? wIdStr = GetStringProperty(root, "warehouseId", "WarehouseId");
-            Guid? wId = Guid.TryParse(wIdStr, out var parsedW) ? parsedW : null;
+            Guid? wId = Guid.TryParse(wIdStr, out var parsedW) && parsedW != Guid.Empty ? parsedW : null;
+
+            // =========================================================================
+            // ПОДСТАНОВКА DEFAULT СКЛАДА (если склад не передан из UI)
+            // =========================================================================
+            if (!wId.HasValue)
+            {
+                var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled);
+                var defWh = (defOffice != null
+                                ? await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => w.OfficeId == defOffice.Id && !w.IsDisabled)
+                                : null)
+                            ?? await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => !w.IsDisabled);
+
+                wId = defWh?.Id;
+            }
+            // =========================================================================
 
             DateTimeOffset date = DateTimeOffset.UtcNow;
             string? dateStr = GetStringProperty(root, "date", "Date");

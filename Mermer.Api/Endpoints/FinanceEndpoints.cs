@@ -48,8 +48,8 @@ public static class FinanceEndpoints
 
                 if (till.HasValue && till.Value.Year < 2099)
                 {
-                    var endDate = till.Value.TimeOfDay == TimeSpan.Zero 
-                        ? till.Value.Date.AddDays(1).AddTicks(-1).ToUniversalTime() 
+                    var endDate = till.Value.TimeOfDay == TimeSpan.Zero
+                        ? till.Value.Date.AddDays(1).AddTicks(-1).ToUniversalTime()
                         : till.Value.ToUniversalTime();
                     query = query.Where(s => s.Date <= endDate);
                 }
@@ -249,13 +249,36 @@ public static class FinanceEndpoints
 
             string code = GetStringProperty(root, "code", "Code") ?? $"DOC-{DateTime.UtcNow:yyMMddHHmmss}";
             string? depIdStr = GetStringProperty(root, "depositoryId", "DepositoryId");
-            Guid? depId = Guid.TryParse(depIdStr, out var parsedDep) ? parsedDep : null;
+            Guid? depId = Guid.TryParse(depIdStr, out var parsedDep) && parsedDep != Guid.Empty ? parsedDep : null;
+
+            // Если касса не указана, берем дефолтную кассу
+            if (depId == null)
+            {
+                var defDep = await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => !d.IsDisabled);
+                depId = defDep?.Id;
+            }
 
             string? partIdStr = GetStringProperty(root, "partnerId", "PartnerId");
-            Guid? partId = Guid.TryParse(partIdStr, out var parsedPart) ? parsedPart : null;
+            Guid? partId = Guid.TryParse(partIdStr, out var parsedPart) && parsedPart != Guid.Empty ? parsedPart : null;
 
             string? offIdStr = GetStringProperty(root, "officeId", "OfficeId");
-            Guid? offId = Guid.TryParse(offIdStr, out var parsedOff) ? parsedOff : null;
+            Guid? offId = Guid.TryParse(offIdStr, out var parsedOff) && parsedOff != Guid.Empty ? parsedOff : null;
+
+            // Если офис не указан, берем офис из кассы или дефолтный офис предприятия
+            if (offId == null)
+            {
+                if (depId.HasValue)
+                {
+                    var depObj = await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => d.Id == depId.Value);
+                    offId = depObj?.OfficeId;
+                }
+
+                if (offId == null)
+                {
+                    var defOff = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled);
+                    offId = defOff?.Id;
+                }
+            }
 
             string? dispCurStr = GetStringProperty(root, "displayCurrencyId", "DisplayCurrencyId", "currencyId", "CurrencyId");
             Guid? dispCurId = Guid.TryParse(dispCurStr, out var parsedDispCur) ? parsedDispCur : null;
@@ -1487,7 +1510,7 @@ public static class FinanceEndpoints
                 : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
             var depGuids = new List<Guid>();
-            if (!string.IsNullOrEmpty(depositoryId) && depositoryId != "null" && Guid.TryParse(depositoryId, out var parsedDep))
+            if (!string.IsNullOrEmpty(depositoryId) && depositoryId != "null" && Guid.TryParse(depositoryId, out var parsedDep) && parsedDep != Guid.Empty)
             {
                 depGuids.Add(parsedDep);
             }
@@ -1496,8 +1519,28 @@ public static class FinanceEndpoints
                 depGuids = await db.Depositories.AsNoTracking().Where(d => !d.IsDisabled).Select(d => d.Id).ToListAsync(ct);
             }
 
+            // 1. Дефолтная валюта
+            var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
+                         ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
+            Guid defaultCurrencyId = defCur?.Id ?? Guid.Empty;
+
+            // 2. Дефолтный офис
+            var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled, ct);
+            Guid? defaultOfficeId = defOffice?.Id;
+
+            // 3. Дефолтная касса (сначала ищем кассу дефолтного офиса, иначе любую активную)
+            var defDep = (defaultOfficeId.HasValue
+                             ? await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => d.OfficeId == defaultOfficeId && !d.IsDisabled, ct)
+                             : null)
+                         ?? await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => !d.IsDisabled, ct);
+
+            Guid defaultDepositoryId = defDep?.Id ?? (depGuids.FirstOrDefault());
+
             const string sql = """
-        WITH raw_funds AS (
+        WITH def_cur AS (
+            SELECT @defCurId::uuid AS id
+        ),
+        raw_funds AS (
             SELECT 
                 f.depository_id, 
                 f.date, 
@@ -1550,14 +1593,24 @@ public static class FinanceEndpoints
 
             UNION ALL
 
+            -- Оплаты накладных с приведением к базовой валюте USD
             SELECT 
                 i.depository_id, 
                 i.date, 
                 i.invoice_type AS type, 
-                ip.amount AS amt,
+                (ip.amount * CASE 
+                    WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
+                    ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                END)::numeric(18,4) AS amt,
                 (i.invoice_type IN ('Sales', 'PurchaseReturn')) AS is_inc
             FROM invoice_payments ip
             JOIN invoices i ON i.id = ip.invoice_id
+            LEFT JOIN LATERAL (
+                SELECT r.multiplier, r.divider 
+                FROM currency_rates r 
+                WHERE r.currency_id = i.display_currency_id AND r.valid_from <= i.date 
+                ORDER BY r.valid_from DESC LIMIT 1
+            ) cr ON true
             WHERE i.depository_id = ANY(@deps) 
               AND i.is_completed = true 
               AND i.is_disabled = false
@@ -1594,18 +1647,43 @@ public static class FinanceEndpoints
             await using var conn = new NpgsqlConnection(connStr);
             var result = await conn.QueryAsync<FundsBalanceByTypeWithBalanceDto>(new CommandDefinition(
                 sql,
-                new { deps = depGuids.ToArray(), start, end, isAllTime },
+                new
+                {
+                    deps = depGuids.ToArray(),
+                    start,
+                    end,
+                    isAllTime,
+                    defCurId = defaultCurrencyId,
+                    defDepId = defaultDepositoryId
+                },
                 cancellationToken: ct));
 
             return Results.Ok(result);
         });
 
-        balancesGroup.MapGet("/todate", async (string depositoryId, DateTime date, MermerDbContext db, CancellationToken ct) =>
+        balancesGroup.MapGet("/todate", async (string? depositoryId, DateTime date, MermerDbContext db, CancellationToken ct) =>
         {
-            if (!Guid.TryParse(depositoryId, out var depGuid)) return Results.BadRequest();
+            Guid depGuid = Guid.Empty;
+            if (!string.IsNullOrEmpty(depositoryId) && Guid.TryParse(depositoryId, out var parsedGuid) && parsedGuid != Guid.Empty)
+            {
+                depGuid = parsedGuid;
+            }
+            else
+            {
+                var defDep = await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => !d.IsDisabled, ct);
+                if (defDep != null) depGuid = defDep.Id;
+                else return Results.BadRequest("No active depository found");
+            }
+
+            var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
+                         ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
+            Guid defaultCurrencyId = defCur?.Id ?? Guid.Empty;
 
             const string sql = """
-                WITH raw_funds AS (
+                WITH def_cur AS (
+                    SELECT @defCurId::uuid AS id
+                ),
+                raw_funds AS (
                     SELECT fl.amount AS amt, (f.funds_slip_type IN ('Collection', 'FundsOpening', 'FundsRevisionExceed')) AS is_inc
                     FROM funds_slip_lines fl
                     JOIN funds_slips f ON f.id = fl.funds_slip_id
@@ -1634,9 +1712,20 @@ public static class FinanceEndpoints
 
                     UNION ALL
 
-                    SELECT ip.amount AS amt, (i.invoice_type IN ('Sales', 'PurchaseReturn')) AS is_inc
+                    SELECT 
+                        (ip.amount * CASE 
+                            WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
+                            ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                        END)::numeric(18,4) AS amt, 
+                        (i.invoice_type IN ('Sales', 'PurchaseReturn')) AS is_inc
                     FROM invoice_payments ip
                     JOIN invoices i ON i.id = ip.invoice_id
+                    LEFT JOIN LATERAL (
+                        SELECT r.multiplier, r.divider 
+                        FROM currency_rates r 
+                        WHERE r.currency_id = i.display_currency_id AND r.valid_from <= i.date 
+                        ORDER BY r.valid_from DESC LIMIT 1
+                    ) cr ON true
                     WHERE i.depository_id = @dep AND i.date < @dt AND i.is_completed = true AND i.is_disabled = false
                 )
                 SELECT 
@@ -1650,7 +1739,7 @@ public static class FinanceEndpoints
             await using var conn = new NpgsqlConnection(connStr);
             var res = await conn.QueryFirstOrDefaultAsync<FundsBalanceDto>(new CommandDefinition(
                 sql,
-                new { dep = depGuid, dt = date },
+                new { dep = depGuid, dt = date, defCurId = defaultCurrencyId },
                 cancellationToken: ct));
 
             return Results.Ok(res ?? new FundsBalanceDto { DepositoryId = depositoryId });

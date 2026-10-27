@@ -138,7 +138,8 @@ public class InvoiceDetailsViewModel :
             Offices.Initialize(),
             Partners.Initialize(),
             Depositories.Initialize(),
-            Warehouses.Initialize() 
+            Warehouses.Initialize(),
+            Currencies.Initialize()
         );
     }
 
@@ -163,7 +164,7 @@ public class InvoiceDetailsViewModel :
         if (Details.Discounts == null) Details.Discounts = new WatchedObservableCollection<InvoiceDiscount>();
 
         // --- ГАРАНТИРОВАННАЯ АКТУАЛИЗАЦИЯ КУРСОВ ВАЛЮТ ДЛЯ ПРОДАЖИ ---
-        if (string.IsNullOrEmpty(ItemId))
+        if (string.IsNullOrEmpty(ItemId) || Details.CurrencyConvertions == null || !Details.CurrencyConvertions.Any())
         {
             if (Details.CurrencyConvertions == null)
                 Details.CurrencyConvertions = new WatchedObservableCollection<CurrencyConvertion>();
@@ -236,12 +237,43 @@ public class InvoiceDetailsViewModel :
                 }
 
                 Details.UpdateCurrencyConvertion();
+
+            }
+        }
+
+        // 1. Принудительно актуализируем конвертацию каждой строки оплаты
+        if (Details.Payments != null)
+        {
+            foreach (var p in Details.Payments)
+            {
+                p.UpdateCurrencyConvertion();
+                p.UpdateDisplayCurrencyId(false);
+            }
+        }
+
+        if (Details.Changes != null)
+        {
+            foreach (var c in Details.Changes)
+            {
+                c.UpdateCurrencyConvertion();
+                c.UpdateDisplayCurrencyId(false);
             }
         }
 
         RaisePropertyChanged(() => CanCreateAggregatedStockOrder);
         RaisePropertyChanged(() => CanShowNewPrices);
 
+        // 2. Уведомляем модель о пересчете расчетных полей и статуса оплаты IsPayed
+        Details.RaisePropertyChanged("ActionTotal");
+        Details.RaisePropertyChanged("ActionGrandTotal");
+        Details.RaisePropertyChanged("ActionPaymentsTotal");
+        Details.RaisePropertyChanged("ActionChangesTotal");
+        Details.RaisePropertyChanged("ActionLeftTotal");
+        Details.RaisePropertyChanged("IsPayed");
+        Details.RaisePropertyChanged("IsCash");
+        Details.RaisePropertyChanged("IsDebitCredit");
+
+        // 3. Уведомляем UI о строковых/отображаемых значениях
         Details.RaisePropertyChanged("DisplayDiscountsTotal");
         Details.RaisePropertyChanged("DisplayGrandTotal");
         Details.RaisePropertyChanged("DisplayPaymentsTotal");
@@ -260,6 +292,9 @@ public class InvoiceDetailsViewModel :
         Offices.Filter = x => !x.IsDisabled || x.Id == Details?.OfficeId;
 
         UpdateFacilityFilters();
+
+        // Запускаем расчет остатка партнера при загрузке окна
+        UpdatePartnerBalance();
 
         if (string.IsNullOrEmpty(ItemId) && (Details.Lines == null || Details.Lines.Count == 0))
         {
@@ -638,24 +673,19 @@ public class InvoiceDetailsViewModel :
         {
             return new MvxAsyncCommand(async () =>
             {
-                // Если накладная новая и не добавлено ни одной строки с товаром
-                if (string.IsNullOrEmpty(ItemId) && (Details?.Lines == null || Details.Lines.Count == 0))
-                {
-                    this.IsDirty = false;
-                    await NavigationService.Close(this);
-                    return;
-                }
-
-                // Иначе вызываем оригинальную команду закрытия с диалогом подтверждения
-                base.CloseCommand?.Execute(null);
+                await OnCloseAsync();
             }, () => !IsBusy);
         }
     }
 
     public override async Task<bool> OnCloseAsync()
     {
-        // Если это новый документ и в накладной нет ни одной добавленной строки с товаром
-        if (string.IsNullOrEmpty(ItemId) && (Details?.Lines == null || Details.Lines.Count == 0))
+        // 1. Если это совершенно новая накладная: нет добавленных товаров и не выбран контрагент — закрываем без лишних вопросов
+        bool isBrandNewAndEmpty = string.IsNullOrEmpty(ItemId)
+                                  && (Details?.Lines == null || Details.Lines.Count == 0)
+                                  && string.IsNullOrEmpty(Details?.PartnerId);
+
+        if (isBrandNewAndEmpty)
         {
             this.IsDirty = false;
             await this.NavigationService.Close(this);
@@ -663,7 +693,17 @@ public class InvoiceDetailsViewModel :
             return true;
         }
 
-        // Если строки добавлены или документ уже сохранен — штатная проверка с диалогом
-        return await base.OnCloseAsync();
+        // 2. Если пользователь ввел изменения (выбрал товар, клиента или изменил поля) — проверяем подтверждение
+        if (!this.CheckCanClose())
+        {
+            // Пользователь нажал "No" или "Cancel" — отменяем закрытие
+            return false;
+        }
+
+        // Пользователь нажал "Yes" — сбрасываем флаг и закрываем окно
+        this.IsDirty = false;
+        await this.NavigationService.Close(this);
+        BaseViewModel.RequestComponentCloseAction?.Invoke(this);
+        return true;
     }
 }

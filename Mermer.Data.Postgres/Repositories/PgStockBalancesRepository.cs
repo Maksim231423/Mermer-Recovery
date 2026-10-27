@@ -184,14 +184,29 @@ public class PgStockBalancesRepository : IStockBalancesRepository
 
         var warehouseGuids = ParseGuids(warehouseIds);
 
+        // Получаем ID дефолтной базовой валюты (USD)
+        Guid defaultCurrencyId = Guid.Empty;
+        await using (var preConn = new NpgsqlConnection(_connectionString))
+        {
+            defaultCurrencyId = await preConn.ExecuteScalarAsync<Guid>(
+                "SELECT id FROM currencies WHERE is_default = true AND is_disabled = false LIMIT 1");
+        }
+
         const string sql = """
+            WITH def_cur AS (
+                SELECT @defCurId::uuid AS id
+            )
             SELECT
                 i.date::date                                      AS action_date,
                 i.invoice_type,
                 i.warehouse_id,
                 w.name                                            AS warehouse_name,
                 SUM(il.quantity)::numeric(18,4)                  AS quantity,
-                SUM(il.quantity * il.price)::numeric(18,4)       AS total,
+                -- Конвертируем цену строки накладной в базовую валюту USD
+                SUM(il.quantity * (il.price * CASE 
+                    WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
+                    ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                END))::numeric(18,4)                              AS total,
                 SUM(SUM(CASE WHEN i.invoice_type IN ('Purchase','SalesReturn')
                               THEN il.quantity ELSE -il.quantity END))
                 OVER (
@@ -202,6 +217,12 @@ public class PgStockBalancesRepository : IStockBalancesRepository
             FROM invoice_lines il
             JOIN invoices  i ON i.id = il.invoice_id
             JOIN warehouses w ON w.id = i.warehouse_id
+            LEFT JOIN LATERAL (
+                SELECT r.multiplier, r.divider 
+                FROM currency_rates r 
+                WHERE r.currency_id = i.display_currency_id AND r.valid_from <= i.date 
+                ORDER BY r.valid_from DESC LIMIT 1
+            ) cr ON true
             WHERE il.stock_id     = @stockId
               AND i.is_completed  = true
               AND i.date::date   >= @dateFrom
@@ -214,20 +235,21 @@ public class PgStockBalancesRepository : IStockBalancesRepository
         await using var conn = new NpgsqlConnection(_connectionString);
         var rows = await conn.QueryAsync(new CommandDefinition(sql, new
         {
-            stockId      = stockGuid,
+            stockId = stockGuid,
             dateFrom,
             dateTill,
-            warehouseIds = warehouseGuids.Length > 0 ? warehouseGuids : null
+            warehouseIds = warehouseGuids.Length > 0 ? warehouseGuids : null,
+            defCurId = defaultCurrencyId
         }, cancellationToken: ct));
 
         return rows.Select(r => new StockBalanceByTypeWithBalanceAndData
         {
-            Date           = (DateTime)r.action_date,
-            InvoiceType    = (string)r.invoice_type,
-            WarehouseId    = ((Guid)r.warehouse_id).ToString(),
-            WarehouseName  = (string)r.warehouse_name,
-            Quantity       = (decimal)r.quantity,
-            Total          = (decimal)r.total,
+            Date = (DateTime)r.action_date,
+            InvoiceType = (string)r.invoice_type,
+            WarehouseId = ((Guid)r.warehouse_id).ToString(),
+            WarehouseName = (string)r.warehouse_name,
+            Quantity = (decimal)r.quantity,
+            Total = (decimal)r.total,
             RunningBalance = (decimal)r.running_balance
         }).ToList();
     }

@@ -119,37 +119,42 @@ public class PartnerBalancesListViewModel :
 
   public Reference<Currency> Currencies { get; }
 
-  protected override async Task PreLoad()
-  {
-        if (!_loaded && (OfficeIds == null || !OfficeIds.Any()))
-        {
-            AppSettings config = await _configurator.GetConfigAsync<AppSettings>();
-            if (!string.IsNullOrEmpty(config?.DefaultOfficeId))
-            {
-                SelectedOfficeIds = new List<object> { config.DefaultOfficeId };
-            }
-            else
-            {
-                SelectedOfficeIds = new List<object>();
-            }
-        }
-
-        _loaded = true;
-
+    protected override async Task PreLoad()
+    {
         await Task.WhenAll(
-            Offices.Initialize(), 
-            Partners.Initialize(), 
+            base.PreLoad(),
+            Offices.Initialize(),
+            Partners.Initialize(),
             Currencies.Initialize()
         );
 
+        if (!_loaded)
+        {
+            if (OfficeIds == null || !OfficeIds.Any())
+            {
+                AppSettings config = await _configurator.GetConfigAsync<AppSettings>();
+                if (!string.IsNullOrEmpty(config?.DefaultOfficeId))
+                {
+                    _selectedOfficeIds = new List<object> { config.DefaultOfficeId };
+                }
+                else
+                {
+                    _selectedOfficeIds = new List<object>();
+                }
+                RaisePropertyChanged(() => SelectedOfficeIds);
+            }
+
+            _loaded = true;
+        }
+
         if (string.IsNullOrEmpty(CurrencyId) && Currencies.List != null)
         {
-            CurrencyId = Currencies.List.FirstOrDefault(x => x.IsDefault)?.Id 
+            CurrencyId = Currencies.List.FirstOrDefault(x => x.IsDefault)?.Id
                          ?? Currencies.List.FirstOrDefault()?.Id;
         }
-  }
+    }
 
-  protected override async Task<IEnumerable<PartnerBalanceByTypeWithBalance>> GetFilteredListByDateAsync(
+    protected override async Task<IEnumerable<PartnerBalanceByTypeWithBalance>> GetFilteredListByDateAsync(
     DateTime from,
     DateTime till)
   {

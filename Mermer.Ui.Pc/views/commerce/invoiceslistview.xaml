@@ -38,9 +38,13 @@
                 </dxg:GridColumn>
                 <dxg:GridColumn FieldName="Code" Header="{Localize Code}"/>
                 <dxg:GridColumn FieldName="Type" Header="{Localize Type}">
-                    <dxg:ColumnBase.EditSettings>
-                        <dxg:LookUpEditSettings DisplayMember="Text" ValueMember="Value" ItemsSource="{Binding Types.List}"/>
-                    </dxg:ColumnBase.EditSettings>
+                    <dxg:GridColumn.CellTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding RowData.Row.Type, Converter={cnv:InvoiceTypeConverter}}"
+                       VerticalAlignment="Center"
+                       Margin="4,0"/>
+                        </DataTemplate>
+                    </dxg:GridColumn.CellTemplate>
                 </dxg:GridColumn>
                 <dxg:GridColumn FieldName="OfficeId" Header="{Localize Office}">
                     <dxg:ColumnBase.EditSettings>

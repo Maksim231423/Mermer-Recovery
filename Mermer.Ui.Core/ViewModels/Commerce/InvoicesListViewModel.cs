@@ -30,28 +30,30 @@ public class InvoicesListViewModel : ListViewModelBaseWithFilterDate<InvoiceInfo
   private readonly IInvoicesRepository _repository;
   private readonly IListAuthorizer<Invoice> _authorizer;
 
-  public InvoicesListViewModel(
-    IMvxMessenger messenger,
-    Reference<Office> offices,
-    Reference<Partner> partners,
-    Reference<Warehouse> warehouses,
-    Reference<Depository> depositories,
-    IInvoicesRepository repository,
-    IListAuthorizer<Invoice> authorizer,
-    IMvxNavigationService navigationService,
-    IUserInteractionService userInteractionService)
-    : base(messenger, navigationService, userInteractionService)
-  {
-    this._repository = repository;
-    this._authorizer = authorizer;
-    this.Offices = offices;
-    this.Partners = partners;
-    this.Warehouses = warehouses;
-    this.Depositories = depositories;
-    this.Types = new LocalizedTransactionTypes("Repricing");
-  }
+    public InvoicesListViewModel(
+          IMvxMessenger messenger,
+          Reference<Office> offices,
+          Reference<Partner> partners,
+          Reference<Warehouse> warehouses,
+          Reference<Depository> depositories,
+          IInvoicesRepository repository,
+          IListAuthorizer<Invoice> authorizer,
+          IMvxNavigationService navigationService,
+          IUserInteractionService userInteractionService)
+          : base(messenger, navigationService, userInteractionService)
+    {
+        this._repository = repository;
+        this._authorizer = authorizer;
+        this.Offices = offices;
+        this.Partners = partners;
+        this.Warehouses = warehouses;
+        this.Depositories = depositories;
 
-  public override string Caption => this["Invoices", Array.Empty<object>()];
+        // Исправлено: передаем транзакции накладных, а не переоценку
+        this.Types = new LocalizedTransactionTypes("Invoices");
+    }
+
+    public override string Caption => this["Invoices", Array.Empty<object>()];
 
   public Reference<Office> Offices { get; }
 

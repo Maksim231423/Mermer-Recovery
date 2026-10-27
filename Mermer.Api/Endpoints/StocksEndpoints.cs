@@ -20,7 +20,6 @@ public static class StocksEndpoints
     public static IEndpointRouteBuilder MapStocksEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/stocks").WithTags("Stocks");
-        // ВАЖНО: сохраняем точный PascalCase свойств (Code, Price, CurrencyId, etc.)
         var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
 
         // 1. СПИСОК ТОВАРОВ
@@ -43,7 +42,6 @@ public static class StocksEndpoints
                                          (s.Code != null && EF.Functions.ILike(s.Code, $"%{term}%")));
             }
 
-            // Получаем дефолтную валюту (USD), если у товара нет явного CurrencyId
             var defaultCurrency = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct);
             string? defaultCurrencyId = defaultCurrency?.Id.ToString();
 
@@ -271,7 +269,6 @@ public static class StocksEndpoints
 
             Guid? filterStockGuid = Guid.TryParse(stockId, out var sG) ? sG : null;
 
-            // 1. Складские ордера
             var slipsQuery = db.StockSlipLines.AsNoTracking()
                 .Where(l => l.StockSlip != null && l.StockSlip.Date >= startDate && l.StockSlip.Date <= endDate);
             if (completed.HasValue) slipsQuery = slipsQuery.Where(l => l.StockSlip!.IsCompleted == completed.Value);
@@ -279,7 +276,6 @@ public static class StocksEndpoints
             if (whIds.Any()) slipsQuery = slipsQuery.Where(l => l.StockSlip!.WarehouseId.HasValue && whIds.Contains(l.StockSlip.WarehouseId.Value));
             int countSlips = await slipsQuery.CountAsync(ct);
 
-            // 2. Накладные (Invoices)
             var invQuery = db.InvoiceLines.AsNoTracking()
                 .Where(l => l.Invoice != null && !l.Invoice.IsDisabled && l.Invoice.Date >= startDate && l.Invoice.Date <= endDate);
             if (completed.HasValue) invQuery = invQuery.Where(l => l.Invoice!.IsCompleted == completed.Value);
@@ -287,7 +283,6 @@ public static class StocksEndpoints
             if (whIds.Any()) invQuery = invQuery.Where(l => l.Invoice!.WarehouseId.HasValue && whIds.Contains(l.Invoice.WarehouseId.Value));
             int countInvoices = await invQuery.CountAsync(ct);
 
-            // 3. Перемещения (Transfers)
             var trBaseQuery = db.StockTransferLines.AsNoTracking()
                 .Where(l => l.StockTransfer != null && !l.StockTransfer.IsDisabled && l.StockTransfer.Date >= startDate && l.StockTransfer.Date <= endDate);
             if (completed.HasValue) trBaseQuery = trBaseQuery.Where(l => l.StockTransfer!.IsCompleted == completed.Value);
@@ -312,7 +307,6 @@ public static class StocksEndpoints
         // ЖУРНАЛ ДВИЖЕНИЯ ТОВАРОВ (СПИСОК)
         group.MapGet("/actions", async (DateTime? from, DateTime? till, string? stockId, bool? completed, int? limit, int? offset, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            // Снимаем ограничение в 500 записей — отдаем до 100000 записей
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 100000) : 100000;
             int skip = offset.GetValueOrDefault(0);
 
@@ -334,8 +328,15 @@ public static class StocksEndpoints
 
             Guid? filterStockGuid = Guid.TryParse(stockId, out var sG) ? sG : null;
 
+            var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
+                         ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
+            Guid defaultCurrencyId = defCur?.Id ?? Guid.Empty;
+
             const string sql = """
-                WITH raw_actions AS (
+                WITH def_cur AS (
+                    SELECT @defCurId::uuid AS id
+                ),
+                raw_actions AS (
                     -- 1. Складские ордера
                     SELECT 
                         s.id AS "TransactionId",
@@ -361,14 +362,14 @@ public static class StocksEndpoints
                         COALESCE(stk.type, '') AS "StockType",
                         COALESCE(stk.group_name, '') AS "StockGroup",
                         COALESCE(stk.tags, ARRAY[]::text[]) AS "StockTags",
-                        l.price AS "RecommendedPrice",
-                        l.price AS "ActionPrice",
+                        l.price::numeric(18,4) AS "RecommendedPrice",
+                        l.price::numeric(18,4) AS "ActionPrice",
                         CASE WHEN s.slip_type IN ('StockOpening', 'RevisionExceed') THEN l.quantity ELSE 0 END AS "ActionIncome",
                         CASE WHEN s.slip_type NOT IN ('StockOpening', 'RevisionExceed') THEN l.quantity ELSE 0 END AS "ActionExpense",
                         CASE WHEN s.slip_type IN ('StockOpening', 'RevisionExceed') THEN l.quantity ELSE -l.quantity END AS "ActionEffect",
-                        (l.quantity * l.price) AS "GrandTotal",
-                        (l.quantity * l.price) AS "RecommendedTotal",
-                        (l.quantity * l.price) AS "GrandTotalInCustomCurrency"
+                        (l.quantity * l.price)::numeric(18,4) AS "GrandTotal",
+                        (l.quantity * l.price)::numeric(18,4) AS "RecommendedTotal",
+                        (l.quantity * l.price)::numeric(18,4) AS "GrandTotalInCustomCurrency"
                     FROM stock_slip_lines l
                     JOIN stock_slips s ON s.id = l.stock_slip_id
                     LEFT JOIN stocks stk ON stk.id = l.stock_id
@@ -404,14 +405,14 @@ public static class StocksEndpoints
                         COALESCE(stk.type, '') AS "StockType",
                         COALESCE(stk.group_name, '') AS "StockGroup",
                         COALESCE(stk.tags, ARRAY[]::text[]) AS "StockTags",
-                        l.price AS "RecommendedPrice",
-                        l.price AS "ActionPrice",
+                        l.price::numeric(18,4) AS "RecommendedPrice",
+                        l.price::numeric(18,4) AS "ActionPrice",
                         0 AS "ActionIncome",
                         l.quantity AS "ActionExpense",
                         -l.quantity AS "ActionEffect",
-                        (l.quantity * l.price) AS "GrandTotal",
-                        (l.quantity * l.price) AS "RecommendedTotal",
-                        (l.quantity * l.price) AS "GrandTotalInCustomCurrency"
+                        (l.quantity * l.price)::numeric(18,4) AS "GrandTotal",
+                        (l.quantity * l.price)::numeric(18,4) AS "RecommendedTotal",
+                        (l.quantity * l.price)::numeric(18,4) AS "GrandTotalInCustomCurrency"
                     FROM stock_transfer_lines l
                     JOIN stock_transfers t ON t.id = l.stock_transfer_id
                     LEFT JOIN stocks stk ON stk.id = l.stock_id
@@ -448,14 +449,14 @@ public static class StocksEndpoints
                         COALESCE(stk.type, '') AS "StockType",
                         COALESCE(stk.group_name, '') AS "StockGroup",
                         COALESCE(stk.tags, ARRAY[]::text[]) AS "StockTags",
-                        l.price AS "RecommendedPrice",
-                        l.price AS "ActionPrice",
+                        l.price::numeric(18,4) AS "RecommendedPrice",
+                        l.price::numeric(18,4) AS "ActionPrice",
                         COALESCE(NULLIF(l.received_quantity, 0), l.quantity) AS "ActionIncome",
                         0 AS "ActionExpense",
                         COALESCE(NULLIF(l.received_quantity, 0), l.quantity) AS "ActionEffect",
-                        (COALESCE(NULLIF(l.received_quantity, 0), l.quantity) * l.price) AS "GrandTotal",
-                        (COALESCE(NULLIF(l.received_quantity, 0), l.quantity) * l.price) AS "RecommendedTotal",
-                        (COALESCE(NULLIF(l.received_quantity, 0), l.quantity) * l.price) AS "GrandTotalInCustomCurrency"
+                        (COALESCE(NULLIF(l.received_quantity, 0), l.quantity) * l.price)::numeric(18,4) AS "GrandTotal",
+                        (COALESCE(NULLIF(l.received_quantity, 0), l.quantity) * l.price)::numeric(18,4) AS "RecommendedTotal",
+                        (COALESCE(NULLIF(l.received_quantity, 0), l.quantity) * l.price)::numeric(18,4) AS "GrandTotalInCustomCurrency"
                     FROM stock_transfer_lines l
                     JOIN stock_transfers t ON t.id = l.stock_transfer_id
                     LEFT JOIN stocks stk ON stk.id = l.stock_id
@@ -467,48 +468,71 @@ public static class StocksEndpoints
 
                     UNION ALL
 
-                    -- 4. Накладные (Invoices)
-                    SELECT 
-                        i.id AS "TransactionId",
-                        i.code AS "TransactionCode",
-                        i.date AS "TransactionDate",
-                        COALESCE(i.invoice_type, 'Invoice') AS "TransactionType",
-                        '00000000-0000-0000-0000-000000000000' AS "TransactionUserId",
-                        COALESCE(i.user_name, 'admin') AS "TransactionUserName",
-                        COALESCE(i.user_name, 'admin') AS "Author",
-                        COALESCE(i.user_name, 'admin') AS "UserName",
-                        i.is_completed AS "TransactionIsCompleted",
-                        false AS "TransactionIsDisabled",
-                        false AS "TransactionIsCash",
-                        COALESCE(i.tags, ARRAY[]::text[]) AS "TransactionTags",
-                        COALESCE(i.group_name, '') AS "TransactionGroup",
-                        l.id::text AS "ActionId",
-                        i.warehouse_id::text AS "ActionWarehouseId",
-                        COALESCE(p.name, '') AS "ActionRelatedObjectName",
-                        l.stock_id::text AS "ActionStockId",
-                        l.stock_id::text AS "StockId",
-                        COALESCE(stk.code, '') AS "StockCode",
-                        COALESCE(stk.name, '') AS "StockName",
-                        COALESCE(stk.type, '') AS "StockType",
-                        COALESCE(stk.group_name, '') AS "StockGroup",
-                        COALESCE(stk.tags, ARRAY[]::text[]) AS "StockTags",
-                        l.price AS "RecommendedPrice",
-                        l.price AS "ActionPrice",
-                        CASE WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN l.quantity ELSE 0 END AS "ActionIncome",
-                        CASE WHEN i.invoice_type NOT IN ('Purchase', 'SalesReturn') THEN l.quantity ELSE 0 END AS "ActionExpense",
-                        CASE WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN l.quantity ELSE -l.quantity END AS "ActionEffect",
-                        (l.quantity * l.price) AS "GrandTotal",
-                        (l.quantity * l.price) AS "RecommendedTotal",
-                        (l.quantity * l.price) AS "GrandTotalInCustomCurrency"
-                    FROM invoice_lines l
-                    JOIN invoices i ON i.id = l.invoice_id
-                    LEFT JOIN partners p ON p.id = i.partner_id
-                    LEFT JOIN stocks stk ON stk.id = l.stock_id
-                    WHERE i.is_disabled = false
-                      AND i.date >= @start AND i.date <= @end
-                      AND (@stockGuid IS NULL OR l.stock_id = @stockGuid)
-                      AND (@comp IS NULL OR i.is_completed = @comp)
-                      AND (cardinality(@whs) = 0 OR i.warehouse_id = ANY(@whs))
+                   -- 4. Накладные
+                SELECT 
+                    i.id AS "TransactionId",
+                    i.code AS "TransactionCode",
+                    i.date AS "TransactionDate",
+                    COALESCE(i.invoice_type, 'Invoice') AS "TransactionType",
+                    '00000000-0000-0000-0000-000000000000' AS "TransactionUserId",
+                    COALESCE(i.user_name, 'admin') AS "TransactionUserName",
+                    COALESCE(i.user_name, 'admin') AS "Author",
+                    COALESCE(i.user_name, 'admin') AS "UserName",
+                    i.is_completed AS "TransactionIsCompleted",
+                    false AS "TransactionIsDisabled",
+                    (i.depository_id IS NOT NULL) AS "TransactionIsCash",
+                    COALESCE(i.tags, ARRAY[]::text[]) AS "TransactionTags",
+                    COALESCE(i.group_name, '') AS "TransactionGroup",
+                    l.id::text AS "ActionId",
+                    i.warehouse_id::text AS "ActionWarehouseId",
+                    COALESCE(p.name, '') AS "ActionRelatedObjectName",
+                    l.stock_id::text AS "ActionStockId",
+                    l.stock_id::text AS "StockId",
+                    COALESCE(stk.code, '') AS "StockCode",
+                    COALESCE(stk.name, '') AS "StockName",
+                    COALESCE(stk.type, '') AS "StockType",
+                    COALESCE(stk.group_name, '') AS "StockGroup",
+                    COALESCE(stk.tags, ARRAY[]::text[]) AS "StockTags",
+                    COALESCE(lp.price, l.price)::numeric(18,4) AS "RecommendedPrice",
+                    (l.price * CASE 
+                        WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
+                        ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                    END)::numeric(18,4) AS "ActionPrice",
+                    CASE WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN l.quantity ELSE 0 END AS "ActionIncome",
+                    CASE WHEN i.invoice_type NOT IN ('Purchase', 'SalesReturn') THEN l.quantity ELSE 0 END AS "ActionExpense",
+                    CASE WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN l.quantity ELSE -l.quantity END AS "ActionEffect",
+                    (l.quantity * (l.price * CASE 
+                        WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
+                        ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                    END))::numeric(18,4) AS "GrandTotal",
+                    (l.quantity * COALESCE(lp.price, l.price))::numeric(18,4) AS "RecommendedTotal",
+                    (l.quantity * (l.price * CASE 
+                        WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
+                        ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                    END))::numeric(18,4) AS "GrandTotalInCustomCurrency"
+                FROM invoice_lines l
+                JOIN invoices i ON i.id = l.invoice_id
+                LEFT JOIN partners p ON p.id = i.partner_id
+                LEFT JOIN stocks stk ON stk.id = l.stock_id
+                LEFT JOIN LATERAL (
+                    SELECT r.multiplier, r.divider 
+                    FROM currency_rates r 
+                    WHERE r.currency_id = i.display_currency_id 
+                      AND r.valid_from <= i.date 
+                    ORDER BY r.valid_from DESC LIMIT 1
+                ) cr ON true
+                LEFT JOIN LATERAL (
+                    SELECT sp.price 
+                    FROM stock_prices sp 
+                    WHERE sp.stock_id = l.stock_id 
+                    ORDER BY (sp.valid_from <= i.date) DESC, sp.valid_from DESC 
+                    LIMIT 1
+                ) lp ON true
+                WHERE i.is_disabled = false
+                  AND i.date >= @start AND i.date <= @end
+                  AND (@stockGuid IS NULL OR l.stock_id = @stockGuid)
+                  AND (@comp IS NULL OR i.is_completed = @comp)
+                  AND (cardinality(@whs) = 0 OR i.warehouse_id = ANY(@whs))
                 )
                 SELECT * 
                 FROM raw_actions
@@ -520,7 +544,7 @@ public static class StocksEndpoints
             await using var conn = new Npgsql.NpgsqlConnection(connStr);
             var results = await Dapper.SqlMapper.QueryAsync(conn, new Dapper.CommandDefinition(
                 sql,
-                new { start = startDate, end = endDate, stockGuid = filterStockGuid, comp = completed, whs = whIds, take, skip },
+                new { start = startDate, end = endDate, stockGuid = filterStockGuid, comp = completed, whs = whIds, defCurId = defaultCurrencyId, take, skip },
                 cancellationToken: ct));
 
             return Results.Json(results, jsonOptions);
@@ -563,7 +587,6 @@ public static class StocksEndpoints
             var tagsList = ExtractArrayProp(root, "tags", "Tags");
             var barcodesList = ExtractArrayProp(root, "barcodes", "Barcodes");
 
-            // Ищем существующий товар БЕЗ трекинга коллекций, чтобы не ломать ChangeTracker EF Core
             StockEntity? existing = null;
             if (parsedStockId != Guid.Empty)
             {
@@ -583,7 +606,6 @@ public static class StocksEndpoints
                 code = $"ST-{(count + 1):D6}";
             }
 
-            // --- ПАРСИНГ ЦЕН ---
             var incomingPrices = new List<(Guid Id, decimal Price, Guid? CurrencyId, string Group, DateTime ValidFrom)>();
             if (TryGetPropCaseInsensitive(root, "prices", out var pricesProp) && pricesProp.ValueKind == JsonValueKind.Array)
             {
@@ -620,7 +642,6 @@ public static class StocksEndpoints
                 incomingPrices.Add((Guid.NewGuid(), rootPrice, rootCurGuid, string.Empty, DateTime.UtcNow.Date));
             }
 
-            // --- ПАРСИНГ ЕДИНИЦ ИЗМЕРЕНИЯ ---
             var incomingUnits = new List<(Guid Id, string Name, decimal Multiplier, decimal Divider, bool IsDefault)>();
             if (TryGetPropCaseInsensitive(root, "units", out var unitsProp) && unitsProp.ValueKind == JsonValueKind.Array)
             {
@@ -650,7 +671,6 @@ public static class StocksEndpoints
                 incomingUnits.Add((Guid.NewGuid(), rootUnit, 1m, 1m, true));
             }
 
-            // 1. СОХРАНЯЕМ САМ ТОВАР ЧЕРЕЗ EF CORE
             if (existing == null)
             {
                 existing = new StockEntity
@@ -690,13 +710,10 @@ public static class StocksEndpoints
 
             await db.SaveChangesAsync(request.HttpContext.RequestAborted);
 
-            // 2. БЕЗОПАСНЫЙ UPSERT ДЛЯ ЕДИНИЦ ИЗМЕРЕНИЯ И ЦЕН ЧЕРЕЗ ПРЯМЫЕ SQL ЗАПРОСЫ
-            // Это исключает любые ошибки Concurrency и не нарушает внешние ключи накладных!
             var connStr = db.Database.GetConnectionString();
             await using var conn = new Npgsql.NpgsqlConnection(connStr);
             await conn.OpenAsync(request.HttpContext.RequestAborted);
 
-            // А. Обработка Stock Units
             var currentDbUnits = (await Dapper.SqlMapper.QueryAsync<StockUnitEntity>(conn,
                 "SELECT * FROM stock_units WHERE stock_id = @stockId",
                 new { stockId })).ToList();
@@ -723,7 +740,6 @@ public static class StocksEndpoints
                 }
             }
 
-            // Б. Обработка Stock Prices
             var currentDbPrices = (await Dapper.SqlMapper.QueryAsync<StockPriceEntity>(conn,
                 "SELECT * FROM stock_prices WHERE stock_id = @stockId",
                 new { stockId })).ToList();

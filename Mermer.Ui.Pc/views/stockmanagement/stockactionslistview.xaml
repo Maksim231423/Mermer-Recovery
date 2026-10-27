@@ -31,6 +31,7 @@
                 <dxlc:LayoutItem HorizontalAlignment="Left" Width="300" Label="{Localize Warehouse}">
                     <dxe:ComboBoxEdit DisplayMember="Name" 
                       ValueMember="Id"
+                      ShowCustomItems="True"
                       NullText="{Localize 'All Warehouses'}"
                       EditValue="{Binding SelectedWarehouseIds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                       ItemsSource="{Binding Warehouses.List}"

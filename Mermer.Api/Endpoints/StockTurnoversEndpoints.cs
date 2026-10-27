@@ -26,6 +26,18 @@ public static class StockTurnoversEndpoints
             string? warehouseIdStr = req.Query["warehouseId"].FirstOrDefault();
             Guid? warehouseId = Guid.TryParse(warehouseIdStr, out var w) && w != Guid.Empty ? w : null;
 
+            // Если склад не выбран в фильтре, подставляем склад по умолчанию дефолтного офиса
+            if (!warehouseId.HasValue)
+            {
+                var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled, ct);
+                var defWh = (defOffice != null
+                                ? await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(wh => wh.OfficeId == defOffice.Id && !wh.IsDisabled, ct)
+                                : null)
+                            ?? await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(wh => !wh.IsDisabled, ct);
+
+                warehouseId = defWh?.Id;
+            }
+
             // ТОЧНАЯ ФОРМУЛА COUCHBASE:
             // Income = приходы
             // Expense = списания/порча/расход (БЕЗ продаж)

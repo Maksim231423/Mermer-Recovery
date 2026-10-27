@@ -275,9 +275,31 @@ public static class StockTransfersEndpoints
             var existing = await db.StockTransfers.Include(t => t.Lines).FirstOrDefaultAsync(t => t.Id == transferId);
 
             string code = GetStringProp(root, "code", "Code") ?? $"STR-{DateTime.UtcNow:yyMMddHHmmss}";
-            Guid? srcWhId = Guid.TryParse(GetStringProp(root, "warehouseId", "WarehouseId"), out var sW) ? sW : null;
-            Guid? dstWhId = Guid.TryParse(GetStringProp(root, "destinationWarehouseId", "DestinationWarehouseId"), out var dW) ? dW : null;
-            Guid? dispCurId = Guid.TryParse(GetStringProp(root, "displayCurrencyId", "DisplayCurrencyId"), out var cG) ? cG : null;
+            Guid? srcWhId = Guid.TryParse(GetStringProp(root, "warehouseId", "WarehouseId"), out var sW) && sW != Guid.Empty ? sW : null;
+            Guid? dstWhId = Guid.TryParse(GetStringProp(root, "destinationWarehouseId", "DestinationWarehouseId"), out var dW) && dW != Guid.Empty ? dW : null;
+            Guid? dispCurId = Guid.TryParse(GetStringProp(root, "displayCurrencyId", "DisplayCurrencyId"), out var cG) && cG != Guid.Empty ? cG : null;
+
+            // =========================================================================
+            // ПОДСТАНОВКА DEFAULT СУЩНОСТЕЙ (СКЛАД-ИСТОЧНИК И ВАЛЮТА)
+            // =========================================================================
+            if (!srcWhId.HasValue)
+            {
+                var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled);
+                var defWh = (defOffice != null
+                                ? await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => w.OfficeId == defOffice.Id && !w.IsDisabled)
+                                : null)
+                            ?? await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => !w.IsDisabled);
+
+                srcWhId = defWh?.Id;
+            }
+
+            if (!dispCurId.HasValue)
+            {
+                var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled)
+                             ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => !c.IsDisabled);
+                dispCurId = defCur?.Id;
+            }
+            // =========================================================================
 
             DateTimeOffset date = DateTimeOffset.UtcNow;
             string? dateStr = GetStringProp(root, "date", "Date");

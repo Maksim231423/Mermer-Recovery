@@ -181,21 +181,44 @@ public static class SpendingEndpoints
 
             string code = GetStringProp(root, "code", "Code") ?? $"EXP-{DateTime.UtcNow:yyMMddHHmmss}";
 
-            Guid? depId = Guid.TryParse(GetStringProp(root, "depositoryId", "DepositoryId"), out var dG) ? dG : null;
-            Guid? offId = Guid.TryParse(GetStringProp(root, "officeId", "OfficeId"), out var oG) ? oG : null;
+            // =========================================================================
+            // ПОДСТАНОВКА ЗНАЧЕНИЙ ПО УМОЛЧАНИЮ (OFFICE, DEPOSITORY, CURRENCY)
+            // =========================================================================
+            // 1. Дефолтный офис предприятия
+            var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled);
+            Guid? defaultOfficeId = defOffice?.Id;
 
-            if (!offId.HasValue && depId.HasValue)
+            Guid? offId = Guid.TryParse(GetStringProp(root, "officeId", "OfficeId"), out var oG) && oG != Guid.Empty
+                ? oG
+                : defaultOfficeId;
+
+            // 2. Дефолтная касса (приоритет кассе выбранного/дефолтного офиса)
+            Guid? depId = Guid.TryParse(GetStringProp(root, "depositoryId", "DepositoryId"), out var dG) && dG != Guid.Empty
+                ? dG
+                : null;
+
+            if (!depId.HasValue)
             {
-                var dep = await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => d.Id == depId.Value);
-                offId = dep?.OfficeId;
+                var defDep = (offId.HasValue
+                                 ? await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => d.OfficeId == offId.Value && !d.IsDisabled)
+                                 : null)
+                             ?? await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => !d.IsDisabled);
+
+                depId = defDep?.Id;
             }
 
-            Guid? curId = Guid.TryParse(GetStringProp(root, "displayCurrencyId", "DisplayCurrencyId", "currencyId", "CurrencyId"), out var cG) ? cG : null;
+            // 3. Дефолтная валюта акта расхода
+            Guid? curId = Guid.TryParse(GetStringProp(root, "displayCurrencyId", "DisplayCurrencyId", "currencyId", "CurrencyId"), out var cG) && cG != Guid.Empty
+                ? cG
+                : null;
+
             if (!curId.HasValue)
             {
-                var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault);
+                var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled)
+                             ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => !c.IsDisabled);
                 curId = defCur?.Id;
             }
+            // =========================================================================
 
             Guid? userId = Guid.TryParse(GetStringProp(root, "userId", "UserId"), out var uG) ? uG : null;
 

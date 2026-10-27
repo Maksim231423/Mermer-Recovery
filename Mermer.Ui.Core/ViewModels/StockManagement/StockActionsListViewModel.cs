@@ -53,9 +53,12 @@ public class StockActionsListViewModel :
         get => this._currencyId;
         set
         {
-            if (!this.SetProperty<string>(ref this._currencyId, value, nameof(CurrencyId)) || this.IsBusy)
-                return;
-            this.ApplyCustomCurrencyRate(); // Пересчет при смене валюты
+            if (this._currencyId == value) return;
+            this._currencyId = value;
+            this.RaisePropertyChanged(() => this.CurrencyId);
+
+            // Мгновенный пересчет при смене валюты в комбобоксе
+            this.ApplyCustomCurrencyRate();
         }
     }
 
@@ -174,9 +177,9 @@ public class StockActionsListViewModel :
 
         if (!_loaded)
         {
-            if (_parameter != null)
+            if (_parameter != null && _parameter.WarehouseIds != null && _parameter.WarehouseIds.Any())
             {
-                SelectedWarehouseIds = _parameter.WarehouseIds?.Cast<object>().ToList() ?? new List<object>();
+                _selectedWarehouseIds = _parameter.WarehouseIds.Cast<object>().ToList();
                 StockId = _parameter.StockId;
                 DateFilterFrom = _parameter.DateFrom;
                 DateFilterTill = _parameter.DateTill;
@@ -190,10 +193,36 @@ public class StockActionsListViewModel :
             }
             else
             {
-                // По умолчанию открываем со сброшенным фильтром (по всем складам)
-                SelectedWarehouseIds = new List<object>();
+                // Читаем настройки приложения
+                AppSettings config = await _configurator.GetConfigAsync<AppSettings>();
+
+                // 1. Проверяем склад по умолчанию из настроек
+                string targetWhId = config?.DefaultWarehouseId;
+
+                // 2. Если в настройках склад не задан — ищем склад, привязанный к дефолтному офису (например, AUTOPARTS)
+                if (string.IsNullOrEmpty(targetWhId) && !string.IsNullOrEmpty(config?.DefaultOfficeId))
+                {
+                    targetWhId = this.Warehouses?.List?
+                        .FirstOrDefault(w => !w.IsDisabled && string.Equals(w.OfficeId, config.DefaultOfficeId, StringComparison.OrdinalIgnoreCase))?.Id;
+                }
+
+                // 3. Fallback: первый активный склад
+                if (string.IsNullOrEmpty(targetWhId))
+                {
+                    targetWhId = this.Warehouses?.List?.FirstOrDefault(w => !w.IsDisabled)?.Id;
+                }
+
+                if (!string.IsNullOrEmpty(targetWhId))
+                {
+                    _selectedWarehouseIds = new List<object> { targetWhId };
+                }
+                else
+                {
+                    _selectedWarehouseIds = new List<object>();
+                }
             }
 
+            RaisePropertyChanged(() => SelectedWarehouseIds);
             _loaded = true;
         }
 
@@ -206,25 +235,38 @@ public class StockActionsListViewModel :
         }
     }
 
-    private void ApplyCustomCurrencyRate() => this.List = this.ApplyCustomCurrencyRate(this.List);
+    private void ApplyCustomCurrencyRate()
+    {
+        if (this.List == null) return;
+        this.List = this.ApplyCustomCurrencyRate(this.List).ToList();
+        this.RaisePropertyChanged(() => this.List);
+    }
 
     private IEnumerable<StockActionWithData> ApplyCustomCurrencyRate(IEnumerable<StockActionWithData> list)
     {
         if (list == null) return list;
 
-        Decimal rate = 0M;
-        Currency currency = this.Currencies?.List?.SingleOrDefault(x => x.Id == this._currencyId);
-        CurrencyRate rate1 = currency != null ? currency.GetRate() : null;
+        // 1. Находим выбранную валюту в справочнике
+        Currency currency = this.Currencies?.List?.FirstOrDefault(x => x.Id == this._currencyId);
 
-        if (rate1 != null)
-            rate = rate1.Divider / rate1.Multiplier;
-
-        return list.Select(item =>
+        decimal rate = 1m;
+        if (currency != null && !currency.IsDefault)
         {
-           
-            item.GrandTotalInCustomCurrency = item.GrandTotal * rate;
-            return item;
-        });
+            CurrencyRate rateInfo = currency.GetRate();
+            if (rateInfo != null && rateInfo.Multiplier != 0m)
+            {
+                // Точная формула из POS: Divider / Multiplier (3 / 2 = 1.5)
+                rate = rateInfo.Divider / rateInfo.Multiplier;
+            }
+        }
+
+        var materialized = list.ToList();
+        foreach (var item in materialized)
+        {
+            // Используем AwayFromZero, чтобы .785 округлялось до .79 в точности как в POS
+            item.GrandTotalInCustomCurrency = Math.Round(item.GrandTotal * rate, 2, MidpointRounding.AwayFromZero);
+        }
+        return materialized;
     }
 
     protected override Task OnLoad()
