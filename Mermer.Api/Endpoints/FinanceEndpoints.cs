@@ -294,7 +294,12 @@ public static class FinanceEndpoints
             string? dateStr = GetStringProperty(root, "date", "Date");
             if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var parsedDate))
             {
-                date = parsedDate.ToUniversalTime();
+                date = parsedDate.Kind switch
+                {
+                    DateTimeKind.Utc => parsedDate,
+                    DateTimeKind.Local => parsedDate.ToUniversalTime(),
+                    _ => DateTime.SpecifyKind(parsedDate, DateTimeKind.Local).ToUniversalTime()
+                };
             }
 
             string rawType = GetStringProperty(root, "fundsSlipType", "FundsSlipType", "billType", "BillType", "slipType", "SlipType", "type", "Type") ?? "FundsOpening";
@@ -857,7 +862,14 @@ public static class FinanceEndpoints
             DateTime date = DateTime.UtcNow;
             string? dateStr = GetStringProperty(root, "date", "Date");
             if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var pDate))
-                date = pDate.ToUniversalTime();
+            {
+                date = pDate.Kind switch
+                {
+                    DateTimeKind.Utc => pDate,
+                    DateTimeKind.Local => pDate.ToUniversalTime(),
+                    _ => DateTime.SpecifyKind(pDate, DateTimeKind.Local).ToUniversalTime()
+                };
+            }
 
             var tagsList = ExtractTagsFromRawJson(root);
 
@@ -1143,7 +1155,14 @@ public static class FinanceEndpoints
             DateTime date = DateTime.UtcNow;
             string? dateStr = GetStringProperty(root, "date", "Date");
             if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var pDate))
-                date = pDate.ToUniversalTime();
+            {
+                date = pDate.Kind switch
+                {
+                    DateTimeKind.Utc => pDate,
+                    DateTimeKind.Local => pDate.ToUniversalTime(),
+                    _ => DateTime.SpecifyKind(pDate, DateTimeKind.Local).ToUniversalTime()
+                };
+            }
 
             var tagsList = ExtractTagsFromRawJson(root);
             string groupName = GetStringProperty(root, "group", "Group", "groupName", "GroupName") ?? "";

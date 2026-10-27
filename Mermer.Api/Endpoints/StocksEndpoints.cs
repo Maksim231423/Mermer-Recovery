@@ -542,10 +542,46 @@ public static class StocksEndpoints
 
             var connStr = db.Database.GetConnectionString();
             await using var conn = new Npgsql.NpgsqlConnection(connStr);
-            var results = await Dapper.SqlMapper.QueryAsync(conn, new Dapper.CommandDefinition(
+            var rawResults = await Dapper.SqlMapper.QueryAsync(conn, new Dapper.CommandDefinition(
                 sql,
                 new { start = startDate, end = endDate, stockGuid = filterStockGuid, comp = completed, whs = whIds, defCurId = defaultCurrencyId, take, skip },
                 cancellationToken: ct));
+
+            // ИСПРАВЛЕНО: Явное приведение даты к локальному времени вместо сырого UTC
+            var results = rawResults.Select(r => new
+            {
+                TransactionId = (Guid)r.TransactionId,
+                TransactionCode = (string)r.TransactionCode,
+                TransactionDate = ((DateTime)r.TransactionDate).ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                TransactionType = (string)r.TransactionType,
+                TransactionUserId = (string)r.TransactionUserId,
+                TransactionUserName = (string)r.TransactionUserName,
+                Author = (string)r.Author,
+                UserName = (string)r.UserName,
+                TransactionIsCompleted = (bool)r.TransactionIsCompleted,
+                TransactionIsDisabled = (bool)r.TransactionIsDisabled,
+                TransactionIsCash = (bool)r.TransactionIsCash,
+                TransactionTags = (string[])r.TransactionTags,
+                TransactionGroup = (string)r.TransactionGroup,
+                ActionId = (string)r.ActionId,
+                ActionWarehouseId = (string)r.ActionWarehouseId,
+                ActionRelatedObjectName = (string)r.ActionRelatedObjectName,
+                ActionStockId = (string)r.ActionStockId,
+                StockId = (string)r.StockId,
+                StockCode = (string)r.StockCode,
+                StockName = (string)r.StockName,
+                StockType = (string)r.StockType,
+                StockGroup = (string)r.StockGroup,
+                StockTags = (string[])r.StockTags,
+                RecommendedPrice = (decimal)r.RecommendedPrice,
+                ActionPrice = (decimal)r.ActionPrice,
+                ActionIncome = (decimal)r.ActionIncome,
+                ActionExpense = (decimal)r.ActionExpense,
+                ActionEffect = (decimal)r.ActionEffect,
+                GrandTotal = (decimal)r.GrandTotal,
+                RecommendedTotal = (decimal)r.RecommendedTotal,
+                GrandTotalInCustomCurrency = (decimal)r.GrandTotalInCustomCurrency
+            }).ToList();
 
             return Results.Json(results, jsonOptions);
         })

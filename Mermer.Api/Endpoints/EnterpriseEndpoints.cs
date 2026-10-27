@@ -163,12 +163,13 @@ public static class EnterpriseEndpoints
                     if (multiplier == 0m) multiplier = 1m;
                     if (divider == 0m) divider = 1m;
 
+                    // ИСПРАВЛЕНИЕ: берем чистую дату до перевода в UTC
                     DateTime validFrom = DateTime.UtcNow.Date;
                     string? validFromStr = GetStringProperty(rateJson, "validFrom", "ValidFrom", "rateValidFrom", "RateValidFrom");
                     if (!string.IsNullOrEmpty(validFromStr) && DateTime.TryParse(validFromStr, out var parsedDate))
                     {
-                        var utcDate = parsedDate.ToUniversalTime();
-                        validFrom = DateTime.SpecifyKind(utcDate.Date, DateTimeKind.Utc);
+                        // Извлекаем чистую календарную дату года/месяца/дня, не вычитая часовой пояс
+                        validFrom = DateTime.SpecifyKind(parsedDate.Date, DateTimeKind.Utc);
                     }
                     else
                     {

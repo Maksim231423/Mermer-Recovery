@@ -45,13 +45,13 @@ public static class StockOrdersEndpoints
 
             if (from.HasValue && from.Value.Year > 2000)
             {
-                var startDate = new DateTimeOffset(from.Value.ToUniversalTime());
+                var startDate = ParseSafeUtcOffset(from.Value);
                 query = query.Where(o => o.Date >= startDate);
             }
 
             if (till.HasValue && till.Value.Year < 2099)
             {
-                var endDate = new DateTimeOffset(till.Value.ToUniversalTime());
+                var endDate = ParseSafeUtcOffset(till.Value, isTill: true);
                 query = query.Where(o => o.Date <= endDate);
             }
 
@@ -301,10 +301,15 @@ public static class StockOrdersEndpoints
             bool isCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
             bool isDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
 
+            // БЕЗОПАСНЫЙ ПАРСИНГ ДАТЫ БЕЗ ДВОЙНОГО СДВИГА:
             DateTimeOffset date = DateTimeOffset.UtcNow;
             string? dateStr = GetStringProp(root, "date", "Date");
             if (!string.IsNullOrEmpty(dateStr) && DateTimeOffset.TryParse(dateStr, out var pDate))
-                date = pDate.ToUniversalTime();
+            {
+                date = pDate.Offset == TimeSpan.Zero && !dateStr.EndsWith("Z", StringComparison.OrdinalIgnoreCase)
+                    ? new DateTimeOffset(DateTime.SpecifyKind(pDate.DateTime, DateTimeKind.Local).ToUniversalTime())
+                    : pDate.ToUniversalTime();
+            }
 
             var tagsList = ExtractTagsFromRawJson(root);
 
@@ -419,6 +424,19 @@ public static class StockOrdersEndpoints
     }
 
     #region Helpers
+    private static DateTimeOffset ParseSafeUtcOffset(DateTime dt, bool isTill = false)
+    {
+        if (dt == DateTime.MinValue) return new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+        if (dt >= DateTime.MaxValue.AddDays(-2)) return new DateTimeOffset(new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
+        if (isTill && dt.TimeOfDay == TimeSpan.Zero && dt.Kind != DateTimeKind.Utc)
+        {
+            utc = utc.Date.AddDays(1).AddTicks(-1);
+        }
+        return new DateTimeOffset(utc);
+    }
+
     private static List<string> ExtractTagsFromRawJson(JsonElement root)
     {
         var list = new List<string>();
@@ -512,4 +530,5 @@ public static class StockOrdersEndpoints
         return false;
     }
     #endregion
+
 }

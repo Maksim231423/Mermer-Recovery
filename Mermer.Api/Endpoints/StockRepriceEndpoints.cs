@@ -254,7 +254,7 @@ public static class StockRepriceEndpoints
                     StockCode = stock?.Code ?? "",
                     StockName = stock?.Name ?? "",
                     PriceChange = diff,
-                    ChangeDate = nextP.ValidFrom,
+                    ChangeDate = nextP.ValidFrom.ToLocalTime(), // ИСПРАВЛЕНО
                     ChangeReason = 0,
                     WarehouseId = w.ToString(),
                     Balance = bal
@@ -277,7 +277,7 @@ public static class StockRepriceEndpoints
                     StockCode = stock?.Code ?? "",
                     StockName = stock?.Name ?? "",
                     PriceChange = rcEvt.PriceChange,
-                    ChangeDate = rcEvt.Date, // ВАЖНО: DateTime
+                    ChangeDate = rcEvt.Date.ToLocalTime(), // ИСПРАВЛЕНО
                     ChangeReason = 1,
                     WarehouseId = w.ToString(),
                     Balance = bal

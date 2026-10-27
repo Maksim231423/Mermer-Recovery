@@ -26,8 +26,8 @@ public static class SpendingEndpoints
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 500;
             int skip = offset.GetValueOrDefault(0);
 
-            var startDate = from.HasValue ? from.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            var endDate = till.HasValue ? till.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+            var startDate = from.HasValue ? ParseSafeUtc(from.Value) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+            var endDate = till.HasValue ? ParseSafeTillUtc(till.Value) : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
 
             var defaultCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
                              ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
@@ -59,7 +59,7 @@ public static class SpendingEndpoints
                 {
                     Id = s.Id.ToString(),
                     Code = s.Code ?? "",
-                    Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО
+                    Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // Локальное время
                     Type = "ExpenseSlip",
                     FundsSlipType = "ExpenseSlip",
                     DepositoryId = s.DepositoryId?.ToString(),
@@ -100,8 +100,8 @@ public static class SpendingEndpoints
         // 2. ПОДСЧЕТ ДЛЯ ПЛИТОК ДАТ
         group.MapGet("/count", async (DateTime? from, DateTime? till, string? depositoryId, MermerDbContext db, CancellationToken ct) =>
         {
-            var startDate = from.HasValue ? from.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            var endDate = till.HasValue ? till.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+            var startDate = from.HasValue ? ParseSafeUtc(from.Value) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+            var endDate = till.HasValue ? ParseSafeTillUtc(till.Value) : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
 
             var query = db.ExpenseSlips
                 .AsNoTracking()
@@ -129,7 +129,7 @@ public static class SpendingEndpoints
             {
                 Id = s.Id.ToString(),
                 Code = s.Code ?? "",
-                Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО
+                Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // Локальное время
                 Type = "ExpenseSlip",
                 FundsSlipType = "ExpenseSlip",
                 DepositoryId = s.DepositoryId?.ToString(),
@@ -181,10 +181,6 @@ public static class SpendingEndpoints
 
             string code = GetStringProp(root, "code", "Code") ?? $"EXP-{DateTime.UtcNow:yyMMddHHmmss}";
 
-            // =========================================================================
-            // ПОДСТАНОВКА ЗНАЧЕНИЙ ПО УМОЛЧАНИЮ (OFFICE, DEPOSITORY, CURRENCY)
-            // =========================================================================
-            // 1. Дефолтный офис предприятия
             var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled);
             Guid? defaultOfficeId = defOffice?.Id;
 
@@ -192,7 +188,6 @@ public static class SpendingEndpoints
                 ? oG
                 : defaultOfficeId;
 
-            // 2. Дефолтная касса (приоритет кассе выбранного/дефолтного офиса)
             Guid? depId = Guid.TryParse(GetStringProp(root, "depositoryId", "DepositoryId"), out var dG) && dG != Guid.Empty
                 ? dG
                 : null;
@@ -207,7 +202,6 @@ public static class SpendingEndpoints
                 depId = defDep?.Id;
             }
 
-            // 3. Дефолтная валюта акта расхода
             Guid? curId = Guid.TryParse(GetStringProp(root, "displayCurrencyId", "DisplayCurrencyId", "currencyId", "CurrencyId"), out var cG) && cG != Guid.Empty
                 ? cG
                 : null;
@@ -218,20 +212,11 @@ public static class SpendingEndpoints
                              ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => !c.IsDisabled);
                 curId = defCur?.Id;
             }
-            // =========================================================================
 
             Guid? userId = Guid.TryParse(GetStringProp(root, "userId", "UserId"), out var uG) ? uG : null;
 
-            DateTime date = DateTime.UtcNow;
-            string? dateStr = GetStringProp(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var d))
-            {
-                date = DateTime.SpecifyKind(d.ToUniversalTime(), DateTimeKind.Utc);
-            }
-            else
-            {
-                date = DateTime.SpecifyKind(date, DateTimeKind.Utc);
-            }
+            // БЕЗОПАСНЫЙ ПАРСИНГ ДАТЫ БЕЗ ДВОЙНОГО СДВИГА:
+            DateTime date = ParseClientDate(GetStringProp(root, "date", "Date"));
 
             var tagsList = ExtractTagsFromRawJson(root);
             string groupName = GetStringProp(root, "group", "Group", "groupName", "GroupName") ?? "";
@@ -348,8 +333,8 @@ public static class SpendingEndpoints
         // 7. ЖУРНАЛ СТАТЕЙ РАСХОДОВ
         routes.MapGet("/api/spending/actions/count", async (DateTime? from, DateTime? till, string? expenseId, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            var startDate = from.HasValue ? from.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            var endDate = till.HasValue ? till.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+            var startDate = from.HasValue ? ParseSafeUtc(from.Value) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+            var endDate = till.HasValue ? ParseSafeTillUtc(till.Value) : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
 
             var rawDeps = req.Query["depositoryId"].ToArray();
             var depGuids = rawDeps
@@ -385,8 +370,8 @@ public static class SpendingEndpoints
         routes.MapGet("/api/spending/actions", async (DateTime? from, DateTime? till, string? expenseId, int? limit, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 10000) : 5000;
-            var startDate = from.HasValue ? from.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            var endDate = till.HasValue ? till.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+            var startDate = from.HasValue ? ParseSafeUtc(from.Value) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+            var endDate = till.HasValue ? ParseSafeTillUtc(till.Value) : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
 
             var rawDeps = req.Query["depositoryId"].ToArray();
             var depGuids = rawDeps
@@ -420,7 +405,7 @@ public static class SpendingEndpoints
                     {
                         TransactionId = s.Id.ToString(),
                         TransactionCode = s.Code ?? "",
-                        TransactionDate = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО
+                        TransactionDate = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // Локальное время
                         TransactionType = "ExpenseSlip",
                         TransactionUserId = s.UserId?.ToString(),
                         TransactionUserName = s.UserName,
@@ -440,6 +425,37 @@ public static class SpendingEndpoints
     }
 
     #region Helpers
+    private static DateTime ParseClientDate(string? dateStr)
+    {
+        if (string.IsNullOrEmpty(dateStr) || !DateTime.TryParse(dateStr, out var dt))
+            return DateTime.UtcNow;
+
+        return dt.Kind switch
+        {
+            DateTimeKind.Utc => dt,
+            DateTimeKind.Local => dt.ToUniversalTime(),
+            _ => DateTime.SpecifyKind(dt, DateTimeKind.Local).ToUniversalTime()
+        };
+    }
+
+    private static DateTime ParseSafeUtc(DateTime dt)
+    {
+        if (dt == DateTime.MinValue) return DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+        return dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
+    }
+
+    private static DateTime ParseSafeTillUtc(DateTime dt)
+    {
+        if (dt >= DateTime.MaxValue.AddDays(-2)) return DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
+
+        var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
+        if (dt.TimeOfDay == TimeSpan.Zero && dt.Kind != DateTimeKind.Utc)
+        {
+            return utc.Date.AddDays(1).AddTicks(-1);
+        }
+        return utc;
+    }
+
     private static List<string> ExtractTagsFromRawJson(JsonElement root)
     {
         var list = new List<string>();

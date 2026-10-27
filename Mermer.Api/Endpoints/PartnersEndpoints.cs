@@ -154,24 +154,11 @@ public static class PartnersEndpoints
             return Results.Ok(new { code = nextCode });
         });
 
-        // 4. РАСЧЕТ БАЛАНСОВ ПАРТНЕРОВ (ОБОРОТНО-САЛЬДОВАЯ ВЕДОМОСТЬ С НОРМАЛИЗАЦИЕЙ ВАЛЮТЫ)
+        // 4. РАСЧЕТ БАЛАНСОВ ПАРТНЕРОВ
         group.MapGet("/balances/by-type", async (string? partnerId, DateTime? from, DateTime? till, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTime fUtc = DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            if (from.HasValue && from.Value.Year > 2000)
-            {
-                fUtc = from.Value.Kind == DateTimeKind.Utc ? from.Value : from.Value.ToUniversalTime();
-            }
-
-            DateTime tUtc = DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
-            if (till.HasValue && till.Value.Year < 2099)
-            {
-                var localTill = till.Value;
-                if (localTill.TimeOfDay == TimeSpan.Zero)
-                    localTill = localTill.Date.AddDays(1).AddTicks(-1);
-
-                tUtc = localTill.Kind == DateTimeKind.Utc ? localTill : localTill.ToUniversalTime();
-            }
+            DateTime fUtc = from.HasValue ? ParseSafeUtc(from.Value) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+            DateTime tUtc = till.HasValue ? ParseSafeTillUtc(till.Value) : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
 
             Guid? singlePartnerGuid = Guid.TryParse(partnerId, out var pG) ? pG : null;
 
@@ -183,12 +170,10 @@ public static class PartnersEndpoints
                 .Distinct()
                 .ToArray();
 
-            // 1. Дефолтная валюта
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
                          ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
             Guid defaultCurrencyId = defCur?.Id ?? Guid.Empty;
 
-            // 2. Дефолтный офис предприятия
             var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled, ct);
             Guid defaultOfficeGuid = defOffice?.Id ?? Guid.Empty;
 
@@ -197,7 +182,6 @@ public static class PartnersEndpoints
                     SELECT @defCurId::uuid AS id
                 ),
                 raw_moves AS (
-                    -- 1. Накладные (Invoices) с конвертацией в базовую валюту USD
                     SELECT 
                         i.partner_id,
                         COALESCE(i.office_id, @defOffice) AS office_id,
@@ -250,7 +234,6 @@ public static class PartnersEndpoints
 
                     UNION ALL
 
-                    -- 2. Акты сверки и начальные остатки (Partner Slips)
                     SELECT 
                         psl.partner_id,
                         COALESCE(ps.office_id, @defOffice) AS office_id,
@@ -268,7 +251,6 @@ public static class PartnersEndpoints
 
                     UNION ALL
 
-                    -- 3. Взаимозачеты и переводы долга (Partner Transfers)
                     SELECT 
                         ptl.partner_id,
                         COALESCE(ptl.office_id, @defOffice) AS office_id,
@@ -285,7 +267,6 @@ public static class PartnersEndpoints
 
                     UNION ALL
 
-                    -- 4. Оплаты и приходы денег (Funds Slips) с нормализацией валюты
                     SELECT 
                         fs.partner_id,
                         COALESCE(fs.office_id, @defOffice) AS office_id,
@@ -505,13 +486,13 @@ public static class PartnersEndpoints
 
             if (from.HasValue && from.Value.Year > 2000)
             {
-                var fUtc = from.Value.ToUniversalTime();
+                var fUtc = ParseSafeUtc(from.Value);
                 query = query.Where(s => s.Date >= fUtc);
             }
 
             if (till.HasValue && till.Value.Year < 2099)
             {
-                var tUtc = till.Value.ToUniversalTime();
+                var tUtc = ParseSafeTillUtc(till.Value);
                 query = query.Where(s => s.Date <= tUtc);
             }
 
@@ -606,8 +587,9 @@ public static class PartnersEndpoints
                 officeGuid = defOffice?.Id;
             }
 
+            // Безопасный парсинг даты документа
             string dateStr = GetJsonString(root, "date", "Date");
-            DateTime slipDate = DateTime.TryParse(dateStr, out var pDate) ? pDate.ToUniversalTime() : DateTime.UtcNow;
+            DateTime slipDate = ParseClientDate(dateStr);
 
             string groupName = GetJsonString(root, "group", "Group") ?? string.Empty;
             string description = GetJsonString(root, "description", "Description") ?? string.Empty;
@@ -739,13 +721,13 @@ public static class PartnersEndpoints
 
             if (from.HasValue && from.Value.Year > 2000)
             {
-                var fUtc = from.Value.Kind == DateTimeKind.Utc ? from.Value : from.Value.ToUniversalTime();
+                var fUtc = ParseSafeUtc(from.Value);
                 query = query.Where(t => t.Date >= fUtc);
             }
 
             if (till.HasValue && till.Value.Year < 2099)
             {
-                var tUtc = till.Value.Kind == DateTimeKind.Utc ? till.Value : till.Value.ToUniversalTime();
+                var tUtc = ParseSafeTillUtc(till.Value);
                 query = query.Where(t => t.Date <= tUtc);
             }
 
@@ -855,7 +837,7 @@ public static class PartnersEndpoints
 
             string code = GetJsonString(root, "code", "Code") ?? $"DOC-{DateTime.UtcNow:yyMMddHHmmss}";
             string dateStr = GetJsonString(root, "date", "Date");
-            DateTime transferDate = DateTime.TryParse(dateStr, out var pDate) ? pDate.ToUniversalTime() : DateTime.UtcNow;
+            DateTime transferDate = ParseClientDate(dateStr);
 
             string rawGroup = GetJsonString(root, "group", "Group");
             string groupName = string.IsNullOrWhiteSpace(rawGroup) ? string.Empty : rawGroup.Trim();
@@ -864,11 +846,9 @@ public static class PartnersEndpoints
             string userName = GetJsonString(root, "userName", "UserName") ?? "admin";
             var tagsList = ExtractTagsFromRawJson(root);
 
-            // Ищем дефолтный офис предприятия для строк, в которых офис не указан
             var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled);
             Guid? defaultOfficeId = defOffice?.Id;
 
-            // Ищем дефолтную валюту предприятия
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled)
                          ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => !c.IsDisabled);
             Guid? defaultCurrencyId = defCur?.Id;
@@ -968,8 +948,8 @@ public static class PartnersEndpoints
         // 12. ПОДСЧЕТ КОЛИЧЕСТВА ДВИЖЕНИЙ ДЛЯ ПЛИТОК ДАТ
         group.MapGet("/actions/count", async (string? partnerId, DateTime? from, DateTime? till, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTime fUtc = from?.ToUniversalTime() ?? DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            DateTime tUtc = till?.ToUniversalTime() ?? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+            DateTime fUtc = from.HasValue ? ParseSafeUtc(from.Value) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+            DateTime tUtc = till.HasValue ? ParseSafeTillUtc(till.Value) : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
 
             Guid? pGuid = Guid.TryParse(partnerId, out var g) ? g : null;
 
@@ -1043,8 +1023,8 @@ public static class PartnersEndpoints
         group.MapGet("/actions", async (string? partnerId, DateTime? from, DateTime? till, int? limit, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 50000) : 10000;
-            DateTime fUtc = from?.ToUniversalTime() ?? DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            DateTime tUtc = till?.ToUniversalTime() ?? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+            DateTime fUtc = from.HasValue ? ParseSafeUtc(from.Value) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+            DateTime tUtc = till.HasValue ? ParseSafeTillUtc(till.Value) : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
 
             Guid? pGuid = Guid.TryParse(partnerId, out var g) ? g : null;
 
@@ -1080,9 +1060,8 @@ public static class PartnersEndpoints
                     LIMIT @take
                 ),
                 raw_actions AS (
-                    -- 1. Накладные (Invoices: Sales / Purchase)
                     SELECT 
-                        fi.id::text                              AS "TransactionId",
+                        fi.id::text                               AS "TransactionId",
                         fi.code                                   AS "TransactionCode",
                         fi.invoice_type                           AS "TransactionType",
                         fi.date                                   AS "TransactionDate",
@@ -1108,7 +1087,7 @@ public static class PartnersEndpoints
                                  WHERE il.invoice_id = fi.id
                              ), 0) 
                              ELSE 0 END AS "ActionCredit",
-                        fi.user_name                             AS "TransactionUserName",
+                        fi.user_name                              AS "TransactionUserName",
                         fi.is_completed                           AS "TransactionIsCompleted",
                         fi.is_disabled                            AS "TransactionIsDisabled"
                     FROM filtered_invoices fi
@@ -1121,9 +1100,8 @@ public static class PartnersEndpoints
 
                     UNION ALL
 
-                    -- 2. Кассовые ордера (Funds Slips: Collection / Payment)
                     SELECT 
-                        fs.id::text                              AS "TransactionId",
+                        fs.id::text                               AS "TransactionId",
                         fs.code                                   AS "TransactionCode",
                         COALESCE(fs.funds_slip_type, 'Collection') AS "TransactionType",
                         fs.date                                   AS "TransactionDate",
@@ -1167,19 +1145,18 @@ public static class PartnersEndpoints
 
                     UNION ALL
 
-                    -- 3. Акты сверки и начальные остатки (Partner Slips)
                     SELECT 
-                        ps.id::text                             AS "TransactionId",
-                        ps.code                                 AS "TransactionCode",
-                        ps.slip_type                            AS "TransactionType",
-                        ps.date                                 AS "TransactionDate",
-                        COALESCE(ps.office_id, @defOffice)::text AS "ActionOfficeId",
-                        psl.partner_id::text                    AS "ActionPartnerId",
-                        psl.debit_amount                        AS "ActionDebit",
-                        psl.credit_amount                       AS "ActionCredit",
-                        ps.user_name                            AS "TransactionUserName",
-                        true                                    AS "TransactionIsCompleted",
-                        ps.is_disabled                          AS "TransactionIsDisabled"
+                        ps.id::text                               AS "TransactionId",
+                        ps.code                                   AS "TransactionCode",
+                        ps.slip_type                              AS "TransactionType",
+                        ps.date                                   AS "TransactionDate",
+                        COALESCE(ps.office_id, @defOffice)::text  AS "ActionOfficeId",
+                        psl.partner_id::text                      AS "ActionPartnerId",
+                        psl.debit_amount                          AS "ActionDebit",
+                        psl.credit_amount                         AS "ActionCredit",
+                        ps.user_name                              AS "TransactionUserName",
+                        true                                      AS "TransactionIsCompleted",
+                        ps.is_disabled                            AS "TransactionIsDisabled"
                     FROM partner_slip_lines psl
                     JOIN partner_slips ps ON ps.id = psl.partner_slip_id
                     WHERE psl.partner_id IS NOT NULL
@@ -1190,19 +1167,18 @@ public static class PartnersEndpoints
 
                     UNION ALL
 
-                    -- 4. Переводы долга между партнерами (Partner Transfers)
                     SELECT 
-                        pt.id::text                             AS "TransactionId",
-                        pt.code                                 AS "TransactionCode",
-                        'PartnerTransfer'                       AS "TransactionType",
-                        pt.date                                 AS "TransactionDate",
+                        pt.id::text                               AS "TransactionId",
+                        pt.code                                   AS "TransactionCode",
+                        'PartnerTransfer'                         AS "TransactionType",
+                        pt.date                                   AS "TransactionDate",
                         COALESCE(ptl.office_id, @defOffice)::text AS "ActionOfficeId",
-                        ptl.partner_id::text                    AS "ActionPartnerId",
-                        ptl.debit_amount                        AS "ActionDebit",
-                        ptl.credit_amount                       AS "ActionCredit",
-                        pt.user_name                            AS "TransactionUserName",
-                        true                                    AS "TransactionIsCompleted",
-                        pt.is_disabled                          AS "TransactionIsDisabled"
+                        ptl.partner_id::text                      AS "ActionPartnerId",
+                        ptl.debit_amount                          AS "ActionDebit",
+                        ptl.credit_amount                         AS "ActionCredit",
+                        pt.user_name                              AS "TransactionUserName",
+                        true                                      AS "TransactionIsCompleted",
+                        pt.is_disabled                            AS "TransactionIsDisabled"
                     FROM partner_transfer_lines ptl
                     JOIN partner_transfers pt ON pt.id = ptl.partner_transfer_id
                     WHERE ptl.partner_id IS NOT NULL
@@ -1270,7 +1246,7 @@ public static class PartnersEndpoints
             if (!pGuid.HasValue)
                 return Results.Ok(new { Balance = 0m });
 
-            DateTime dUtc = date?.ToUniversalTime() ?? DateTime.UtcNow;
+            DateTime dUtc = date.HasValue ? ParseSafeUtc(date.Value) : DateTime.UtcNow;
 
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
                          ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
@@ -1280,109 +1256,105 @@ public static class PartnersEndpoints
             Guid defaultOfficeGuid = defOffice?.Id ?? Guid.Empty;
 
             const string sql = """
-        WITH def_cur AS (
-            SELECT @defCurId::uuid AS id
-        ),
-        moves AS (
-            -- 1. Накладные (Invoices)
-            SELECT 
-                i.date,
-                CASE 
-                    WHEN i.invoice_type IN ('Sales', 'PurchaseReturn') THEN
-                        COALESCE((SELECT SUM(il.quantity * (il.price * CASE 
-                            WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
-                            ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
-                        END)) FROM invoice_lines il WHERE il.invoice_id = i.id), 0)
-                    ELSE 0
-                END AS debit,
-                CASE 
-                    WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN
-                        COALESCE((SELECT SUM(il.quantity * (il.price * CASE 
-                            WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
-                            ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
-                        END)) FROM invoice_lines il WHERE il.invoice_id = i.id), 0)
-                    ELSE 0
-                END AS credit
-            FROM invoices i
-            LEFT JOIN LATERAL (
-                SELECT r.multiplier, r.divider 
-                FROM currency_rates r 
-                WHERE r.currency_id = i.display_currency_id AND r.valid_from <= i.date 
-                ORDER BY r.valid_from DESC LIMIT 1
-            ) cr ON true
-            WHERE i.partner_id = @partner
-              AND i.is_disabled = false
-              AND COALESCE(i.office_id, @defOffice) = COALESCE(@office, @defOffice)
-              AND i.date < @docDate
-              AND (@excludeId::uuid IS NULL OR i.id <> @excludeId)
+                WITH def_cur AS (
+                    SELECT @defCurId::uuid AS id
+                ),
+                moves AS (
+                    SELECT 
+                        i.date,
+                        CASE 
+                            WHEN i.invoice_type IN ('Sales', 'PurchaseReturn') THEN
+                                COALESCE((SELECT SUM(il.quantity * (il.price * CASE 
+                                    WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
+                                    ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                                END)) FROM invoice_lines il WHERE il.invoice_id = i.id), 0)
+                            ELSE 0
+                        END AS debit,
+                        CASE 
+                            WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN
+                                COALESCE((SELECT SUM(il.quantity * (il.price * CASE 
+                                    WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
+                                    ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                                END)) FROM invoice_lines il WHERE il.invoice_id = i.id), 0)
+                            ELSE 0
+                        END AS credit
+                    FROM invoices i
+                    LEFT JOIN LATERAL (
+                        SELECT r.multiplier, r.divider 
+                        FROM currency_rates r 
+                        WHERE r.currency_id = i.display_currency_id AND r.valid_from <= i.date 
+                        ORDER BY r.valid_from DESC LIMIT 1
+                    ) cr ON true
+                    WHERE i.partner_id = @partner
+                      AND i.is_disabled = false
+                      AND COALESCE(i.office_id, @defOffice) = COALESCE(@office, @defOffice)
+                      AND i.date < @docDate
+                      AND (@excludeId::uuid IS NULL OR i.id <> @excludeId)
 
-            UNION ALL
+                    UNION ALL
 
-            -- 2. Оплаты и касса (Funds Slips)
-            SELECT 
-                fs.date,
-                CASE 
-                    WHEN fs.funds_slip_type IN ('Expense', 'Payment') THEN
-                        COALESCE((SELECT SUM(fsl.amount * CASE 
-                            WHEN fs.display_currency_id IS NULL OR fs.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
-                            ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
-                        END) FROM funds_slip_lines fsl WHERE fsl.funds_slip_id = fs.id), 0)
-                    ELSE 0
-                END AS debit,
-                CASE 
-                    WHEN fs.funds_slip_type IN ('Income', 'Collection', 'FundsOpening', 'FundsRevisionExceed') THEN
-                        COALESCE((SELECT SUM(fsl.amount * CASE 
-                            WHEN fs.display_currency_id IS NULL OR fs.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
-                            ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
-                        END) FROM funds_slip_lines fsl WHERE fsl.funds_slip_id = fs.id), 0)
-                    ELSE 0
-                END AS credit
-            FROM funds_slips fs
-            LEFT JOIN LATERAL (
-                SELECT r.multiplier, r.divider 
-                FROM currency_rates r 
-                WHERE r.currency_id = fs.display_currency_id AND r.valid_from <= fs.date 
-                ORDER BY r.valid_from DESC LIMIT 1
-            ) cr ON true
-            WHERE fs.partner_id = @partner
-              AND fs.is_disabled = false
-              AND COALESCE(fs.office_id, @defOffice) = COALESCE(@office, @defOffice)
-              AND fs.date < @docDate
-              AND (@excludeId::uuid IS NULL OR fs.id <> @excludeId)
+                    SELECT 
+                        fs.date,
+                        CASE 
+                            WHEN fs.funds_slip_type IN ('Expense', 'Payment') THEN
+                                COALESCE((SELECT SUM(fsl.amount * CASE 
+                                    WHEN fs.display_currency_id IS NULL OR fs.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
+                                    ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                                END) FROM funds_slip_lines fsl WHERE fsl.funds_slip_id = fs.id), 0)
+                            ELSE 0
+                        END AS debit,
+                        CASE 
+                            WHEN fs.funds_slip_type IN ('Income', 'Collection', 'FundsOpening', 'FundsRevisionExceed') THEN
+                                COALESCE((SELECT SUM(fsl.amount * CASE 
+                                    WHEN fs.display_currency_id IS NULL OR fs.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
+                                    ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                                END) FROM funds_slip_lines fsl WHERE fsl.funds_slip_id = fs.id), 0)
+                            ELSE 0
+                        END AS credit
+                    FROM funds_slips fs
+                    LEFT JOIN LATERAL (
+                        SELECT r.multiplier, r.divider 
+                        FROM currency_rates r 
+                        WHERE r.currency_id = fs.display_currency_id AND r.valid_from <= fs.date 
+                        ORDER BY r.valid_from DESC LIMIT 1
+                    ) cr ON true
+                    WHERE fs.partner_id = @partner
+                      AND fs.is_disabled = false
+                      AND COALESCE(fs.office_id, @defOffice) = COALESCE(@office, @defOffice)
+                      AND fs.date < @docDate
+                      AND (@excludeId::uuid IS NULL OR fs.id <> @excludeId)
 
-            UNION ALL
+                    UNION ALL
 
-            -- 3. Акты сверки и остатки (Partner Slips)
-            SELECT 
-                ps.date,
-                psl.debit_amount AS debit,
-                psl.credit_amount AS credit
-            FROM partner_slip_lines psl
-            JOIN partner_slips ps ON ps.id = psl.partner_slip_id
-            WHERE psl.partner_id = @partner
-              AND ps.is_disabled = false
-              AND COALESCE(ps.office_id, @defOffice) = COALESCE(@office, @defOffice)
-              AND ps.date < @docDate
-              AND (@excludeId::uuid IS NULL OR ps.id <> @excludeId)
+                    SELECT 
+                        ps.date,
+                        psl.debit_amount AS debit,
+                        psl.credit_amount AS credit
+                    FROM partner_slip_lines psl
+                    JOIN partner_slips ps ON ps.id = psl.partner_slip_id
+                    WHERE psl.partner_id = @partner
+                      AND ps.is_disabled = false
+                      AND COALESCE(ps.office_id, @defOffice) = COALESCE(@office, @defOffice)
+                      AND ps.date < @docDate
+                      AND (@excludeId::uuid IS NULL OR ps.id <> @excludeId)
 
-            UNION ALL
+                    UNION ALL
 
-            -- 4. Переводы долга (Partner Transfers)
-            SELECT 
-                pt.date,
-                ptl.debit_amount AS debit,
-                ptl.credit_amount AS credit
-            FROM partner_transfer_lines ptl
-            JOIN partner_transfers pt ON pt.id = ptl.partner_transfer_id
-            WHERE ptl.partner_id = @partner
-              AND pt.is_disabled = false
-              AND COALESCE(ptl.office_id, @defOffice) = COALESCE(@office, @defOffice)
-              AND pt.date < @docDate
-              AND (@excludeId::uuid IS NULL OR pt.id <> @excludeId)
-        )
-        SELECT COALESCE(SUM(debit - credit), 0)::numeric(18,4) AS "Balance"
-        FROM moves;
-        """;
+                    SELECT 
+                        pt.date,
+                        ptl.debit_amount AS debit,
+                        ptl.credit_amount AS credit
+                    FROM partner_transfer_lines ptl
+                    JOIN partner_transfers pt ON pt.id = ptl.partner_transfer_id
+                    WHERE ptl.partner_id = @partner
+                      AND pt.is_disabled = false
+                      AND COALESCE(ptl.office_id, @defOffice) = COALESCE(@office, @defOffice)
+                      AND pt.date < @docDate
+                      AND (@excludeId::uuid IS NULL OR pt.id <> @excludeId)
+                )
+                SELECT COALESCE(SUM(debit - credit), 0)::numeric(18,4) AS "Balance"
+                FROM moves;
+                """;
 
             var connStr = db.Database.GetConnectionString();
             await using var conn = new NpgsqlConnection(connStr);
@@ -1395,7 +1367,38 @@ public static class PartnersEndpoints
         });
     }
 
-    #region JSON Helpers
+    #region Helpers
+    private static DateTime ParseClientDate(string? dateStr)
+    {
+        if (string.IsNullOrEmpty(dateStr) || !DateTime.TryParse(dateStr, out var dt))
+            return DateTime.UtcNow;
+
+        return dt.Kind switch
+        {
+            DateTimeKind.Utc => dt,
+            DateTimeKind.Local => dt.ToUniversalTime(),
+            _ => DateTime.SpecifyKind(dt, DateTimeKind.Local).ToUniversalTime()
+        };
+    }
+
+    private static DateTime ParseSafeUtc(DateTime dt)
+    {
+        if (dt == DateTime.MinValue) return DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+        return dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
+    }
+
+    private static DateTime ParseSafeTillUtc(DateTime dt)
+    {
+        if (dt >= DateTime.MaxValue.AddDays(-2)) return DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
+
+        var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
+        if (dt.TimeOfDay == TimeSpan.Zero && dt.Kind != DateTimeKind.Utc)
+        {
+            return utc.Date.AddDays(1).AddTicks(-1);
+        }
+        return utc;
+    }
+
     private static List<string> ExtractTagsFromRawJson(JsonElement root)
     {
         var list = new List<string>();

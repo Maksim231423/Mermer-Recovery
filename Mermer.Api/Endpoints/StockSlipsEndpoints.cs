@@ -25,7 +25,6 @@ public static class StockSlipsEndpoints
         {
             try
             {
-                // 1. Валюты и конвертеры
                 var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
                              ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
                 var defCurId = defCur?.Id.ToString() ?? "00000000-0000-0000-0000-000000000001";
@@ -48,15 +47,14 @@ public static class StockSlipsEndpoints
                     };
                 }
 
-                // 2. Безопасные границы дат в UTC
+                // Безопасные границы дат в UTC с включением всего текущего дня
                 DateTimeOffset startDate = from.HasValue
-                    ? DateTime.SpecifyKind(from.Value, DateTimeKind.Utc)
+                    ? ParseSafeUtcOffset(from.Value)
                     : DateTimeOffset.MinValue;
                 DateTimeOffset endDate = till.HasValue
-                    ? DateTime.SpecifyKind(till.Value, DateTimeKind.Utc)
+                    ? ParseSafeUtcOffset(till.Value, isTill: true)
                     : DateTimeOffset.MaxValue;
 
-                // 3. Выборка заголовков накладных (БЕЗ групповых полей и связей)
                 var slipsQuery = db.StockSlips
                     .AsNoTracking()
                     .Where(s => s.Date >= startDate && s.Date <= endDate);
@@ -86,7 +84,6 @@ public static class StockSlipsEndpoints
                     return Results.Ok(Array.Empty<object>());
                 }
 
-                // 4. Подгружаем строки только для найденных накладных
                 var slipIds = rawSlips.Select(x => x.Id).ToList();
                 var allLines = await db.StockSlipLines
                     .AsNoTracking()
@@ -108,7 +105,6 @@ public static class StockSlipsEndpoints
                     .GroupBy(l => l.StockSlipId)
                     .ToDictionary(g => g.Key, g => g.ToList());
 
-                // 5. Формируем DTO для клиента
                 var result = rawSlips.Select(s =>
                 {
                     var linesList = new List<object>();
@@ -186,7 +182,7 @@ public static class StockSlipsEndpoints
                     {
                         Id = s.Id.ToString(),
                         Code = s.Code ?? string.Empty,
-                        Date = s.Date.UtcDateTime,
+                        Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО НА LOCAL TIME
                         SlipType = s.SlipType,
                         Type = s.SlipType,
                         WarehouseId = s.WarehouseId?.ToString(),
@@ -214,9 +210,6 @@ public static class StockSlipsEndpoints
             }
             catch (Exception ex)
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"[CRITICAL ERROR in /slips]: {ex}");
-                Console.ResetColor();
                 return Results.Problem(detail: ex.ToString(), statusCode: 500);
             }
         });
@@ -255,7 +248,7 @@ public static class StockSlipsEndpoints
             {
                 Id = s.Id.ToString(),
                 Code = s.Code ?? string.Empty,
-                Date = s.Date.UtcDateTime,
+                Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО НА LOCAL TIME
                 SlipType = s.SlipType,
                 Type = s.SlipType,
                 WarehouseId = s.WarehouseId?.ToString(),
@@ -315,9 +308,6 @@ public static class StockSlipsEndpoints
             string? wIdStr = GetStringProperty(root, "warehouseId", "WarehouseId");
             Guid? wId = Guid.TryParse(wIdStr, out var parsedW) && parsedW != Guid.Empty ? parsedW : null;
 
-            // =========================================================================
-            // ПОДСТАНОВКА DEFAULT СКЛАДА (если склад не передан из UI)
-            // =========================================================================
             if (!wId.HasValue)
             {
                 var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled);
@@ -328,13 +318,15 @@ public static class StockSlipsEndpoints
 
                 wId = defWh?.Id;
             }
-            // =========================================================================
 
+            // БЕЗОПАСНЫЙ ПАРСИНГ ДАТЫ БЕЗ ДВОЙНОГО СДВИГА:
             DateTimeOffset date = DateTimeOffset.UtcNow;
             string? dateStr = GetStringProperty(root, "date", "Date");
             if (!string.IsNullOrEmpty(dateStr) && DateTimeOffset.TryParse(dateStr, out var pDate))
             {
-                date = pDate.ToUniversalTime();
+                date = pDate.Offset == TimeSpan.Zero && !dateStr.EndsWith("Z", StringComparison.OrdinalIgnoreCase)
+                    ? new DateTimeOffset(DateTime.SpecifyKind(pDate.DateTime, DateTimeKind.Local).ToUniversalTime())
+                    : pDate.ToUniversalTime();
             }
 
             bool isCompleted = GetBoolProperty(root, "isCompleted", "IsCompleted");
@@ -445,13 +437,13 @@ public static class StockSlipsEndpoints
 
             if (from.HasValue && from.Value.Year > 2000)
             {
-                var fUtc = DateTime.SpecifyKind(from.Value, DateTimeKind.Utc);
+                var fUtc = ParseSafeUtcOffset(from.Value);
                 query = query.Where(s => s.Date >= fUtc);
             }
 
             if (till.HasValue && till.Value.Year < 2099)
             {
-                var tUtc = DateTime.SpecifyKind(till.Value, DateTimeKind.Utc);
+                var tUtc = ParseSafeUtcOffset(till.Value, isTill: true);
                 query = query.Where(s => s.Date <= tUtc);
             }
 
@@ -464,7 +456,7 @@ public static class StockSlipsEndpoints
             return Results.Ok(new { count });
         });
 
-        // --- 2. ФАСЕТЫ (БЕЗ IsDisabled) ---
+        // --- 2. ФАСЕТЫ ---
         group.MapGet("/slips/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
             string? fields = ctx.Request.Query["fields"].ToString();
@@ -544,6 +536,19 @@ public static class StockSlipsEndpoints
     }
 
     #region Helpers
+    private static DateTimeOffset ParseSafeUtcOffset(DateTime dt, bool isTill = false)
+    {
+        if (dt == DateTime.MinValue) return new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+        if (dt >= DateTime.MaxValue.AddDays(-2)) return new DateTimeOffset(new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc));
+
+        var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
+        if (isTill && dt.TimeOfDay == TimeSpan.Zero && dt.Kind != DateTimeKind.Utc)
+        {
+            utc = utc.Date.AddDays(1).AddTicks(-1);
+        }
+        return new DateTimeOffset(utc);
+    }
+
     private static List<string> ExtractTagsFromRawJson(JsonElement root)
     {
         var list = new List<string>();

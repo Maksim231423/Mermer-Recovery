@@ -24,10 +24,21 @@ public static class RevenueReportsEndpoints
             DateTime dateFrom = DateTime.UtcNow.AddMonths(-1);
             DateTime dateTill = DateTime.UtcNow;
 
-            if (DateTime.TryParse(req.Query["dateFrom"].FirstOrDefault()?.Replace(" ", "+"), out var pf))
-                dateFrom = pf.ToUniversalTime();
-            if (DateTime.TryParse(req.Query["dateTill"].FirstOrDefault()?.Replace(" ", "+"), out var pt))
-                dateTill = pt.ToUniversalTime();
+            string? fromStr = req.Query["dateFrom"].FirstOrDefault();
+            if (!string.IsNullOrEmpty(fromStr) && DateTime.TryParse(fromStr.Replace(" ", "+"), out var pf))
+            {
+                dateFrom = pf.Kind == DateTimeKind.Utc ? pf : pf.ToUniversalTime();
+            }
+
+            string? tillStr = req.Query["dateTill"].FirstOrDefault();
+            if (!string.IsNullOrEmpty(tillStr) && DateTime.TryParse(tillStr.Replace(" ", "+"), out var pt))
+            {
+                var utc = pt.Kind == DateTimeKind.Utc ? pt : pt.ToUniversalTime();
+                // Расширяем до конца суток при фильтрации по дате без времени
+                dateTill = pt.TimeOfDay == TimeSpan.Zero && pt.Kind != DateTimeKind.Utc
+                    ? utc.Date.AddDays(1).AddTicks(-1)
+                    : utc;
+            }
 
             if (dateFrom > dateTill)
             {

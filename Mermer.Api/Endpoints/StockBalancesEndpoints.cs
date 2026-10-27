@@ -27,9 +27,14 @@ public static class StockBalancesEndpoints
             if (!string.IsNullOrEmpty(dateStr) && DateTimeOffset.TryParse(dateStr.Replace(" ", "+"), out var pDate))
             {
                 if (pDate.TimeOfDay == TimeSpan.Zero)
-                    date = pDate.Date.AddDays(1).AddTicks(-1).ToUniversalTime();
+                {
+                    // Сохраняем исходное смещение часового пояса перед доведением до конца суток
+                    date = pDate.AddDays(1).AddTicks(-1).ToUniversalTime();
+                }
                 else
+                {
                     date = pDate.ToUniversalTime();
+                }
             }
 
             var whIds = ParseGuids(req.Query["warehouseId"]);
@@ -471,9 +476,14 @@ public static class StockBalancesEndpoints
             if (!string.IsNullOrEmpty(dateStr) && DateTimeOffset.TryParse(dateStr.Replace(" ", "+"), out var pDate))
             {
                 if (pDate.TimeOfDay == TimeSpan.Zero)
-                    date = pDate.Date.AddDays(1).AddTicks(-1).ToUniversalTime();
+                {
+                    // Сохраняем исходное смещение часового пояса перед доведением до конца суток
+                    date = pDate.AddDays(1).AddTicks(-1).ToUniversalTime();
+                }
                 else
+                {
                     date = pDate.ToUniversalTime();
+                }
             }
 
             string? displayCurrencyId = req.Query["displayCurrencyId"].FirstOrDefault();

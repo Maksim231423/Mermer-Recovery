@@ -26,12 +26,13 @@ public static class StockTransfersEndpoints
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 10000) : 5000;
             int skip = offset.GetValueOrDefault(0);
 
+            // Безопасное определение границ диапазона с захватом полного дня
             DateTimeOffset startDate = from.HasValue && from.Value.Year > 2000
-                ? new DateTimeOffset(from.Value.ToUniversalTime())
+                ? ParseSafeUtcOffset(from.Value)
                 : DateTimeOffset.MinValue;
 
             DateTimeOffset endDate = till.HasValue && till.Value.Year < 2099
-                ? new DateTimeOffset(till.Value.ToUniversalTime())
+                ? ParseSafeUtcOffset(till.Value, isTill: true)
                 : DateTimeOffset.MaxValue;
 
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
@@ -77,7 +78,6 @@ public static class StockTransfersEndpoints
                         decimal sentQty = l.Quantity;
                         decimal recQty = l.ReceivedQuantity != 0m ? l.ReceivedQuantity : 0m;
 
-                        // Если строка не принята полностью или отличается по количеству
                         if (sentQty != recQty)
                         {
                             hasQuantityConflict = true;
@@ -133,14 +133,13 @@ public static class StockTransfersEndpoints
                     ? t.Lines.Sum(x => x.ActionReceivedTotal != 0m ? x.ActionReceivedTotal : (x.ReceivedQuantity * x.Price))
                     : dbRecTotal;
 
-                // Перемещение конфликтное, если разошлось количество в строках или итоговые суммы
                 bool isConflicted = hasQuantityConflict || (finalSentTotal != finalReceivedTotal);
 
                 return new
                 {
                     Id = t.Id.ToString(),
                     Code = t.Code ?? string.Empty,
-                    Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                    Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // Локальное время
                     Type = "StockTransfer",
                     WarehouseId = t.WarehouseId?.ToString(),
                     DestinationWarehouseId = t.DestinationWarehouseId?.ToString(),
@@ -178,13 +177,13 @@ public static class StockTransfersEndpoints
 
             if (from.HasValue && from.Value.Year > 2000)
             {
-                var fUtc = new DateTimeOffset(from.Value.ToUniversalTime());
+                var fUtc = ParseSafeUtcOffset(from.Value);
                 query = query.Where(t => t.Date >= fUtc);
             }
 
             if (till.HasValue && till.Value.Year < 2099)
             {
-                var tUtc = new DateTimeOffset(till.Value.ToUniversalTime());
+                var tUtc = ParseSafeUtcOffset(till.Value, isTill: true);
                 query = query.Where(t => t.Date <= tUtc);
             }
 
@@ -196,7 +195,6 @@ public static class StockTransfersEndpoints
 
             if (conflicted.HasValue && conflicted.Value)
             {
-                // Считаем документы, у которых есть расхождения по количеству в строках
                 query = query.Where(t => t.Lines.Any(l => l.Quantity != (l.ReceivedQuantity != 0m ? l.ReceivedQuantity : 0m)));
             }
 
@@ -226,7 +224,7 @@ public static class StockTransfersEndpoints
             {
                 Id = t.Id.ToString(),
                 Code = t.Code ?? string.Empty,
-                Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО НА LOCAL TIME
+                Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // Локальное время
                 Type = "StockTransfer",
                 WarehouseId = t.WarehouseId?.ToString(),
                 DestinationWarehouseId = t.DestinationWarehouseId?.ToString(),
@@ -279,9 +277,6 @@ public static class StockTransfersEndpoints
             Guid? dstWhId = Guid.TryParse(GetStringProp(root, "destinationWarehouseId", "DestinationWarehouseId"), out var dW) && dW != Guid.Empty ? dW : null;
             Guid? dispCurId = Guid.TryParse(GetStringProp(root, "displayCurrencyId", "DisplayCurrencyId"), out var cG) && cG != Guid.Empty ? cG : null;
 
-            // =========================================================================
-            // ПОДСТАНОВКА DEFAULT СУЩНОСТЕЙ (СКЛАД-ИСТОЧНИК И ВАЛЮТА)
-            // =========================================================================
             if (!srcWhId.HasValue)
             {
                 var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled);
@@ -299,12 +294,16 @@ public static class StockTransfersEndpoints
                              ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => !c.IsDisabled);
                 dispCurId = defCur?.Id;
             }
-            // =========================================================================
 
+            // БЕЗОПАСНЫЙ ПАРСИНГ ДАТЫ (Без двойного смещения часового пояса)
             DateTimeOffset date = DateTimeOffset.UtcNow;
             string? dateStr = GetStringProp(root, "date", "Date");
             if (!string.IsNullOrEmpty(dateStr) && DateTimeOffset.TryParse(dateStr, out var pDate))
-                date = pDate.ToUniversalTime();
+            {
+                date = pDate.Offset == TimeSpan.Zero && !dateStr.EndsWith("Z", StringComparison.OrdinalIgnoreCase)
+                    ? new DateTimeOffset(DateTime.SpecifyKind(pDate.DateTime, DateTimeKind.Local).ToUniversalTime())
+                    : pDate.ToUniversalTime();
+            }
 
             var tagsList = ExtractTagsFromRawJson(root);
             string groupName = GetStringProp(root, "group", "Group", "groupName", "GroupName") ?? string.Empty;
@@ -491,6 +490,19 @@ public static class StockTransfersEndpoints
     }
 
     #region Helpers
+    private static DateTimeOffset ParseSafeUtcOffset(DateTime dt, bool isTill = false)
+    {
+        if (dt == DateTime.MinValue) return new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+        if (dt >= DateTime.MaxValue.AddDays(-2)) return new DateTimeOffset(new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc));
+
+        var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
+        if (isTill && dt.TimeOfDay == TimeSpan.Zero && dt.Kind != DateTimeKind.Utc)
+        {
+            utc = utc.Date.AddDays(1).AddTicks(-1);
+        }
+        return new DateTimeOffset(utc);
+    }
+
     private static List<string> ExtractTagsFromRawJson(JsonElement root)
     {
         var list = new List<string>();
