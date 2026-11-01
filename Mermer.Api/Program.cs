@@ -1,4 +1,5 @@
 ﻿using Mermer.Api.Endpoints;
+using Mermer.Api.Middleware;
 using Mermer.Api.Services;
 using Mermer.Data.Postgres;
 using Microsoft.EntityFrameworkCore;
@@ -7,13 +8,12 @@ using Npgsql;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-
 // РАЗРЕШАЕТ Npgsql АВТОМАТИЧЕСКИ ПРЕОБРАЗОВЫВАТЬ DateTime (Local/Unspecified) В UTC
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.WebHost.UseUrls("http://*:5050");
+// builder.WebHost.UseUrls("http://*:5050");
 
 builder.Logging.AddFilter("Microsoft.EntityFrameworkCore.Database.Command", LogLevel.Warning);
 builder.Logging.AddFilter("Microsoft.EntityFrameworkCore.Query", LogLevel.Warning);
@@ -70,8 +70,21 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(o =>
 });
 
 // РЕГИСТРАЦИЯ СЕРВИСОВ СИНХРОНИЗАЦИИ
+builder.Services.Configure<SyncOptions>(builder.Configuration.GetSection(SyncOptions.SectionName));
+builder.Services.AddHttpClient("VdsSyncClient", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(15);
+});
+
 builder.Services.AddScoped<IStockBalanceCalculator, StockBalanceCalculator>();
 builder.Services.AddScoped<ISyncService, SyncService>();
+builder.Services.AddHostedService<SyncBackgroundWorker>();
+
+// РЕГИСТРАЦИЯ СЕРВИСОВ ЛИЦЕНЗИРОВАНИЯ И КЭША
+builder.Services.AddMemoryCache();
+builder.Services.AddScoped<IServerLicenseValidationService, ServerLicenseValidationService>();
+
+builder.Services.AddSingleton<ILicenseCryptoService, LicenseCryptoService>();
 
 var app = builder.Build();
 
@@ -122,6 +135,8 @@ using (var scope = app.Services.CreateScope())
 
 app.UseCors();
 
+// ПОДКЛЮЧЕНИЕ ЗАЩИТНОГО MIDDLEWARE СЕРВЕРНОЙ ЛИЦЕНЗИИ
+app.UseMiddleware<ServerLicenseMiddleware>();
 
 // Формируем спецификацию строго в формате Swagger 2.0
 app.UseSwagger(c =>
@@ -172,18 +187,7 @@ app.MapReportEndpoints();
 app.MapOfficeEndpoints();
 app.MapWarehouseEndpoints();
 
-
 app.Run();
-
-
-
-
-
-
-
-
-
-
 
 public class LocalDateTimeJsonConverter : JsonConverter<DateTime>
 {
@@ -198,7 +202,6 @@ public class LocalDateTimeJsonConverter : JsonConverter<DateTime>
 
     public override void Write(Utf8JsonWriter writer, DateTime value, JsonSerializerOptions options)
     {
-        // Переводим дату в локальное системное время перед отдачей клиенту
         var local = value.Kind == DateTimeKind.Utc ? value.ToLocalTime() : value;
         writer.WriteStringValue(local.ToString("yyyy-MM-ddTHH:mm:ss"));
     }

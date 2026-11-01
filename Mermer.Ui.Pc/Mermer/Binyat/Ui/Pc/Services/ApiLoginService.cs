@@ -17,13 +17,12 @@ namespace Mermer.Ui.Pc.Services
 
         public ApiLoginService(RestClient restClient, IRepository<Role> rolesRepository)
         {
-            _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
+            _restClient = restClient ?? throw new Exception("Http RestClient cannot be null.");
             _rolesRepository = rolesRepository;
         }
 
         protected override async Task<User> GetUser(string username, string password)
         {
-            var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 var apiResponse = await _restClient.PostAsync<ApiLoginResponse>("/api/auth/login", new
@@ -34,7 +33,7 @@ namespace Mermer.Ui.Pc.Services
 
                 if (apiResponse == null)
                 {
-                    throw new Exception("API вернул пустой ответ (null).");
+                    throw new Exception("Authentication API returned empty response.");
                 }
 
                 bool isAdmin = apiResponse.IsAdmin
@@ -53,8 +52,8 @@ namespace Mermer.Ui.Pc.Services
             }
             catch (Exception ex)
             {
-                string detail = ex.InnerException != null ? $"{ex.Message} -> {ex.InnerException.Message}" : ex.Message;
-                throw new Exception($"[Auth Debug] {detail}", ex);
+                var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+                throw new Exception(string.Format("Authentication failed for user '{0}'. Details: {1}", username, detail), ex);
             }
         }
 
@@ -71,7 +70,6 @@ namespace Mermer.Ui.Pc.Services
                 var roleIdSet = new HashSet<string>(roleIds, StringComparer.OrdinalIgnoreCase);
                 var matchedRoles = allRoles.Where(r => roleIdSet.Contains(r.Id)).ToList();
 
-                // Объединяем права всех назначенных ролей в сессию пользователя
                 if (Session != null)
                 {
                     var mergedAuth = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -80,7 +78,6 @@ namespace Mermer.Ui.Pc.Services
                         if (role.Authorizations == null) continue;
                         foreach (var kvp in role.Authorizations)
                         {
-                            // Если в одной из ролей запрещено (0), фиксируем запрет
                             if (!mergedAuth.ContainsKey(kvp.Key))
                                 mergedAuth[kvp.Key] = kvp.Value;
                             else
@@ -94,31 +91,31 @@ namespace Mermer.Ui.Pc.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[AUTH GetRoles Failed]: {ex.Message}");
-                return Enumerable.Empty<Role>();
+                var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+                throw new Exception(string.Format("Failed to resolve roles. Details: {0}", detail), ex);
             }
         }
-
 
         public override async Task UpdatePassword(string currentPassword, string newPassword)
         {
             if (Session == null || string.IsNullOrEmpty(Session.UserId))
-                throw new InvalidOperationException("Пользователь не авторизован.");
-
-            await _restClient.PostAsync("/api/auth/update-password", new
             {
-                UserId = Session.UserId,
-                CurrentPassword = currentPassword,
-                NewPassword = newPassword
-            });
+                throw new Exception("Cannot update password: user is not authenticated.");
+            }
 
-            var localUser = LocalSqliteCache.GetAllDocuments<User>("User")
-                ?.FirstOrDefault(u => string.Equals(u.Id, Session.UserId, StringComparison.OrdinalIgnoreCase));
-
-            if (localUser != null)
+            try
             {
-                localUser.Password = newPassword;
-                LocalSqliteCache.SaveDocument("User", localUser.Id, localUser, isSynced: true);
+                await _restClient.PostAsync("/api/auth/update-password", new
+                {
+                    UserId = Session.UserId,
+                    CurrentPassword = currentPassword,
+                    NewPassword = newPassword
+                });
+            }
+            catch (Exception ex)
+            {
+                var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+                throw new Exception(string.Format("Failed to update password for user '{0}'. Details: {1}", Session.UserId, detail), ex);
             }
         }
     }

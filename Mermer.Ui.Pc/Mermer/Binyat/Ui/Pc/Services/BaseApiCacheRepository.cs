@@ -16,7 +16,7 @@ public class BaseApiCacheRepository<T> : IRepository<T>, IReadOnlyRepository<T>,
     protected readonly string ApiRoute;
 
     protected List<T>? _ramCache;
-    protected bool _isSyncing = false;
+    protected readonly object _syncLock = new();
 
     public BaseApiCacheRepository(RestClient restClient, string docType, string apiRoute)
     {
@@ -27,51 +27,64 @@ public class BaseApiCacheRepository<T> : IRepository<T>, IReadOnlyRepository<T>,
 
     public virtual async Task<IEnumerable<T>> GetAllAsync()
     {
-        // 1. Мгновенная отдача (0 миллисекунд)
-        if (_ramCache == null)
+        lock (_syncLock)
         {
-            _ramCache = LocalSqliteCache.GetAllDocuments<T>(DocType)?.ToList() ?? new List<T>();
+            if (_ramCache != null && _ramCache.Count > 0)
+                return _ramCache.ToList();
         }
 
-        // 2. Фоновая отправка и загрузка данных (не тормозит UI)
-        if (!_isSyncing)
+        try
         {
-            _isSyncing = true;
-            _ = Task.Run(async () =>
+            var remote = await _restClient.GetAsync<List<T>>($"/api/{ApiRoute}");
+            if (remote != null)
             {
-                try
+                lock (_syncLock)
                 {
-                    var unsynced = LocalSqliteCache.GetUnsyncedDocuments<T>(DocType);
-                    if (unsynced != null)
-                    {
-                        foreach (var item in unsynced)
-                        {
-                            await _restClient.PutAsync($"/api/{ApiRoute}/{item.id}", item.entity);
-                            LocalSqliteCache.SaveDocument(DocType, item.id, item.entity, isSynced: true);
-                        }
-                    }
-
-                    var remote = await _restClient.GetAsync<List<T>>($"/api/{ApiRoute}");
-                    if (remote != null)
-                    {
-                        foreach (var entity in remote)
-                        {
-                            LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
-                        }
-                        _ramCache = remote;
-                    }
+                    _ramCache = remote;
                 }
-                catch { }
-                finally { _isSyncing = false; }
-            });
+                return remote;
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[BaseApiCacheRepository<{typeof(T).Name}>] Ошибка загрузки: {ex.Message}");
         }
 
-        return _ramCache;
+        lock (_syncLock)
+        {
+            return _ramCache?.ToList() ?? new List<T>();
+        }
     }
 
     public async Task<T> GetAsync(string id)
     {
         if (string.IsNullOrEmpty(id)) return null;
+
+        lock (_syncLock)
+        {
+            var existing = _ramCache?.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+            if (existing != null) return existing;
+        }
+
+        try
+        {
+            var remote = await _restClient.GetAsync<T>($"/api/{ApiRoute}/{id}");
+            if (remote != null)
+            {
+                lock (_syncLock)
+                {
+                    if (_ramCache != null)
+                    {
+                        var idx = _ramCache.FindIndex(x => string.Equals(x.Id, remote.Id, StringComparison.OrdinalIgnoreCase));
+                        if (idx >= 0) _ramCache[idx] = remote;
+                        else _ramCache.Add(remote);
+                    }
+                }
+                return remote;
+            }
+        }
+        catch { }
+
         var all = await GetAllAsync();
         return all.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
     }
@@ -105,28 +118,31 @@ public class BaseApiCacheRepository<T> : IRepository<T>, IReadOnlyRepository<T>,
         bool isNew = string.IsNullOrEmpty(entity.Id) || entity.Id == Guid.Empty.ToString();
         if (isNew) entity.Id = Guid.NewGuid().ToString();
 
-        LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
-
-        if (_ramCache != null)
+        // 1. Обновляем оперативный кэш
+        lock (_syncLock)
         {
-            var existing = _ramCache.FirstOrDefault(x => x.Id == entity.Id);
-            if (existing != null) _ramCache.Remove(existing);
-            _ramCache.Add(entity);
+            if (_ramCache != null)
+            {
+                var idx = _ramCache.FindIndex(x => string.Equals(x.Id, entity.Id, StringComparison.OrdinalIgnoreCase));
+                if (idx >= 0) _ramCache[idx] = entity;
+                else _ramCache.Add(entity);
+            }
         }
 
-        // Мгновенно уведомляем открытые списки данного типа T (Depository, Warehouse, Office и т.д.)
-        UiEventBus.NotifyDocumentModified<T>(entity.Id);
-
+        // 2. Мгновенное сохранение в локальный API (1-2 мс)
         try
         {
             if (isNew) await _restClient.PostAsync($"/api/{ApiRoute}", entity);
             else await _restClient.PutAsync($"/api/{ApiRoute}/{entity.Id}", entity);
-            LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
-
-            // Подтверждаем обновление после ответа сервера
-            UiEventBus.NotifyDocumentModified<T>(entity.Id);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[BaseApiCacheRepository<{typeof(T).Name}>] Ошибка сохранения: {ex.Message}");
+            throw;
+        }
+
+        // 3. Уведомляем UI об обновлении сущности
+        UiEventBus.NotifyDocumentModified<T>(entity.Id);
     }
 
     public async Task CreateAsync(T entity) => await SaveAsync(entity);
@@ -136,16 +152,25 @@ public class BaseApiCacheRepository<T> : IRepository<T>, IReadOnlyRepository<T>,
     {
         if (string.IsNullOrEmpty(id)) return;
 
-        if (_ramCache != null)
+        lock (_syncLock)
         {
-            var existing = _ramCache.FirstOrDefault(x => x.Id == id);
-            if (existing != null) _ramCache.Remove(existing);
+            if (_ramCache != null)
+            {
+                _ramCache.RemoveAll(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+            }
         }
 
-        // Мгновенно убираем удаленный элемент из открытого списка в UI
-        UiEventBus.NotifyDocumentModified<T>(id);
+        try
+        {
+            await _restClient.DeleteAsync($"/api/{ApiRoute}/{id}");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[BaseApiCacheRepository<{typeof(T).Name}>] Ошибка удаления: {ex.Message}");
+            throw;
+        }
 
-        try { await _restClient.DeleteAsync($"/api/{ApiRoute}/{id}"); } catch { }
+        UiEventBus.NotifyDocumentModified<T>(id);
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)

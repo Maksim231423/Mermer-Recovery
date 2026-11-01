@@ -41,4 +41,6 @@ public interface IBinyatActivationService
   Task ValidateServerActivationAsync();
 
   Task ValidateSynchronizerActivationAsync();
+
+  void ResetCache();
 }

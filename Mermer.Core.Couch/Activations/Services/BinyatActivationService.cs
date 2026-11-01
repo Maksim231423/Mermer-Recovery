@@ -46,6 +46,11 @@ public class BinyatActivationService : IBinyatActivationService
         }
     }
 
+    public void ResetCache()
+    {
+        ClearMemoryCache();
+    }
+
     private async Task<string> GetCachedMachineIdAsync()
     {
         if (!string.IsNullOrEmpty(_cachedMachineId))

@@ -16,10 +16,23 @@ public class ActivationViewModel : DialogViewModel
 {
     private readonly IBinyatActivationService _activationService;
     private string _note;
+
     private string _clientLicenseId;
     private ActivationStatus _clientActivationStatus;
+
     private string _serverLicenseId;
     private ActivationStatus _serverActivationStatus;
+
+    private string _syncLicenseId;
+    private ActivationStatus _syncActivationStatus;
+
+    private string _machineId;
+
+    public string MachineId
+    {
+        get => _machineId;
+        set => SetProperty(ref _machineId, value, nameof(MachineId));
+    }
 
     public ActivationViewModel(
         IMvxMessenger messenger,
@@ -28,13 +41,45 @@ public class ActivationViewModel : DialogViewModel
         IUserInteractionService userInteractionService)
         : base(messenger, navigationService, userInteractionService)
     {
-        _activationService = activationService;
+        _activationService = activationService ?? throw new Exception("Activation service cannot be null.");
     }
 
     protected override async Task OnLoad()
     {
         await base.OnLoad();
-        await Task.WhenAll(OnUpdateClientStatusAsync(), OnUpdateServerStatusAsync());
+
+        // Получаем аппаратный MachineId автономно прямо в Core
+        try
+        {
+            MachineId = GetHardwareMachineId();
+            Note = $"{Environment.MachineName} - {Environment.UserName}";
+        }
+        catch
+        {
+            MachineId = Environment.MachineName;
+            Note = MachineId;
+        }
+
+        await Task.WhenAll(
+            OnUpdateClientStatusAsync(),
+            OnUpdateServerStatusAsync(),
+            OnUpdateSyncStatusAsync());
+    }
+
+    private static string GetHardwareMachineId()
+    {
+        try
+        {
+            // Формируем уникальный идентификатор устройства на основе данных машины
+            var raw = string.Format("{0}_{1}", Environment.MachineName, Environment.ProcessorCount);
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            var hash = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(raw));
+            return BitConverter.ToString(hash).Replace("-", string.Empty).Substring(0, 24);
+        }
+        catch
+        {
+            return Environment.MachineName;
+        }
     }
 
     public virtual string Note
@@ -44,7 +89,7 @@ public class ActivationViewModel : DialogViewModel
     }
 
     // ==========================================
-    // CLIENT LICENSE
+    // 1. CLIENT LICENSE
     // ==========================================
 
     public virtual string ClientLicenseId
@@ -88,11 +133,11 @@ public class ActivationViewModel : DialogViewModel
         try
         {
             await _activationService.ActivateClientAsync(ClientLicenseId, Note);
-            UserInteractionService.ShowMessage("Успешно", "Лицензия клиента успешно активирована!");
+            UserInteractionService.ShowMessage("Success", "Client license activated successfully.");
         }
         catch (Exception ex)
         {
-            UserInteractionService.ShowMessage("Ошибка активации", CleanErrorMessage(ex.Message));
+            UserInteractionService.ShowMessage("Activation Error", CleanErrorMessage(ex.Message));
         }
         finally
         {
@@ -110,11 +155,11 @@ public class ActivationViewModel : DialogViewModel
         try
         {
             await _activationService.ReactivateClientAsync();
-            UserInteractionService.ShowMessage("Успешно", "Лицензия клиента успешно обновлена!");
+            UserInteractionService.ShowMessage("Success", "Client license renewed successfully.");
         }
         catch (Exception ex)
         {
-            UserInteractionService.ShowMessage("Ошибка реактивации", CleanErrorMessage(ex.Message));
+            UserInteractionService.ShowMessage("Reactivation Error", CleanErrorMessage(ex.Message));
         }
         finally
         {
@@ -132,11 +177,11 @@ public class ActivationViewModel : DialogViewModel
         try
         {
             await _activationService.DeactivateClientAsync();
-            UserInteractionService.ShowMessage("Успешно", "Лицензия клиента деактивирована.");
+            UserInteractionService.ShowMessage("Success", "Client license deactivated.");
         }
         catch (Exception ex)
         {
-            UserInteractionService.ShowMessage("Ошибка деактивации", CleanErrorMessage(ex.Message));
+            UserInteractionService.ShowMessage("Deactivation Error", CleanErrorMessage(ex.Message));
         }
         finally
         {
@@ -146,7 +191,7 @@ public class ActivationViewModel : DialogViewModel
     }
 
     // ==========================================
-    // SERVER LICENSE
+    // 2. SERVER LICENSE
     // ==========================================
 
     public string ServerLicenseId
@@ -190,11 +235,11 @@ public class ActivationViewModel : DialogViewModel
         try
         {
             await _activationService.ActivateServerAsync(ServerLicenseId, Note);
-            UserInteractionService.ShowMessage("Успешно", "Лицензия сервера успешно активирована!");
+            UserInteractionService.ShowMessage("Success", "Server license activated successfully.");
         }
         catch (Exception ex)
         {
-            UserInteractionService.ShowMessage("Ошибка активации", CleanErrorMessage(ex.Message));
+            UserInteractionService.ShowMessage("Activation Error", CleanErrorMessage(ex.Message));
         }
         finally
         {
@@ -212,11 +257,11 @@ public class ActivationViewModel : DialogViewModel
         try
         {
             await _activationService.ReactivateServerAsync();
-            UserInteractionService.ShowMessage("Успешно", "Лицензия сервера успешно обновлена!");
+            UserInteractionService.ShowMessage("Success", "Server license renewed successfully.");
         }
         catch (Exception ex)
         {
-            UserInteractionService.ShowMessage("Ошибка реактивации", CleanErrorMessage(ex.Message));
+            UserInteractionService.ShowMessage("Reactivation Error", CleanErrorMessage(ex.Message));
         }
         finally
         {
@@ -234,16 +279,118 @@ public class ActivationViewModel : DialogViewModel
         try
         {
             await _activationService.DeactivateServerAsync();
-            UserInteractionService.ShowMessage("Успешно", "Лицензия сервера деактивирована.");
+            UserInteractionService.ShowMessage("Success", "Server license deactivated.");
         }
         catch (Exception ex)
         {
-            UserInteractionService.ShowMessage("Ошибка деактивации", CleanErrorMessage(ex.Message));
+            UserInteractionService.ShowMessage("Deactivation Error", CleanErrorMessage(ex.Message));
         }
         finally
         {
             IsBusy = false;
             UpdateServerStatusCommand.Execute(null);
+        }
+    }
+
+    // ==========================================
+    // 3. SYNCHRONIZATION LICENSE
+    // ==========================================
+
+    public string SyncLicenseId
+    {
+        get => _syncLicenseId;
+        set => SetProperty(ref _syncLicenseId, value, nameof(SyncLicenseId));
+    }
+
+    public ActivationStatus SyncActivationStatus
+    {
+        get => _syncActivationStatus;
+        set => SetProperty(ref _syncActivationStatus, value, nameof(SyncActivationStatus));
+    }
+
+    public ICommand UpdateSyncStatusCommand =>
+        new MvxAsyncCommand(OnUpdateSyncStatusAsync, () => !IsBusy);
+
+    private async Task OnUpdateSyncStatusAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            SyncActivationStatus = await _activationService.GetSynchronizerActiveDatesAsync();
+        }
+        catch (Exception ex)
+        {
+            UserInteractionService.ShowExceptionMessage(ex);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    public ICommand ActivateSyncCommand =>
+        new MvxAsyncCommand(OnActivateSyncAsync, () => !IsBusy && !string.IsNullOrEmpty(SyncLicenseId));
+
+    public virtual async Task OnActivateSyncAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            await _activationService.ActivateSynchronizerAsync(SyncLicenseId, Note);
+            UserInteractionService.ShowMessage("Success", "Synchronization license activated successfully.");
+        }
+        catch (Exception ex)
+        {
+            UserInteractionService.ShowMessage("Activation Error", CleanErrorMessage(ex.Message));
+        }
+        finally
+        {
+            IsBusy = false;
+            UpdateSyncStatusCommand.Execute(null);
+        }
+    }
+
+    public ICommand ReactivateSyncCommand =>
+        new MvxAsyncCommand(OnReactivateSyncAsync, () => !IsBusy);
+
+    private async Task OnReactivateSyncAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            await _activationService.ReactivateSynchronizerAsync();
+            UserInteractionService.ShowMessage("Success", "Synchronization license renewed successfully.");
+        }
+        catch (Exception ex)
+        {
+            UserInteractionService.ShowMessage("Reactivation Error", CleanErrorMessage(ex.Message));
+        }
+        finally
+        {
+            IsBusy = false;
+            UpdateSyncStatusCommand.Execute(null);
+        }
+    }
+
+    public ICommand DeactivateSyncCommand =>
+        new MvxAsyncCommand(OnDeactivateSyncAsync, () => !IsBusy);
+
+    private async Task OnDeactivateSyncAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            await _activationService.DeactivateSynchronizerAsync();
+            UserInteractionService.ShowMessage("Success", "Synchronization license deactivated.");
+        }
+        catch (Exception ex)
+        {
+            UserInteractionService.ShowMessage("Deactivation Error", CleanErrorMessage(ex.Message));
+        }
+        finally
+        {
+            IsBusy = false;
+            UpdateSyncStatusCommand.Execute(null);
         }
     }
 
@@ -254,7 +401,7 @@ public class ActivationViewModel : DialogViewModel
     private static string CleanErrorMessage(string rawMessage)
     {
         if (string.IsNullOrWhiteSpace(rawMessage))
-            return "Не удалось активировать лицензию. Проверьте правильность введённого ключа.";
+            return "Failed to activate license. Please verify the provided license key.";
 
         var message = rawMessage;
         var colonIndex = message.IndexOf(':');

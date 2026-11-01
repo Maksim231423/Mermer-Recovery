@@ -1,13 +1,11 @@
 ﻿using Mermer.Api.DTOs;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Mermer.Api.Services;
 
 public interface ISyncService
 {
-    /// <summary>
-    /// Принимает пакет документов от SQLite-клиента, сохраняет в Postgres
-    /// и запускает пересчет регистра остатков.
-    /// </summary>
+    Task<SyncPullResponseDto> ProcessPullAsync(string? clientId = null, CancellationToken cancellationToken = default);
     Task<SyncPushResponseDto> ProcessPushAsync(SyncPushRequestDto request, CancellationToken cancellationToken = default);
-    Task<SyncPullResponseDto> ProcessPullAsync(CancellationToken cancellationToken = default);
 }

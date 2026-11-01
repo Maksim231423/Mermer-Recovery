@@ -14,17 +14,12 @@ namespace Mermer.Ui.Pc.Services
     public class ApiInvoicesRepository : IRepository<Invoice>, IReadOnlyRepository<Invoice>, IRepositoryWithFacets<Invoice>, IInvoicesRepository
     {
         private readonly RestClient _restClient;
-        private const string DocType = "Invoice";
-
-        // In-memory кэш единичных карточек
         private static readonly ConcurrentDictionary<string, Invoice> _cardCache = new(StringComparer.OrdinalIgnoreCase);
 
         public ApiInvoicesRepository(RestClient restClient)
         {
-            _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
+            _restClient = restClient ?? throw new Exception("Http RestClient cannot be null.");
         }
-
-        // --- IRepositoryWithFacets (Выпадающие списки Group и Tags) ---
 
         public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)
         {
@@ -43,8 +38,6 @@ namespace Mermer.Ui.Pc.Services
             }
             return fallback;
         }
-
-        // --- IInvoicesRepository СРЕЗЫ ДАННЫХ (ПРЯМЫЕ И БЫСТРЫЕ ВЫЗОВЫ) ---
 
         public Task<IEnumerable<InvoiceInfo>> GetInfoAsync(DateTime from, DateTime till)
         {
@@ -181,21 +174,23 @@ namespace Mermer.Ui.Pc.Services
             }
         }
 
-        // --- БАЗОВЫЕ МЕТОДЫ КАРТОЧЕК ---
-
         public async Task<IEnumerable<Invoice>> GetAllAsync()
         {
             if (_cardCache.Count > 0)
                 return _cardCache.Values.ToList();
 
-            var local = LocalSqliteCache.GetAllDocuments<Invoice>(DocType);
-            if (local != null)
+            try
             {
-                foreach (var inv in local)
+                var list = await _restClient.GetAsync<List<Invoice>>("/api/invoices");
+                if (list != null)
                 {
-                    if (!string.IsNullOrEmpty(inv?.Id)) _cardCache[inv.Id] = inv;
+                    foreach (var inv in list)
+                    {
+                        if (!string.IsNullOrEmpty(inv?.Id)) _cardCache[inv.Id] = inv;
+                    }
                 }
             }
+            catch { }
 
             return _cardCache.Values.ToList();
         }
@@ -210,10 +205,9 @@ namespace Mermer.Ui.Pc.Services
             try
             {
                 var inv = await _restClient.GetAsync<Invoice>($"/api/invoices/{id}");
-                if (inv != null)
+                if (inv != null && !string.IsNullOrEmpty(inv.Id))
                 {
                     _cardCache[inv.Id] = inv;
-                    LocalSqliteCache.SaveDocument(DocType, inv.Id, inv, isSynced: true);
                 }
                 return inv;
             }
@@ -252,34 +246,36 @@ namespace Mermer.Ui.Pc.Services
             return result.Count();
         }
 
-        // --- CUD ОПЕРАЦИИ ---
-
         public async Task SaveAsync(Invoice entity)
         {
-            if (entity == null) return;
+            if (entity == null)
+            {
+                throw new Exception("Cannot save an empty Invoice entity.");
+            }
 
             bool isNew = string.IsNullOrEmpty(entity.Id) || entity.Id == Guid.Empty.ToString();
             if (isNew) entity.Id = Guid.NewGuid().ToString();
 
             _cardCache[entity.Id] = entity;
-            LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
 
-            // Мгновенно обновляем открытый список накладных
-            UiEventBus.NotifyDocumentModified<Invoice>(entity.Id);
-
-            _ = Task.Run(async () =>
+            try
             {
-                try
+                if (isNew)
                 {
-                    if (isNew) await _restClient.PostAsync("/api/invoices", entity);
-                    else await _restClient.PutAsync($"/api/invoices/{entity.Id}", entity);
-                    LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
-
-                    // Подтверждаем обновление после ответа сервера
-                    UiEventBus.NotifyDocumentModified<Invoice>(entity.Id);
+                    await _restClient.PostAsync("/api/invoices", entity);
                 }
-                catch { }
-            });
+                else
+                {
+                    await _restClient.PutAsync($"/api/invoices/{entity.Id}", entity);
+                }
+            }
+            catch (Exception ex)
+            {
+                var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+                throw new Exception(string.Format("Failed to save Invoice '{0}'. Details: {1}", entity.Id, detail), ex);
+            }
+
+            UiEventBus.NotifyDocumentModified<Invoice>(entity.Id);
         }
 
         public Task CreateAsync(Invoice entity) => SaveAsync(entity);
@@ -287,16 +283,24 @@ namespace Mermer.Ui.Pc.Services
 
         public async Task DeleteAsync(string id)
         {
-            if (string.IsNullOrEmpty(id)) return;
+            if (string.IsNullOrEmpty(id))
+            {
+                throw new Exception("Invoice identifier cannot be empty for delete operation.");
+            }
+
             _cardCache.TryRemove(id, out _);
 
-            // Мгновенно удаляем накладную из списка в UI
-            UiEventBus.NotifyDocumentModified<Invoice>(id);
-
-            _ = Task.Run(async () =>
+            try
             {
-                try { await _restClient.DeleteAsync($"/api/invoices/{id}"); } catch { }
-            });
+                await _restClient.DeleteAsync($"/api/invoices/{id}");
+            }
+            catch (Exception ex)
+            {
+                var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+                throw new Exception(string.Format("Failed to delete Invoice '{0}'. Details: {1}", id, detail), ex);
+            }
+
+            UiEventBus.NotifyDocumentModified<Invoice>(id);
         }
 
         private class CountResponse

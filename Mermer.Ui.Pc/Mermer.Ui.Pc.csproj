@@ -9,6 +9,7 @@
     <LangVersion>latest</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <ApplicationIcon>binyat_icon_003_d85_icon.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
@@ -210,8 +211,6 @@
     <PackageReference Include="AutoMapper" Version="8.1.1" />
     <PackageReference Include="Castle.Core" Version="4.4.1" />
     <PackageReference Include="CouchbaseNetClient" Version="2.7.27" />
-    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="8.0.11" />
-    <PackageReference Include="System.Data.SQLite.Core" Version="1.0.119" />
     <PackageReference Include="System.Management" Version="10.0.8" />
     <PackageReference Include="Autofac" Version="4.9.4" />
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="8.0.0" />

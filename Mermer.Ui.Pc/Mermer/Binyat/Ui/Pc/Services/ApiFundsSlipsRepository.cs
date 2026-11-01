@@ -13,14 +13,11 @@ namespace Mermer.Ui.Pc.Services;
 public class ApiFundsSlipsRepository : IRepositoryWithFacets<FundsSlip>, IRepository<FundsSlip>, IReadOnlyRepository<FundsSlip>
 {
     private readonly RestClient _restClient;
-    private const string DocType = "FundsSlip";
-
-    // In-memory кэш открытых карточек для доступа O(1)
     private static readonly ConcurrentDictionary<string, FundsSlip> _cardCache = new(StringComparer.OrdinalIgnoreCase);
 
     public ApiFundsSlipsRepository(RestClient restClient)
     {
-        _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
+        _restClient = restClient ?? throw new Exception("Http RestClient cannot be null.");
     }
 
     public async Task<FundsSlip> GetAsync(string id)
@@ -30,17 +27,12 @@ public class ApiFundsSlipsRepository : IRepositoryWithFacets<FundsSlip>, IReposi
         if (_cardCache.TryGetValue(id, out var cached))
             return cached;
 
-        await GetAllAsync();
-        if (_cardCache.TryGetValue(id, out cached))
-            return cached;
-
         try
         {
             var remote = await _restClient.GetAsync<FundsSlip>($"/api/finance/slips/{id}");
             if (remote != null)
             {
                 _cardCache[remote.Id] = remote;
-                LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                 return remote;
             }
         }
@@ -61,7 +53,6 @@ public class ApiFundsSlipsRepository : IRepositoryWithFacets<FundsSlip>, IReposi
         return result;
     }
 
-    // --- ПОЛУЧЕНИЕ СПИСКА (С ФИЛЬТРОМ ИЛИ ЗА ВСЁ ВРЕМЯ) ---
     public async Task<IEnumerable<FundsSlip>> GetAsync(params Expression<Func<FundsSlip, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
@@ -88,10 +79,7 @@ public class ApiFundsSlipsRepository : IRepositoryWithFacets<FundsSlip>, IReposi
                 return query.ToList();
             }
         }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[FundsSlips GetAsync Error]: {ex.Message}");
-        }
+        catch { }
 
         var all = await GetAllAsync();
         var fallbackQuery = all.AsQueryable();
@@ -103,7 +91,6 @@ public class ApiFundsSlipsRepository : IRepositoryWithFacets<FundsSlip>, IReposi
         return fallbackQuery.ToList();
     }
 
-    // --- ПОДСЧЕТ КОЛИЧЕСТВА ДЛЯ ПЛИТОК ДАТ ---
     public async Task<int> CountAsync(params Expression<Func<FundsSlip, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
@@ -121,10 +108,7 @@ public class ApiFundsSlipsRepository : IRepositoryWithFacets<FundsSlip>, IReposi
             var res = await _restClient.GetAsync<CountResponse>(url);
             if (res != null) return res.Count;
         }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[FundsSlips CountAsync Error]: {ex.Message}");
-        }
+        catch { }
 
         var items = await GetAsync(predicates);
         return items.Count();
@@ -135,14 +119,19 @@ public class ApiFundsSlipsRepository : IRepositoryWithFacets<FundsSlip>, IReposi
         if (_cardCache.Count > 0)
             return _cardCache.Values.ToList();
 
-        var local = LocalSqliteCache.GetAllDocuments<FundsSlip>(DocType);
-        if (local != null)
+        try
         {
-            foreach (var item in local)
+            var remote = await _restClient.GetAsync<List<FundsSlip>>("/api/finance/slips");
+            if (remote != null)
             {
-                if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+                foreach (var item in remote)
+                {
+                    if (!string.IsNullOrEmpty(item?.Id))
+                        _cardCache[item.Id] = item;
+                }
             }
         }
+        catch { }
 
         return _cardCache.Values.ToList();
     }
@@ -152,48 +141,52 @@ public class ApiFundsSlipsRepository : IRepositoryWithFacets<FundsSlip>, IReposi
 
     public async Task SaveAsync(FundsSlip model)
     {
-        if (model == null) return;
+        if (model == null)
+        {
+            throw new Exception("Cannot save an empty FundsSlip entity.");
+        }
 
         bool isNew = string.IsNullOrEmpty(model.Id) || model.Id == Guid.Empty.ToString();
         if (isNew) model.Id = Guid.NewGuid().ToString();
 
         _cardCache[model.Id] = model;
-        LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
 
-        // Мгновенное обновление ордеров кассы в UI
-        UiEventBus.NotifyDocumentModified<FundsSlip>(model.Id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
-                if (isNew)
-                    await _restClient.PostAsync("/api/finance/slips", model);
-                else
-                    await _restClient.PutAsync($"/api/finance/slips/{model.Id}", model);
+            if (isNew)
+                await _restClient.PostAsync("/api/finance/slips", model);
+            else
+                await _restClient.PutAsync($"/api/finance/slips/{model.Id}", model);
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to save FundsSlip '{0}'. Details: {1}", model.Id, detail), ex);
+        }
 
-                LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
-                UiEventBus.NotifyDocumentModified<FundsSlip>(model.Id);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[FUNDS SLIP SYNC ERROR]: {ex.Message}");
-            }
-        });
+        UiEventBus.NotifyDocumentModified<FundsSlip>(model.Id);
     }
 
     public async Task DeleteAsync(string id)
     {
-        if (string.IsNullOrEmpty(id)) return;
+        if (string.IsNullOrEmpty(id))
+        {
+            throw new Exception("FundsSlip identifier cannot be empty for delete operation.");
+        }
+
         _cardCache.TryRemove(id, out _);
 
-        // Мгновенное удаление из списка ордеров
-        UiEventBus.NotifyDocumentModified<FundsSlip>(id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try { await _restClient.DeleteAsync($"/api/finance/slips/{id}"); } catch { }
-        });
+            await _restClient.DeleteAsync($"/api/finance/slips/{id}");
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to delete FundsSlip '{0}'. Details: {1}", id, detail), ex);
+        }
+
+        UiEventBus.NotifyDocumentModified<FundsSlip>(id);
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)
@@ -218,7 +211,6 @@ public class ApiFundsSlipsRepository : IRepositoryWithFacets<FundsSlip>, IReposi
         return dict;
     }
 
-    // --- ПАРСЕР ДАТ ИЗ EXPRESSION-ДЕРЕВА MVVMCROSS ---
     private static (bool HasDates, DateTime From, DateTime Till) TryExtractDateRange(Expression<Func<FundsSlip, bool>>[] predicates)
     {
         if (predicates == null || predicates.Length == 0)

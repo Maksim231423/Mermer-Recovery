@@ -16,13 +16,11 @@ namespace Mermer.Ui.Pc.Services
         IRepositoryWithFacets<StockOrder>
     {
         private readonly RestClient _restClient;
-        private const string DocType = "StockOrder";
-
         private static readonly ConcurrentDictionary<string, StockOrder> _cardCache = new(StringComparer.OrdinalIgnoreCase);
 
         public ApiStockOrdersRepository(RestClient restClient)
         {
-            _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
+            _restClient = restClient ?? throw new Exception("Http RestClient cannot be null.");
         }
 
         public async Task<StockOrder> GetAsync(string id)
@@ -42,7 +40,6 @@ namespace Mermer.Ui.Pc.Services
                 if (remote != null)
                 {
                     _cardCache[remote.Id] = remote;
-                    LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                     return remote;
                 }
             }
@@ -63,7 +60,6 @@ namespace Mermer.Ui.Pc.Services
             return result;
         }
 
-        // --- ВЫБОРКА ПО ДАТАМ И ПРЕДИКАТАМ ---
         public async Task<IEnumerable<StockOrder>> GetAsync(params Expression<Func<StockOrder, bool>>[] predicates)
         {
             var (hasDates, from, till) = TryExtractDateRange(predicates);
@@ -83,7 +79,6 @@ namespace Mermer.Ui.Pc.Services
                             if (!string.IsNullOrEmpty(item?.Id))
                             {
                                 _cardCache[item.Id] = item;
-                                LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
                             }
                         }
 
@@ -124,7 +119,6 @@ namespace Mermer.Ui.Pc.Services
                 catch { }
             }
 
-            // Для фильтров списка (Open, Completed, Deleted, My Orders)
             var all = await GetAllAsync();
             var query = all.AsQueryable();
             if (predicates != null)
@@ -139,35 +133,24 @@ namespace Mermer.Ui.Pc.Services
 
         public async Task<IEnumerable<StockOrder>> GetAllAsync()
         {
-            if (_cardCache.IsEmpty)
-            {
-                try
-                {
-                    var remote = await _restClient.GetAsync<List<StockOrder>>("/api/warehousing/orders?limit=5000");
-                    if (remote != null && remote.Any())
-                    {
-                        foreach (var item in remote)
-                        {
-                            if (!string.IsNullOrEmpty(item?.Id))
-                            {
-                                _cardCache[item.Id] = item;
-                                LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
-                            }
-                        }
-                        return _cardCache.Values.ToList();
-                    }
-                }
-                catch { }
+            if (_cardCache.Count > 0)
+                return _cardCache.Values.ToList();
 
-                var local = LocalSqliteCache.GetAllDocuments<StockOrder>(DocType);
-                if (local != null)
+            try
+            {
+                var remote = await _restClient.GetAsync<List<StockOrder>>("/api/warehousing/orders?limit=5000");
+                if (remote != null && remote.Any())
                 {
-                    foreach (var item in local)
+                    foreach (var item in remote)
                     {
-                        if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+                        if (!string.IsNullOrEmpty(item?.Id))
+                        {
+                            _cardCache[item.Id] = item;
+                        }
                     }
                 }
             }
+            catch { }
 
             return _cardCache.Values.ToList();
         }
@@ -177,37 +160,48 @@ namespace Mermer.Ui.Pc.Services
 
         public async Task SaveAsync(StockOrder entity)
         {
-            if (entity == null) return;
+            if (entity == null)
+            {
+                throw new Exception("Cannot save an empty StockOrder entity.");
+            }
+
             if (string.IsNullOrEmpty(entity.Id)) entity.Id = Guid.NewGuid().ToString();
 
             _cardCache[entity.Id] = entity;
-            LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
+
+            try
+            {
+                await _restClient.PostAsync("/api/warehousing/orders", entity);
+            }
+            catch (Exception ex)
+            {
+                var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+                throw new Exception(string.Format("Failed to save StockOrder '{0}'. Details: {1}", entity.Id, detail), ex);
+            }
 
             UiEventBus.NotifyDocumentModified<StockOrder>(entity.Id);
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await _restClient.PostAsync("/api/warehousing/orders", entity);
-                    LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
-                    UiEventBus.NotifyDocumentModified<StockOrder>(entity.Id);
-                }
-                catch { }
-            });
         }
 
         public async Task DeleteAsync(string id)
         {
-            if (string.IsNullOrEmpty(id)) return;
+            if (string.IsNullOrEmpty(id))
+            {
+                throw new Exception("StockOrder identifier cannot be empty for delete operation.");
+            }
+
             _cardCache.TryRemove(id, out _);
 
-            UiEventBus.NotifyDocumentModified<StockOrder>(id);
-
-            _ = Task.Run(async () =>
+            try
             {
-                try { await _restClient.DeleteAsync($"/api/warehousing/orders/{id}"); } catch { }
-            });
+                await _restClient.DeleteAsync($"/api/warehousing/orders/{id}");
+            }
+            catch (Exception ex)
+            {
+                var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+                throw new Exception(string.Format("Failed to delete StockOrder '{0}'. Details: {1}", id, detail), ex);
+            }
+
+            UiEventBus.NotifyDocumentModified<StockOrder>(id);
         }
 
         public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)
@@ -303,29 +297,17 @@ namespace Mermer.Ui.Pc.Services
         IRepositoryWithFacets<AggregatedStockOrder>
     {
         private readonly RestClient _restClient;
-        private const string DocType = "AggregatedStockOrder";
-
         private static readonly ConcurrentDictionary<string, AggregatedStockOrder> _cardCache = new(StringComparer.OrdinalIgnoreCase);
 
         public ApiAggregatedStockOrdersRepository(RestClient restClient)
         {
-            _restClient = restClient;
+            _restClient = restClient ?? throw new Exception("Http RestClient cannot be null.");
         }
 
         public async Task<IEnumerable<AggregatedStockOrder>> GetAllAsync()
         {
             if (_cardCache.Count > 0)
                 return _cardCache.Values.ToList();
-
-            var local = LocalSqliteCache.GetAllDocuments<AggregatedStockOrder>(DocType);
-            if (local != null && local.Any())
-            {
-                foreach (var item in local)
-                {
-                    if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
-                }
-                return _cardCache.Values.ToList();
-            }
 
             try
             {
@@ -337,7 +319,6 @@ namespace Mermer.Ui.Pc.Services
                         if (!string.IsNullOrEmpty(item?.Id))
                         {
                             _cardCache[item.Id] = item;
-                            LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
                         }
                     }
                     return remote;
@@ -391,37 +372,48 @@ namespace Mermer.Ui.Pc.Services
 
         public async Task SaveAsync(AggregatedStockOrder entity)
         {
-            if (entity == null) return;
+            if (entity == null)
+            {
+                throw new Exception("Cannot save an empty AggregatedStockOrder entity.");
+            }
+
             if (string.IsNullOrEmpty(entity.Id)) entity.Id = Guid.NewGuid().ToString();
 
             _cardCache[entity.Id] = entity;
-            LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
+
+            try
+            {
+                await _restClient.PostAsync("/api/warehousing/aggregated-orders", entity);
+            }
+            catch (Exception ex)
+            {
+                var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+                throw new Exception(string.Format("Failed to save AggregatedStockOrder '{0}'. Details: {1}", entity.Id, detail), ex);
+            }
 
             UiEventBus.NotifyDocumentModified<AggregatedStockOrder>(entity.Id);
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await _restClient.PostAsync("/api/warehousing/aggregated-orders", entity);
-                    LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
-                    UiEventBus.NotifyDocumentModified<AggregatedStockOrder>(entity.Id);
-                }
-                catch { }
-            });
         }
 
         public async Task DeleteAsync(string id)
         {
-            if (string.IsNullOrEmpty(id)) return;
+            if (string.IsNullOrEmpty(id))
+            {
+                throw new Exception("AggregatedStockOrder identifier cannot be empty for delete operation.");
+            }
+
             _cardCache.TryRemove(id, out _);
 
-            UiEventBus.NotifyDocumentModified<AggregatedStockOrder>(id);
-
-            _ = Task.Run(async () =>
+            try
             {
-                try { await _restClient.DeleteAsync($"/api/warehousing/aggregated-orders/{id}"); } catch { }
-            });
+                await _restClient.DeleteAsync($"/api/warehousing/aggregated-orders/{id}");
+            }
+            catch (Exception ex)
+            {
+                var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+                throw new Exception(string.Format("Failed to delete AggregatedStockOrder '{0}'. Details: {1}", id, detail), ex);
+            }
+
+            UiEventBus.NotifyDocumentModified<AggregatedStockOrder>(id);
         }
 
         public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)

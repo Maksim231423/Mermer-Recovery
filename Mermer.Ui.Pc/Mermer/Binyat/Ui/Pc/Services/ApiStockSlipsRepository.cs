@@ -13,8 +13,6 @@ namespace Mermer.Ui.Pc.Services;
 public class ApiStockSlipsRepository : IRepository<StockSlip>, IReadOnlyRepository<StockSlip>, IRepositoryWithFacets<StockSlip>
 {
     private readonly RestClient _restClient;
-    private const string DocType = "StockSlip";
-
     private static readonly ConcurrentDictionary<string, StockSlip> _cardCache = new(StringComparer.OrdinalIgnoreCase);
 
     public ApiStockSlipsRepository(RestClient restClient)
@@ -35,16 +33,12 @@ public class ApiStockSlipsRepository : IRepository<StockSlip>, IReadOnlyReposito
             if (remote != null)
             {
                 _cardCache[remote.Id] = remote;
-                LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                 return remote;
             }
         }
         catch { }
 
-        var local = LocalSqliteCache.GetAllDocuments<StockSlip>(DocType)?
-            .FirstOrDefault(s => string.Equals(s.Id, id, StringComparison.OrdinalIgnoreCase));
-
-        return local;
+        return null;
     }
 
     public async Task<IEnumerable<StockSlip>> GetAsync(string[] ids)
@@ -59,7 +53,6 @@ public class ApiStockSlipsRepository : IRepository<StockSlip>, IReadOnlyReposito
         return result;
     }
 
-    // --- ВЫБОРКА ПО ДАТАМ И ДЛЯ ВСЕХ ЗАПИСЕЙ ---
     public async Task<IEnumerable<StockSlip>> GetAsync(params Expression<Func<StockSlip, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
@@ -144,14 +137,19 @@ public class ApiStockSlipsRepository : IRepository<StockSlip>, IReadOnlyReposito
         if (_cardCache.Count > 0)
             return _cardCache.Values.ToList();
 
-        var local = LocalSqliteCache.GetAllDocuments<StockSlip>(DocType);
-        if (local != null)
+        try
         {
-            foreach (var item in local)
+            var remote = await _restClient.GetAsync<List<StockSlip>>("/api/catalog/slips");
+            if (remote != null && remote.Any())
             {
-                if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+                foreach (var item in remote)
+                {
+                    if (!string.IsNullOrEmpty(item?.Id))
+                        _cardCache[item.Id] = item;
+                }
             }
         }
+        catch { }
 
         return _cardCache.Values.ToList();
     }
@@ -165,21 +163,18 @@ public class ApiStockSlipsRepository : IRepository<StockSlip>, IReadOnlyReposito
         if (string.IsNullOrEmpty(entity.Id)) entity.Id = Guid.NewGuid().ToString();
 
         _cardCache[entity.Id] = entity;
-        LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
 
-        // Мгновенно обновляем складские ордера (приход/расход/списание)
-        UiEventBus.NotifyDocumentModified<StockSlip>(entity.Id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
-                await _restClient.PostAsync("/api/catalog/slips", entity);
-                LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
-                UiEventBus.NotifyDocumentModified<StockSlip>(entity.Id);
-            }
-            catch { }
-        });
+            await _restClient.PostAsync("/api/catalog/slips", entity);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[STOCK SLIP SAVE ERROR]: {ex.Message}");
+            throw;
+        }
+
+        UiEventBus.NotifyDocumentModified<StockSlip>(entity.Id);
     }
 
     public async Task DeleteAsync(string id)
@@ -187,13 +182,17 @@ public class ApiStockSlipsRepository : IRepository<StockSlip>, IReadOnlyReposito
         if (string.IsNullOrEmpty(id)) return;
         _cardCache.TryRemove(id, out _);
 
-        // Мгновенно удаляем складской ордер из UI
-        UiEventBus.NotifyDocumentModified<StockSlip>(id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try { await _restClient.DeleteAsync($"/api/catalog/slips/{id}"); } catch { }
-        });
+            await _restClient.DeleteAsync($"/api/catalog/slips/{id}");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[STOCK SLIP DELETE ERROR]: {ex.Message}");
+            throw;
+        }
+
+        UiEventBus.NotifyDocumentModified<StockSlip>(id);
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)

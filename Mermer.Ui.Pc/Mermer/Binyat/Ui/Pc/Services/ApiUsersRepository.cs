@@ -13,7 +13,6 @@ namespace Mermer.Ui.Pc.Services;
 public class ApiUsersRepository : IRepository<User>
 {
     private readonly RestClient _restClient;
-    private const string DocType = "User";
 
     private static readonly ConcurrentDictionary<string, User> _cardCache = new(StringComparer.OrdinalIgnoreCase);
     private static List<User> _usersCache;
@@ -41,7 +40,6 @@ public class ApiUsersRepository : IRepository<User>
             if (remote != null)
             {
                 _cardCache[remote.Id] = remote;
-                LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                 return SanitizeUser(remote);
             }
         }
@@ -82,44 +80,25 @@ public class ApiUsersRepository : IRepository<User>
                 return _usersCache.Select(SanitizeUser).ToList();
         }
 
-        // 1. Читаем из локального SQLite
-        var local = LocalSqliteCache.GetAllDocuments<User>(DocType)?.ToList() ?? new List<User>();
-        if (local.Any())
+        try
         {
-            lock (_syncLock)
+            var remote = await _restClient.GetAsync<List<User>>("/api/users");
+            if (remote != null && remote.Any())
             {
-                _usersCache = local;
-                foreach (var u in local)
+                lock (_syncLock)
                 {
-                    if (!string.IsNullOrEmpty(u?.Id)) _cardCache[u.Id] = u;
-                }
-            }
-        }
-
-        // 2. Если локально пусто — запрашиваем API
-        if (_usersCache == null || _usersCache.Count == 0)
-        {
-            try
-            {
-                var remote = await _restClient.GetAsync<List<User>>("/api/users");
-                if (remote != null && remote.Any())
-                {
-                    lock (_syncLock)
+                    _usersCache = remote;
+                    foreach (var user in remote)
                     {
-                        _usersCache = remote;
-                        foreach (var user in remote)
+                        if (!string.IsNullOrEmpty(user?.Id))
                         {
-                            if (!string.IsNullOrEmpty(user?.Id))
-                            {
-                                _cardCache[user.Id] = user;
-                                LocalSqliteCache.SaveDocument(DocType, user.Id, user, isSynced: true);
-                            }
+                            _cardCache[user.Id] = user;
                         }
                     }
                 }
             }
-            catch { }
         }
+        catch { }
 
         return (_usersCache ?? new List<User>()).Select(SanitizeUser).ToList();
     }
@@ -148,27 +127,19 @@ public class ApiUsersRepository : IRepository<User>
             }
         }
 
-        LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
-
-        // Мгновенно обновляем реестр пользователей в интерфейсе
-        UiEventBus.NotifyDocumentModified<User>(model.Id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
-                var payload = CreatePayload(model);
-                if (isNew) await _restClient.PostAsync("/api/users", payload);
-                else await _restClient.PutAsync($"/api/users/{model.Id}", payload);
+            var payload = CreatePayload(model);
+            if (isNew) await _restClient.PostAsync("/api/users", payload);
+            else await _restClient.PutAsync($"/api/users/{model.Id}", payload);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[USER SAVE ERROR]: {ex.Message}");
+            throw;
+        }
 
-                LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
-                UiEventBus.NotifyDocumentModified<User>(model.Id);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[USER SYNC WARNING]: {ex.Message}");
-            }
-        });
+        UiEventBus.NotifyDocumentModified<User>(model.Id);
     }
 
     public async Task DeleteAsync(string id)
@@ -181,13 +152,17 @@ public class ApiUsersRepository : IRepository<User>
             _usersCache?.RemoveAll(x => x.Id == id);
         }
 
-        // Мгновенно удаляем пользователя из списка
-        UiEventBus.NotifyDocumentModified<User>(id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try { await _restClient.DeleteAsync($"/api/users/{id}"); } catch { }
-        });
+            await _restClient.DeleteAsync($"/api/users/{id}");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[USER DELETE ERROR]: {ex.Message}");
+            throw;
+        }
+
+        UiEventBus.NotifyDocumentModified<User>(id);
     }
 
     private static User SanitizeUser(User user)
@@ -197,7 +172,7 @@ public class ApiUsersRepository : IRepository<User>
         {
             Id = user.Id,
             Username = user.Username,
-            Password = null, // Сохраняем поведение Couchbase: пароль никогда не отдается в UI
+            Password = null,
             IsAdmin = user.IsAdmin,
             IsDisabled = user.IsDisabled,
             Description = user.Description,

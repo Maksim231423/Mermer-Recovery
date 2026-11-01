@@ -13,13 +13,11 @@ namespace Mermer.Ui.Pc.Services;
 public class ApiPartnerTransfersRepository : IRepositoryWithFacets<PartnerTransfer>, IRepository<PartnerTransfer>, IReadOnlyRepository<PartnerTransfer>
 {
     private readonly RestClient _restClient;
-    private const string DocType = "PartnerTransfer";
-
     private static readonly ConcurrentDictionary<string, PartnerTransfer> _cardCache = new(StringComparer.OrdinalIgnoreCase);
 
     public ApiPartnerTransfersRepository(RestClient restClient)
     {
-        _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
+        _restClient = restClient ?? throw new Exception("Http RestClient cannot be null.");
     }
 
     public async Task<PartnerTransfer> GetAsync(string id)
@@ -39,7 +37,6 @@ public class ApiPartnerTransfersRepository : IRepositoryWithFacets<PartnerTransf
             if (remote != null)
             {
                 _cardCache[remote.Id] = remote;
-                LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                 return remote;
             }
         }
@@ -60,33 +57,44 @@ public class ApiPartnerTransfersRepository : IRepositoryWithFacets<PartnerTransf
         return result;
     }
 
-    // --- БЫСТРАЯ ВЫБОРКА ПО ДАТАМ (ПРЯМОЙ ЗАПРОС СРЕЗА) ---
     public async Task<IEnumerable<PartnerTransfer>> GetAsync(params Expression<Func<PartnerTransfer, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
+        bool isConflictedFilter = HasConflictedPredicate(predicates);
 
-        if (hasDates)
+        try
         {
-            try
+            string url = "/api/partners/transfers";
+            var queryParams = new List<string>();
+
+            if (hasDates)
             {
                 var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
                 var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-
-                var remoteSlice = await _restClient.GetAsync<List<PartnerTransfer>>($"/api/partners/transfers?from={fromStr}&till={tillStr}&limit=5000");
-                if (remoteSlice != null)
-                {
-                    var query = remoteSlice.AsQueryable();
-                    if (predicates != null)
-                    {
-                        foreach (var p in predicates.Where(x => x != null)) query = query.Where(p);
-                    }
-                    return query.ToList();
-                }
+                queryParams.Add($"from={fromStr}&till={tillStr}");
             }
-            catch { }
-        }
 
-        // Для фильтра All Time запрашиваем список через GetAllAsync (который гарантированно подгрузит данные с бэкенда)
+            if (isConflictedFilter)
+            {
+                queryParams.Add("conflicted=true");
+            }
+
+            queryParams.Add("limit=5000");
+            url += "?" + string.Join("&", queryParams);
+
+            var remoteSlice = await _restClient.GetAsync<List<PartnerTransfer>>(url);
+            if (remoteSlice != null)
+            {
+                var query = remoteSlice.AsQueryable();
+                if (predicates != null)
+                {
+                    foreach (var p in predicates.Where(x => x != null)) query = query.Where(p);
+                }
+                return query.ToList();
+            }
+        }
+        catch { }
+
         var all = await GetAllAsync();
         var fallbackQuery = all.AsQueryable();
         if (predicates != null)
@@ -99,15 +107,28 @@ public class ApiPartnerTransfersRepository : IRepositoryWithFacets<PartnerTransf
     public async Task<int> CountAsync(params Expression<Func<PartnerTransfer, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
+        bool isConflictedFilter = HasConflictedPredicate(predicates);
 
         try
         {
             string url = "/api/partners/transfers/count";
+            var queryParams = new List<string>();
+
             if (hasDates)
             {
                 var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
                 var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                url += $"?from={fromStr}&till={tillStr}";
+                queryParams.Add($"from={fromStr}&till={tillStr}");
+            }
+
+            if (isConflictedFilter)
+            {
+                queryParams.Add("conflicted=true");
+            }
+
+            if (queryParams.Any())
+            {
+                url += "?" + string.Join("&", queryParams);
             }
 
             var res = await _restClient.GetAsync<CountResponse>(url);
@@ -119,23 +140,25 @@ public class ApiPartnerTransfersRepository : IRepositoryWithFacets<PartnerTransf
         return items.Count();
     }
 
+    private static bool HasConflictedPredicate(Expression<Func<PartnerTransfer, bool>>[] predicates)
+    {
+        if (predicates == null || predicates.Length == 0) return false;
+
+        foreach (var pred in predicates.Where(p => p != null))
+        {
+            var text = pred.ToString();
+            if (text.IndexOf("IsConflicted", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        }
+
+        return false;
+    }
+
     public async Task<IEnumerable<PartnerTransfer>> GetAllAsync()
     {
         if (_cardCache.Count > 0)
             return _cardCache.Values.ToList();
 
-        // 1. Пытаемся взять из локального кэша
-        var local = LocalSqliteCache.GetAllDocuments<PartnerTransfer>(DocType);
-        if (local != null && local.Any())
-        {
-            foreach (var item in local)
-            {
-                if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
-            }
-            return _cardCache.Values.ToList();
-        }
-
-        // 2. Если в кэше пусто — подгружаем с сервера
         try
         {
             var remote = await _restClient.GetAsync<List<PartnerTransfer>>("/api/partners/transfers?limit=5000");
@@ -146,7 +169,6 @@ public class ApiPartnerTransfersRepository : IRepositoryWithFacets<PartnerTransf
                     if (!string.IsNullOrEmpty(item?.Id))
                     {
                         _cardCache[item.Id] = item;
-                        LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
                     }
                 }
             }
@@ -161,42 +183,51 @@ public class ApiPartnerTransfersRepository : IRepositoryWithFacets<PartnerTransf
 
     public async Task SaveAsync(PartnerTransfer model)
     {
-        if (model == null) return;
-        if (string.IsNullOrEmpty(model.Id)) model.Id = Guid.NewGuid().ToString();
+        if (model == null)
+        {
+            throw new Exception("Cannot save an empty PartnerTransfer entity.");
+        }
+
+        bool isNew = string.IsNullOrEmpty(model.Id) || model.Id == Guid.Empty.ToString();
+        if (isNew) model.Id = Guid.NewGuid().ToString();
 
         _cardCache[model.Id] = model;
-        LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
 
-        // Мгновенно обновляем список взаиморасчетов/переводов контрагентов
-        UiEventBus.NotifyDocumentModified<PartnerTransfer>(model.Id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
-                await _restClient.PostAsync("/api/partners/transfers", model);
-                LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
-                UiEventBus.NotifyDocumentModified<PartnerTransfer>(model.Id);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[PARTNER TRANSFER SYNC ERROR]: {ex.Message}");
-            }
-        });
+            if (isNew) await _restClient.PostAsync("/api/partners/transfers", model);
+            else await _restClient.PutAsync($"/api/partners/transfers/{model.Id}", model);
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to save PartnerTransfer '{0}'. Details: {1}", model.Id, detail), ex);
+        }
+
+        _cardCache.Clear();
+        UiEventBus.NotifyDocumentModified<PartnerTransfer>(model.Id);
     }
 
     public async Task DeleteAsync(string id)
     {
-        if (string.IsNullOrEmpty(id)) return;
+        if (string.IsNullOrEmpty(id))
+        {
+            throw new Exception("PartnerTransfer identifier cannot be empty for delete operation.");
+        }
+
         _cardCache.TryRemove(id, out _);
 
-        // Мгновенно удаляем из открытого списка в UI
-        UiEventBus.NotifyDocumentModified<PartnerTransfer>(id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try { await _restClient.DeleteAsync($"/api/partners/transfers/{id}"); } catch { }
-        });
+            await _restClient.DeleteAsync($"/api/partners/transfers/{id}");
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to delete PartnerTransfer '{0}'. Details: {1}", id, detail), ex);
+        }
+
+        UiEventBus.NotifyDocumentModified<PartnerTransfer>(id);
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)
@@ -221,7 +252,6 @@ public class ApiPartnerTransfersRepository : IRepositoryWithFacets<PartnerTransf
         return dict;
     }
 
-    // --- ПАРСЕР ДАТ ИЗ EXPRESSION-ДЕРЕВА MVVMCROSS ---
     private static (bool HasDates, DateTime From, DateTime Till) TryExtractDateRange(Expression<Func<PartnerTransfer, bool>>[] predicates)
     {
         if (predicates == null || predicates.Length == 0)

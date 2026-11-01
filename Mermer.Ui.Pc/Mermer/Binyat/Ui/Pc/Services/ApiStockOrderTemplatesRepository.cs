@@ -16,7 +16,6 @@ namespace Mermer.Ui.Pc.Services
         IRepositoryWithFacets<StockOrderTemplate>
     {
         private readonly RestClient _restClient;
-        private const string DocType = "StockOrderTemplate";
 
         private static readonly ConcurrentDictionary<string, StockOrderTemplate> _cardCache = new(StringComparer.OrdinalIgnoreCase);
         private static List<StockOrderTemplate> _memoryCache;
@@ -35,44 +34,25 @@ namespace Mermer.Ui.Pc.Services
                     return _memoryCache;
             }
 
-            // 1. Быстрое чтение из локального SQLite
-            var local = LocalSqliteCache.GetAllDocuments<StockOrderTemplate>(DocType)?.ToList() ?? new List<StockOrderTemplate>();
-            if (local.Any())
+            try
             {
-                lock (_syncLock)
+                var remote = await _restClient.GetAsync<List<StockOrderTemplate>>("/api/warehousing/order-templates");
+                if (remote != null && remote.Any())
                 {
-                    _memoryCache = local;
-                    foreach (var item in local)
+                    lock (_syncLock)
                     {
-                        if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
-                    }
-                }
-            }
-
-            // 2. Если в локальной БД пусто — подгружаем с бэкенда
-            if (_memoryCache == null || _memoryCache.Count == 0)
-            {
-                try
-                {
-                    var remote = await _restClient.GetAsync<List<StockOrderTemplate>>("/api/warehousing/order-templates");
-                    if (remote != null && remote.Any())
-                    {
-                        lock (_syncLock)
+                        _memoryCache = remote;
+                        foreach (var item in remote)
                         {
-                            _memoryCache = remote;
-                            foreach (var item in remote)
+                            if (!string.IsNullOrEmpty(item?.Id))
                             {
-                                if (!string.IsNullOrEmpty(item?.Id))
-                                {
-                                    _cardCache[item.Id] = item;
-                                    LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
-                                }
+                                _cardCache[item.Id] = item;
                             }
                         }
                     }
                 }
-                catch { }
             }
+            catch { }
 
             return _memoryCache ?? Enumerable.Empty<StockOrderTemplate>();
         }
@@ -134,21 +114,17 @@ namespace Mermer.Ui.Pc.Services
                 }
             }
 
-            LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
-
-            // Мгновенно обновляем шаблоны заказов в UI
-            UiEventBus.NotifyDocumentModified<StockOrderTemplate>(entity.Id);
-
-            _ = Task.Run(async () =>
+            try
             {
-                try
-                {
-                    await _restClient.PostAsync("/api/warehousing/order-templates", entity);
-                    LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
-                    UiEventBus.NotifyDocumentModified<StockOrderTemplate>(entity.Id);
-                }
-                catch { }
-            });
+                await _restClient.PostAsync("/api/warehousing/order-templates", entity);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[STOCK ORDER TEMPLATE SAVE ERROR]: {ex.Message}");
+                throw;
+            }
+
+            UiEventBus.NotifyDocumentModified<StockOrderTemplate>(entity.Id);
         }
 
         public async Task DeleteAsync(string id)
@@ -161,13 +137,17 @@ namespace Mermer.Ui.Pc.Services
                 _memoryCache?.RemoveAll(x => x.Id == id);
             }
 
-            // Мгновенно удаляем шаблон заказа из UI
-            UiEventBus.NotifyDocumentModified<StockOrderTemplate>(id);
-
-            _ = Task.Run(async () =>
+            try
             {
-                try { await _restClient.DeleteAsync($"/api/warehousing/order-templates/{id}"); } catch { }
-            });
+                await _restClient.DeleteAsync($"/api/warehousing/order-templates/{id}");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[STOCK ORDER TEMPLATE DELETE ERROR]: {ex.Message}");
+                throw;
+            }
+
+            UiEventBus.NotifyDocumentModified<StockOrderTemplate>(id);
         }
 
         public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)

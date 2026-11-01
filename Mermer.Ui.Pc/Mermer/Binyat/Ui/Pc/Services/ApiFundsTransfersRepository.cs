@@ -13,14 +13,11 @@ namespace Mermer.Ui.Pc.Services;
 public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>, IRepository<FundsTransfer>, IReadOnlyRepository<FundsTransfer>
 {
     private readonly RestClient _restClient;
-    private const string DocType = "FundsTransfer";
-
-    // In-memory кэш открытых карточек для доступа O(1)
     private static readonly ConcurrentDictionary<string, FundsTransfer> _cardCache = new(StringComparer.OrdinalIgnoreCase);
 
     public ApiFundsTransfersRepository(RestClient restClient)
     {
-        _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
+        _restClient = restClient ?? throw new Exception("Http RestClient cannot be null.");
     }
 
     public async Task<FundsTransfer> GetAsync(string id)
@@ -30,17 +27,12 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
         if (_cardCache.TryGetValue(id, out var cached))
             return cached;
 
-        await GetAllAsync();
-        if (_cardCache.TryGetValue(id, out cached))
-            return cached;
-
         try
         {
             var remote = await _restClient.GetAsync<FundsTransfer>($"/api/finance/transfers/{id}");
             if (remote != null)
             {
                 _cardCache[remote.Id] = remote;
-                LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                 return remote;
             }
         }
@@ -61,7 +53,6 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
         return result;
     }
 
-    // --- ИСПРАВЛЕННАЯ ФИЛЬТРАЦИЯ С УЧЕТОМ КОНФЛИКТОВ ---
     public async Task<IEnumerable<FundsTransfer>> GetAsync(params Expression<Func<FundsTransfer, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
@@ -100,7 +91,6 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
         }
         catch { }
 
-        // Fallback (если сервер недоступен)
         var all = await GetAllAsync();
         var fallbackQuery = all.AsQueryable();
         if (predicates != null)
@@ -165,18 +155,6 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
         if (_cardCache.Count > 0)
             return _cardCache.Values.ToList();
 
-        // 1. Читаем из локального SQLite
-        var local = LocalSqliteCache.GetAllDocuments<FundsTransfer>(DocType);
-        if (local != null && local.Any())
-        {
-            foreach (var item in local)
-            {
-                if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
-            }
-            return _cardCache.Values.ToList();
-        }
-
-        // 2. Если кэш пуст — подгружаем с сервера
         try
         {
             var remote = await _restClient.GetAsync<List<FundsTransfer>>("/api/finance/transfers?limit=5000");
@@ -187,7 +165,6 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
                     if (!string.IsNullOrEmpty(item?.Id))
                     {
                         _cardCache[item.Id] = item;
-                        LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
                     }
                 }
             }
@@ -202,51 +179,52 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
 
     public async Task SaveAsync(FundsTransfer model)
     {
-        if (model == null) return;
+        if (model == null)
+        {
+            throw new Exception("Cannot save an empty FundsTransfer entity.");
+        }
 
         bool isNew = string.IsNullOrEmpty(model.Id) || model.Id == Guid.Empty.ToString();
         if (isNew) model.Id = Guid.NewGuid().ToString();
 
         _cardCache[model.Id] = model;
-        LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
 
-        // Инвалидируем кэш, чтобы при следующем запросе список подгрузился заново с сервера
-        _cardCache.Clear();
+        try
+        {
+            if (isNew)
+                await _restClient.PostAsync("/api/finance/transfers", model);
+            else
+                await _restClient.PutAsync($"/api/finance/transfers/{model.Id}", model);
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to save FundsTransfer '{0}'. Details: {1}", model.Id, detail), ex);
+        }
 
         UiEventBus.NotifyDocumentModified<FundsTransfer>(model.Id);
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                if (isNew)
-                    await _restClient.PostAsync("/api/finance/transfers", model);
-                else
-                    await _restClient.PutAsync($"/api/finance/transfers/{model.Id}", model);
-
-                LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
-                _cardCache.Clear(); // Очищаем кэш повторно после успешного ответа сервера
-                UiEventBus.NotifyDocumentModified<FundsTransfer>(model.Id);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[FUNDS TRANSFER SYNC ERROR]: {ex.Message}");
-            }
-        });
     }
 
     public async Task DeleteAsync(string id)
     {
-        if (string.IsNullOrEmpty(id)) return;
+        if (string.IsNullOrEmpty(id))
+        {
+            throw new Exception("FundsTransfer identifier cannot be empty for delete operation.");
+        }
+
         _cardCache.TryRemove(id, out _);
 
-        // Мгновенное удаление перемещения средств из списка
-        UiEventBus.NotifyDocumentModified<FundsTransfer>(id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try { await _restClient.DeleteAsync($"/api/finance/transfers/{id}"); } catch { }
-        });
+            await _restClient.DeleteAsync($"/api/finance/transfers/{id}");
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to delete FundsTransfer '{0}'. Details: {1}", id, detail), ex);
+        }
+
+        UiEventBus.NotifyDocumentModified<FundsTransfer>(id);
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)
@@ -271,7 +249,6 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
         return dict;
     }
 
-    // --- ПАРСЕР ДАТ ИЗ EXPRESSION-ДЕРЕВА MVVMCROSS ---
     private static (bool HasDates, DateTime From, DateTime Till) TryExtractDateRange(Expression<Func<FundsTransfer, bool>>[] predicates)
     {
         if (predicates == null || predicates.Length == 0)

@@ -1,23 +1,12 @@
-﻿namespace Mermer.Api.DTOs;
+﻿using System;
+using System.Collections.Generic;
 
-/// <summary>
-/// Пакет данных, отправляемый офлайн-клиентом на сервер Mermer.Api
-/// </summary>
+namespace Mermer.Api.DTOs;
+
 public class SyncPushRequestDto
 {
-    /// <summary>
-    /// Уникальный идентификатор устройства/клиента (например, GUID терминала)
-    /// </summary>
     public string ClientId { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Новые или измененные накладные (Invoices)
-    /// </summary>
     public List<InvoiceSyncDto> Invoices { get; set; } = new();
-
-    /// <summary>
-    /// Новые или измененные складские ордера/акты (StockSlips)
-    /// </summary>
     public List<StockSlipSyncDto> StockSlips { get; set; } = new();
 }
 
@@ -25,12 +14,15 @@ public class InvoiceSyncDto
 {
     public Guid Id { get; set; }
     public string InvoiceNumber { get; set; } = string.Empty;
-    public string InvoiceType { get; set; } = string.Empty; // e.g., "Sale", "Purchase"
+    public string InvoiceType { get; set; } = string.Empty;
     public DateTime Date { get; set; }
     public Guid? ClientId { get; set; }
+    public Guid? WarehouseId { get; set; }
     public decimal TotalAmount { get; set; }
     public string? Description { get; set; }
     public List<InvoiceLineSyncDto> Lines { get; set; } = new();
+    public List<InvoicePaymentSyncDto> Payments { get; set; } = new();
+    public List<InvoiceDiscountSyncDto> Discounts { get; set; } = new();
 }
 
 public class InvoiceLineSyncDto
@@ -42,11 +34,29 @@ public class InvoiceLineSyncDto
     public decimal TotalPrice { get; set; }
 }
 
+public class InvoicePaymentSyncDto
+{
+    public Guid Id { get; set; }
+    public string PaymentType { get; set; } = "Payment";
+    public decimal Amount { get; set; }
+    public Guid? CurrencyId { get; set; }
+    public int SortOrder { get; set; }
+}
+
+public class InvoiceDiscountSyncDto
+{
+    public Guid Id { get; set; }
+    public string DiscountType { get; set; } = "Flat";
+    public decimal Amount { get; set; }
+    public string? Description { get; set; }
+    public int SortOrder { get; set; }
+}
+
 public class StockSlipSyncDto
 {
     public Guid Id { get; set; }
     public string SlipNumber { get; set; } = string.Empty;
-    public string SlipType { get; set; } = string.Empty; // e.g., "Incoming", "Outgoing"
+    public string SlipType { get; set; } = string.Empty;
     public DateTime Date { get; set; }
     public Guid StockId { get; set; }
     public string? Description { get; set; }
@@ -60,9 +70,6 @@ public class StockSlipLineSyncDto
     public decimal Quantity { get; set; }
 }
 
-/// <summary>
-/// Результат обработки синхронизации сервером
-/// </summary>
 public class SyncPushResponseDto
 {
     public bool Success { get; set; }

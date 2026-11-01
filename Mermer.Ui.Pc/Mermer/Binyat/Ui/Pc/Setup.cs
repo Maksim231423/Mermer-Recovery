@@ -40,7 +40,7 @@ public class Setup : MvxWpfSetup
     public Setup(Dispatcher dispatcher, IMvxWpfViewPresenter presenter)
         : base(dispatcher, presenter)
     {
-        _configurator = new RegistryConfigurator("Software\\MermerCS\\Binyat");
+        _configurator = new RegistryConfigurator("Software\\MermerCS\\Binyat_Postgres");
         Configuration = new ConfigurationBuilder()
             .SetBasePath(Directory.GetCurrentDirectory())
             .AddJsonFile("appsettings.json", true, true)
@@ -96,7 +96,11 @@ public class Setup : MvxWpfSetup
             var configurator = c.Resolve<IConfigurator>();
             var connSettings = configurator.GetConfig<ConnectionSettings>();
 
-            string serviceUrl = Configuration["ApiUrl"] ?? connSettings?.ServiceAddress ?? "http://127.0.0.1:5050";
+            // Приоритет: 1. То, что настроил пользователь в окне (реестр) -> 2. appsettings.json -> 3. Дефолт
+            string serviceUrl = connSettings?.ServiceAddress
+                                ?? Configuration["ApiUrl"]
+                                ?? "http://127.0.0.1:5050";
+
             if (serviceUrl.Contains("localhost"))
             {
                 serviceUrl = serviceUrl.Replace("localhost", "127.0.0.1");
@@ -113,7 +117,6 @@ public class Setup : MvxWpfSetup
 
         builder.RegisterType<Mermer.Http.RestClient>().AsSelf().SingleInstance();
 
-        LocalSqliteCache.InitializeDatabase();
 
         builder.RegisterType<DummyDocumentChangeListener>()
                .As<Mermer.Common.Services.IDocumentChangeListener>()
@@ -351,22 +354,14 @@ public class SafeAuthorizationService : Mermer.Authorization.Services.IAuthoriza
 
         if (session.Roles != null)
         {
-            // 1. Точное совпадение ключа действия в словаре прав роли
             if (session.Roles.TryGetValue(action, out int val))
             {
-                // Если в роли стоит 0 — значит раздел полностью ЗАПРЕЩЕН
                 if (val == 0) return true;
-
-                // Если требуется конкретный уровень доступа (например Create = 2, Delete = 4),
-                // а у пользователя только Read = 1
-                if (accessLevel > 0 && (val & accessLevel) == 0)
-                    return true;
+                if (accessLevel > 0 && (val & accessLevel) == 0) return true;
             }
 
-            // 2. Если проверяется доступ к складам (Warehouses / Warehousing / Stock)
             if (action.IndexOf("Warehouse", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                // Ищем в словаре прав роли ключ, отвечающий за склады
                 var whKey = session.Roles.Keys.FirstOrDefault(k => k.IndexOf("Warehouse", StringComparison.OrdinalIgnoreCase) >= 0);
                 if (whKey != null && session.Roles.TryGetValue(whKey, out int whVal))
                 {
@@ -376,7 +371,6 @@ public class SafeAuthorizationService : Mermer.Authorization.Services.IAuthoriza
             }
         }
 
-        // По умолчанию для всех не запрещенных действий — доступ разрешен
         return false;
     }
 
@@ -387,8 +381,7 @@ public class SafeAuthorizationService : Mermer.Authorization.Services.IAuthoriza
 
         if (IsDenied(action, accessLevel))
         {
-            // Бросаем исключение ТОЛЬКО для реально запрещенных разделов!
-            throw new Mermer.Common.Exceptions.AuthorizationFailedException($"Доступ к разделу '{action}' запрещен настройками роли.");
+            throw new Mermer.Common.Exceptions.AuthorizationFailedException($"Access to '{action}' is denied by role permissions.");
         }
     }
 
@@ -407,9 +400,7 @@ public class SafeAuthorizationService : Mermer.Authorization.Services.IAuthoriza
             .Where(a => !IsDenied(a, accessLevel));
     }
 
-    public void AuthorizeAccountAccess(Mermer.Authorization.Enums.AccountAccessLevel accessLevel, params string[] accountIds)
-    {
-    }
+    public void AuthorizeAccountAccess(Mermer.Authorization.Enums.AccountAccessLevel accessLevel, params string[] accountIds) { }
 
     public IEnumerable<string> GetAccessableAccounts(Mermer.Authorization.Enums.AccountAccessLevel accessLevel)
     {
@@ -430,7 +421,6 @@ public class SafeAuthorizerInterceptor : IInterceptor
     {
         var session = _loginService.Session;
 
-        // Если метод CanCreate, CanUpdate или CanRead
         if (invocation.Method.Name.StartsWith("Can") && invocation.Method.ReturnType == typeof(bool))
         {
             if (session != null && session.IsAdmin)
@@ -439,14 +429,13 @@ public class SafeAuthorizerInterceptor : IInterceptor
                 return;
             }
 
-            // Проверяем имя сущности/модуля (например Warehouses)
             string entityName = invocation.TargetType?.GenericTypeArguments?.FirstOrDefault()?.Name ?? string.Empty;
             if (!string.IsNullOrEmpty(entityName) && session?.Roles != null)
             {
                 var key = session.Roles.Keys.FirstOrDefault(k => k.IndexOf(entityName, StringComparison.OrdinalIgnoreCase) >= 0);
                 if (key != null && session.Roles[key] == 0)
                 {
-                    invocation.ReturnValue = false; // Тихо отключаем кнопку без throw
+                    invocation.ReturnValue = false;
                     return;
                 }
             }
@@ -455,7 +444,6 @@ public class SafeAuthorizerInterceptor : IInterceptor
             return;
         }
 
-        // Если метод Authorize... при открытии запрещенного окна — выбрасываем исключение
         if (invocation.Method.Name.StartsWith("Authorize"))
         {
             if (session != null && !session.IsAdmin && session.Roles != null)
@@ -466,7 +454,7 @@ public class SafeAuthorizerInterceptor : IInterceptor
                     var key = session.Roles.Keys.FirstOrDefault(k => k.IndexOf(entityName, StringComparison.OrdinalIgnoreCase) >= 0);
                     if (key != null && session.Roles[key] == 0)
                     {
-                        throw new Mermer.Common.Exceptions.AuthorizationFailedException($"Доступ к разделу {entityName} запрещен.");
+                        throw new Mermer.Common.Exceptions.AuthorizationFailedException($"Access to {entityName} is restricted.");
                     }
                 }
             }

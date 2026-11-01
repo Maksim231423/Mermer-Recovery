@@ -17,10 +17,19 @@ public static class SyncEndpoints
 
         // Эндпоинт PUSH
         group.MapPost("/push", async (
-            [FromBody] SyncPushRequestDto request,
+            [FromBody] SyncPushRequestDto? request,
             [FromServices] ISyncService syncService,
             CancellationToken cancellationToken) =>
         {
+            if (request == null)
+            {
+                return Results.BadRequest(new SyncPushResponseDto
+                {
+                    Success = false,
+                    Errors = new List<string> { "Request body cannot be null or empty." }
+                });
+            }
+
             var response = await syncService.ProcessPushAsync(request, cancellationToken);
 
             if (!response.Success)
@@ -36,10 +45,11 @@ public static class SyncEndpoints
 
         // Эндпоинт PULL
         group.MapGet("/pull", async (
+            [FromQuery] string? clientId,
             [FromServices] ISyncService syncService,
             CancellationToken cancellationToken) =>
         {
-            var response = await syncService.ProcessPullAsync(cancellationToken);
+            var response = await syncService.ProcessPullAsync(clientId, cancellationToken);
             return Results.Ok(response);
         })
         .WithName("PullSyncData")

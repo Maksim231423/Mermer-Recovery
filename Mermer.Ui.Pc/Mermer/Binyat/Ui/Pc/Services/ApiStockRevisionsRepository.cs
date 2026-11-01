@@ -19,8 +19,6 @@ namespace Mermer.Ui.Pc.Services
         IRepositoryWithFacets<StockRevision>
     {
         private readonly RestClient _restClient;
-        private const string DocType = "StockRevision";
-
         private static readonly ConcurrentDictionary<string, StockRevision> _cardCache = new(StringComparer.OrdinalIgnoreCase);
 
         public ApiStockRevisionsRepository(RestClient restClient)
@@ -45,7 +43,6 @@ namespace Mermer.Ui.Pc.Services
                 if (remote != null)
                 {
                     _cardCache[remote.Id] = remote;
-                    LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                     return remote;
                 }
             }
@@ -66,7 +63,6 @@ namespace Mermer.Ui.Pc.Services
             return result;
         }
 
-        // --- ВЫБОРКА ПО ДАТАМ И ПРЕДИКАТАМ ---
         public async Task<IEnumerable<StockRevision>> GetAsync(params Expression<Func<StockRevision, bool>>[] predicates)
         {
             var (hasDates, from, till) = TryExtractDateRange(predicates);
@@ -86,7 +82,6 @@ namespace Mermer.Ui.Pc.Services
                             if (!string.IsNullOrEmpty(item?.Id))
                             {
                                 _cardCache[item.Id] = item;
-                                LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
                             }
                         }
 
@@ -127,7 +122,6 @@ namespace Mermer.Ui.Pc.Services
                 catch { }
             }
 
-            // Для фильтров по статусам (Active, Completed, Deleted, All Records)
             var all = await GetAllAsync();
             var query = all.AsQueryable();
             if (predicates != null)
@@ -142,35 +136,24 @@ namespace Mermer.Ui.Pc.Services
 
         public async Task<IEnumerable<StockRevision>> GetAllAsync()
         {
-            if (_cardCache.IsEmpty)
-            {
-                try
-                {
-                    var remote = await _restClient.GetAsync<List<StockRevision>>("/api/warehousing/revisions?limit=5000");
-                    if (remote != null && remote.Any())
-                    {
-                        foreach (var item in remote)
-                        {
-                            if (!string.IsNullOrEmpty(item?.Id))
-                            {
-                                _cardCache[item.Id] = item;
-                                LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
-                            }
-                        }
-                        return _cardCache.Values.ToList();
-                    }
-                }
-                catch { }
+            if (_cardCache.Count > 0)
+                return _cardCache.Values.ToList();
 
-                var local = LocalSqliteCache.GetAllDocuments<StockRevision>(DocType);
-                if (local != null)
+            try
+            {
+                var remote = await _restClient.GetAsync<List<StockRevision>>("/api/warehousing/revisions?limit=5000");
+                if (remote != null && remote.Any())
                 {
-                    foreach (var item in local)
+                    foreach (var item in remote)
                     {
-                        if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+                        if (!string.IsNullOrEmpty(item?.Id))
+                        {
+                            _cardCache[item.Id] = item;
+                        }
                     }
                 }
             }
+            catch { }
 
             return _cardCache.Values.ToList();
         }
@@ -184,20 +167,18 @@ namespace Mermer.Ui.Pc.Services
             if (string.IsNullOrEmpty(entity.Id)) entity.Id = Guid.NewGuid().ToString();
 
             _cardCache[entity.Id] = entity;
-            LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
+
+            try
+            {
+                await _restClient.PostAsync("/api/warehousing/revisions", entity);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[STOCK REVISION SAVE ERROR]: {ex.Message}");
+                throw;
+            }
 
             UiEventBus.NotifyDocumentModified<StockRevision>(entity.Id);
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await _restClient.PostAsync("/api/warehousing/revisions", entity);
-                    LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
-                    UiEventBus.NotifyDocumentModified<StockRevision>(entity.Id);
-                }
-                catch { }
-            });
         }
 
         public async Task DeleteAsync(string id)
@@ -205,12 +186,17 @@ namespace Mermer.Ui.Pc.Services
             if (string.IsNullOrEmpty(id)) return;
             _cardCache.TryRemove(id, out _);
 
-            UiEventBus.NotifyDocumentModified<StockRevision>(id);
-
-            _ = Task.Run(async () =>
+            try
             {
-                try { await _restClient.DeleteAsync($"/api/warehousing/revisions/{id}"); } catch { }
-            });
+                await _restClient.DeleteAsync($"/api/warehousing/revisions/{id}");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[STOCK REVISION DELETE ERROR]: {ex.Message}");
+                throw;
+            }
+
+            UiEventBus.NotifyDocumentModified<StockRevision>(id);
         }
 
         public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)
@@ -426,7 +412,6 @@ namespace Mermer.Ui.Pc.Services
             return lambda.Compile().DynamicInvoke();
         }
 
-        // Вложенный класс для маппинга счетчика
         private class CountResponse
         {
             public int Count { get; set; }

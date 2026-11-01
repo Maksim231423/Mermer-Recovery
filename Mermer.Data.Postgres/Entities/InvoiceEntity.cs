@@ -31,6 +31,7 @@ public class InvoiceEntity
     public string? Group { get; set; }
     public string[]? Tags { get; set; }
     public string? Description { get; set; }
+    public bool IsSynced { get; set; } = false;
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 

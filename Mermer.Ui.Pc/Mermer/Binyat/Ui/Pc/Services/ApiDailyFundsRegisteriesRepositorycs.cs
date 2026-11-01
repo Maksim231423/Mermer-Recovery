@@ -18,14 +18,11 @@ public class ApiDailyFundsRegisteriesRepository :
     IDailyFundsRegisteriesRepository
 {
     private readonly RestClient _restClient;
-    private const string DocType = "DailyFundsRegistery";
-
-    // In-memory кэш открытых карточек для моментального O(1) доступа
     private static readonly ConcurrentDictionary<string, DailyFundsRegistery> _cardCache = new(StringComparer.OrdinalIgnoreCase);
 
     public ApiDailyFundsRegisteriesRepository(RestClient restClient)
     {
-        _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
+        _restClient = restClient ?? throw new Exception("Http RestClient cannot be null.");
     }
 
     public async Task<DailyFundsRegistery> GetAsync(string id)
@@ -42,7 +39,6 @@ public class ApiDailyFundsRegisteriesRepository :
             {
                 NormalizeDates(remote);
                 _cardCache[remote.Id] = remote;
-                LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                 return remote;
             }
         }
@@ -63,7 +59,6 @@ public class ApiDailyFundsRegisteriesRepository :
         return result;
     }
 
-    // --- БЫСТРАЯ ВЫБОРКА ПО ДАТАМ (БЕЗ ВЫГРУЗКИ ВСЕЙ БАЗЫ ИЗ SQLITE) ---
     public async Task<IEnumerable<DailyFundsRegistery>> GetAsync(params Expression<Func<DailyFundsRegistery, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
@@ -91,7 +86,6 @@ public class ApiDailyFundsRegisteriesRepository :
             catch { }
         }
 
-        // Для фильтра All Time гарантированно подгружаем все данные с бэкенда
         var all = await GetAllAsync();
         var fallbackQuery = all.AsQueryable();
         if (predicates != null)
@@ -101,7 +95,6 @@ public class ApiDailyFundsRegisteriesRepository :
         return fallbackQuery.ToList();
     }
 
-    // Реализация для интерфейса IDailyFundsRegisteriesRepository (маппинг в Info для DevExpress Grid)
     async Task<IEnumerable<DailyFundsRegisteryInfo>> IDailyFundsRegisteriesRepository.GetAsync(params Expression<Func<DailyFundsRegistery, bool>>[] predicates)
     {
         var items = await GetAsync(predicates);
@@ -110,7 +103,6 @@ public class ApiDailyFundsRegisteriesRepository :
         {
             Id = x.Id,
             Code = x.Code,
-            // Приводим к локальному времени для отображения в таблице
             Date = ToDisplayLocal(x.Date),
             DepositoryId = x.DepositoryId,
             IsCompleted = x.IsCompleted,
@@ -125,7 +117,6 @@ public class ApiDailyFundsRegisteriesRepository :
         }).ToList();
     }
 
-    // Мгновенный подсчет для боковых плиток дат (Today, This Week, This Month и т.д.)
     public async Task<int> CountAsync(params Expression<Func<DailyFundsRegistery, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
@@ -154,22 +145,6 @@ public class ApiDailyFundsRegisteriesRepository :
         if (_cardCache.Count > 0)
             return _cardCache.Values.Select(NormalizeDates).ToList();
 
-        // 1. Читаем из локальной SQLite
-        var local = LocalSqliteCache.GetAllDocuments<DailyFundsRegistery>(DocType);
-        if (local != null && local.Any())
-        {
-            foreach (var item in local)
-            {
-                if (!string.IsNullOrEmpty(item?.Id))
-                {
-                    NormalizeDates(item);
-                    _cardCache[item.Id] = item;
-                }
-            }
-            return _cardCache.Values.Select(NormalizeDates).ToList();
-        }
-
-        // 2. Если в локальной БД пусто — подгружаем ВСЕ записи с сервера
         try
         {
             var remote = await _restClient.GetAsync<List<DailyFundsRegistery>>("/api/finance/registeries?limit=10000");
@@ -181,7 +156,6 @@ public class ApiDailyFundsRegisteriesRepository :
                     {
                         NormalizeDates(item);
                         _cardCache[item.Id] = item;
-                        LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
                     }
                 }
             }
@@ -196,52 +170,53 @@ public class ApiDailyFundsRegisteriesRepository :
 
     public async Task SaveAsync(DailyFundsRegistery model)
     {
-        if (model == null) return;
+        if (model == null)
+        {
+            throw new Exception("Cannot save an empty DailyFundsRegistery entity.");
+        }
 
         bool isNew = string.IsNullOrEmpty(model.Id) || model.Id == Guid.Empty.ToString();
         if (isNew) model.Id = Guid.NewGuid().ToString();
 
         NormalizeDates(model);
-
         _cardCache[model.Id] = model;
-        LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
 
-        // 1. Мгновенное локальное обновление UI
-        UiEventBus.NotifyDocumentModified<DailyFundsRegistery>(model.Id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
-                if (isNew)
-                    await _restClient.PostAsync("/api/finance/registeries", model);
-                else
-                    await _restClient.PutAsync($"/api/finance/registeries/{model.Id}", model);
+            if (isNew)
+                await _restClient.PostAsync("/api/finance/registeries", model);
+            else
+                await _restClient.PutAsync($"/api/finance/registeries/{model.Id}", model);
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to save DailyFundsRegistery '{0}'. Details: {1}", model.Id, detail), ex);
+        }
 
-                LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
-
-                // 2. Обновление после подтверждения сервером
-                UiEventBus.NotifyDocumentModified<DailyFundsRegistery>(model.Id);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[DAILY REGISTERY SYNC ERROR]: {ex.Message}");
-            }
-        });
+        UiEventBus.NotifyDocumentModified<DailyFundsRegistery>(model.Id);
     }
 
     public async Task DeleteAsync(string id)
     {
-        if (string.IsNullOrEmpty(id)) return;
+        if (string.IsNullOrEmpty(id))
+        {
+            throw new Exception("DailyFundsRegistery identifier cannot be empty for delete operation.");
+        }
+
         _cardCache.TryRemove(id, out _);
 
-        // Мгновенное удаление из списка в UI
-        UiEventBus.NotifyDocumentModified<DailyFundsRegistery>(id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try { await _restClient.DeleteAsync($"/api/finance/registeries/{id}"); } catch { }
-        });
+            await _restClient.DeleteAsync($"/api/finance/registeries/{id}");
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to delete DailyFundsRegistery '{0}'. Details: {1}", id, detail), ex);
+        }
+
+        UiEventBus.NotifyDocumentModified<DailyFundsRegistery>(id);
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)
@@ -265,10 +240,7 @@ public class ApiDailyFundsRegisteriesRepository :
                 }
             }
         }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[DailyRegisteries GetFacets Error]: {ex.Message}");
-        }
+        catch { }
 
         return dict;
     }
@@ -285,12 +257,9 @@ public class ApiDailyFundsRegisteriesRepository :
     {
         if (dt == DateTime.MinValue || dt == DateTime.MaxValue) return dt;
 
-        // Если пришло как UTC — сразу переводим в местное время системы (+3 часа)
         if (dt.Kind == DateTimeKind.Utc)
             return dt.ToLocalTime();
 
-        // Если пришло как Unspecified (часто из SQLite или при парсинге без суффикса Z),
-        // помечаем как UTC и конвертируем в локальное
         if (dt.Kind == DateTimeKind.Unspecified)
         {
             return DateTime.SpecifyKind(dt, DateTimeKind.Utc).ToLocalTime();
@@ -300,7 +269,6 @@ public class ApiDailyFundsRegisteriesRepository :
     }
     #endregion
 
-    // --- ПАРСЕР ДАТ ИЗ ДЕРЕВА EXPRESSION (MvvmCross) ---
     private static (bool HasDates, DateTime From, DateTime Till) TryExtractDateRange(Expression<Func<DailyFundsRegistery, bool>>[] predicates)
     {
         if (predicates == null || predicates.Length == 0)

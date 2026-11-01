@@ -1,5 +1,4 @@
-﻿// Добавленные using для конфигуратора и настроек
-using Mermer.Activations.Services;
+﻿using Mermer.Activations.Services;
 using Mermer.Authorization.Services;
 using Mermer.Common.Settings;
 using Mermer.Enterprise.Models;
@@ -26,38 +25,36 @@ public class LoginViewModel : BaseViewModel
 {
     private readonly ILoginService _loginService;
     private readonly IBinyatActivationService _activationService;
-    private readonly IConfigurator _configurator; // ДОБАВЛЕНО
+    private readonly IConfigurator _configurator;
     private string _username;
     private string _password;
 
-    // ДОБАВЛЕНО IConfigurator configurator в параметры
     public LoginViewModel(
-    ILoginService loginService,
-    IMvxNavigationService navigationService,
-    IBinyatActivationService activationService,
-    IUserInteractionService userInteractionService,
-    IConfigurator configurator)
-    : base(navigationService, userInteractionService)
+        ILoginService loginService,
+        IMvxNavigationService navigationService,
+        IBinyatActivationService activationService,
+        IUserInteractionService userInteractionService,
+        IConfigurator configurator)
+        : base(navigationService, userInteractionService)
     {
         this._loginService = loginService;
         this._activationService = activationService;
         this._configurator = configurator;
 
-        // === БЕЗОПАСНОЕ СМЕНА ЯЗЫКА НА САМОМ СТАРТЕ ===
+        // Force reset licensing cache on startup/login screen load
+        this._activationService.ResetCache();
+
         try
         {
             AppSettings config = configurator.GetConfig<AppSettings>();
             if (config != null && !string.IsNullOrEmpty(config.Culture))
             {
-                // Этого достаточно! MvvmCross увидит "ru-RU" и сам пойдет в родной провайдер 
-                // искать файл ru-RU.json
                 var culture = new System.Globalization.CultureInfo(config.Culture);
                 System.Threading.Thread.CurrentThread.CurrentCulture = culture;
                 System.Threading.Thread.CurrentThread.CurrentUICulture = culture;
             }
         }
         catch { }
-        // ==============================================
     }
 
     public string Username
@@ -76,23 +73,53 @@ public class LoginViewModel : BaseViewModel
     {
         get
         {
-            return (ICommand)new MvxAsyncCommand(new Func<Task>(this.LoginAsync), (Func<bool>)(() => !this.IsBusy && !string.IsNullOrEmpty(this.Username) && !string.IsNullOrEmpty(this.Password)));
+            return (ICommand)new MvxAsyncCommand(
+                new Func<Task>(this.LoginAsync),
+                (Func<bool>)(() => !this.IsBusy && !string.IsNullOrEmpty(this.Username) && !string.IsNullOrEmpty(this.Password)));
         }
     }
 
     private async Task LoginAsync()
     {
         IsBusy = true;
-        var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            Console.WriteLine("[PERF] 1. Calling LoginAsync...");
-            await _loginService.LoginAsync(Username, Password);
-            Console.WriteLine($"[PERF] 2. LoginService finished in {sw.ElapsedMilliseconds} ms. Navigating to MainViewModel...");
+            // 1. Обязательная проверка лицензий перед входом
+            var clientStatus = await _activationService.GetClientActiveDatesAsync();
+            var serverStatus = await _activationService.GetServerActiveDatesAsync();
 
-            sw.Restart();
+            bool isClientActive = clientStatus != null && clientStatus.IsActive;
+            bool isServerActive = serverStatus != null && serverStatus.IsActive;
+
+            if (!isClientActive || !isServerActive)
+            {
+                // Снимаем флаг занятости до показа окон
+                IsBusy = false;
+
+                string reason = !isClientActive && !isServerActive
+                    ? "Both Client and Server licenses are not activated."
+                    : (!isClientActive ? "Client license is not activated." : "Server license is not activated.");
+
+                // Сначала выводим ошибку через исключение
+                try
+                {
+                    throw new InvalidOperationException($"Access denied. {reason} Please activate the application.");
+                }
+                catch (Exception ex)
+                {
+                    UserInteractionService.ShowExceptionMessage(ex);
+                }
+
+                // ТОЛЬКО ПОСЛЕ закрытия диалога ошибки переходим на окно активации
+                await NavigationService.Navigate<ActivationViewModel>();
+                return;
+            }
+
+            // 2. Авторизация
+            await _loginService.LoginAsync(Username, Password);
+
+            // 3. Переход в главное окно
             await NavigationService.Navigate<MainViewModel>();
-            Console.WriteLine($"[PERF] 3. Navigate to MainViewModel finished in {sw.ElapsedMilliseconds} ms");
         }
         catch (Exception ex)
         {
@@ -108,7 +135,9 @@ public class LoginViewModel : BaseViewModel
     {
         get
         {
-            return (ICommand)new MvxAsyncCommand(new Func<Task>(this.ShowSettingsAsync), (Func<bool>)(() => !this.IsBusy));
+            return (ICommand)new MvxAsyncCommand(
+                new Func<Task>(this.ShowSettingsAsync),
+                (Func<bool>)(() => !this.IsBusy));
         }
     }
 
@@ -121,7 +150,9 @@ public class LoginViewModel : BaseViewModel
     {
         get
         {
-            return (ICommand)new MvxAsyncCommand(new Func<Task>(this.OnShowActivationAsync), (Func<bool>)(() => !this.IsBusy));
+            return (ICommand)new MvxAsyncCommand(
+                new Func<Task>(this.OnShowActivationAsync),
+                (Func<bool>)(() => !this.IsBusy));
         }
     }
 

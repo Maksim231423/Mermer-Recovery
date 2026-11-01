@@ -13,16 +13,11 @@ namespace Mermer.Ui.Pc.Services;
 public class ApiPartnerSlipsRepository : IRepositoryWithFacets<PartnerSlip>, IRepository<PartnerSlip>, IReadOnlyRepository<PartnerSlip>
 {
     private readonly RestClient _restClient;
-    private const string DocType = "PartnerSlip";
-
     private static readonly ConcurrentDictionary<string, PartnerSlip> _cardCache = new(StringComparer.OrdinalIgnoreCase);
-
-    // Множество ID, которые прямо сейчас находятся в процессе отправки на сервер
-    private static readonly ConcurrentDictionary<string, byte> _inFlightSync = new(StringComparer.OrdinalIgnoreCase);
 
     public ApiPartnerSlipsRepository(RestClient restClient)
     {
-        _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
+        _restClient = restClient ?? throw new Exception("Http RestClient cannot be null.");
     }
 
     public async Task<PartnerSlip> GetAsync(string id)
@@ -111,22 +106,8 @@ public class ApiPartnerSlipsRepository : IRepositoryWithFacets<PartnerSlip>, IRe
 
     public async Task<IEnumerable<PartnerSlip>> GetAllAsync()
     {
-        // Фоновая досылка только тех документов, которые НЕ отправляются прямо сейчас
-        _ = Task.Run(SyncPendingAsync);
-
         if (_cardCache.Count > 0)
             return _cardCache.Values.ToList();
-
-        var local = LocalSqliteCache.GetAllDocuments<PartnerSlip>(DocType);
-        if (local != null && local.Any())
-        {
-            foreach (var item in local)
-            {
-                if (!string.IsNullOrEmpty(item?.Id))
-                    _cardCache[item.Id] = item;
-            }
-            return _cardCache.Values.ToList();
-        }
 
         try
         {
@@ -138,15 +119,6 @@ public class ApiPartnerSlipsRepository : IRepositoryWithFacets<PartnerSlip>, IRe
                     if (!string.IsNullOrEmpty(item?.Id))
                         _cardCache[item.Id] = item;
                 }
-
-                _ = Task.Run(() =>
-                {
-                    foreach (var item in remote)
-                    {
-                        if (!string.IsNullOrEmpty(item?.Id))
-                            LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
-                    }
-                });
             }
         }
         catch { }
@@ -159,80 +131,50 @@ public class ApiPartnerSlipsRepository : IRepositoryWithFacets<PartnerSlip>, IRe
 
     public async Task SaveAsync(PartnerSlip model)
     {
-        if (model == null) return;
-        if (string.IsNullOrEmpty(model.Id)) model.Id = Guid.NewGuid().ToString();
+        if (model == null)
+        {
+            throw new Exception("Cannot save an empty PartnerSlip entity.");
+        }
+
+        bool isNew = string.IsNullOrEmpty(model.Id) || model.Id == Guid.Empty.ToString();
+        if (isNew) model.Id = Guid.NewGuid().ToString();
 
         _cardCache[model.Id] = model;
 
-        // Фиксируем документ в SQLite
-        LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
-
-        // Мгновенно обновляем список операций контрагентов
-        UiEventBus.NotifyDocumentModified<PartnerSlip>(model.Id);
-
-        // Помечаем, что данный ID взят в обработку отправки
-        if (!_inFlightSync.TryAdd(model.Id, 0))
-            return;
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await _restClient.PostAsync("/api/partners/slips", model);
-                LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
-                UiEventBus.NotifyDocumentModified<PartnerSlip>(model.Id);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[PARTNER SLIP SYNC ERROR]: {ex.Message}");
-            }
-            finally
-            {
-                _inFlightSync.TryRemove(model.Id, out _);
-            }
-        });
-    }
-
-    private async Task SyncPendingAsync()
-    {
         try
         {
-            var unsynced = LocalSqliteCache.GetUnsyncedDocuments<PartnerSlip>(DocType);
-            if (unsynced == null || !unsynced.Any()) return;
-
-            foreach (var item in unsynced)
-            {
-                // Если документ уже отправляется прямо сейчас — пропускаем его
-                if (!_inFlightSync.TryAdd(item.id, 0))
-                    continue;
-
-                try
-                {
-                    await _restClient.PostAsync("/api/partners/slips", item.entity);
-                    LocalSqliteCache.SaveDocument(DocType, item.id, item.entity, isSynced: true);
-                }
-                catch { }
-                finally
-                {
-                    _inFlightSync.TryRemove(item.id, out _);
-                }
-            }
+            if (isNew) await _restClient.PostAsync("/api/partners/slips", model);
+            else await _restClient.PutAsync($"/api/partners/slips/{model.Id}", model);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to save PartnerSlip '{0}'. Details: {1}", model.Id, detail), ex);
+        }
+
+        UiEventBus.NotifyDocumentModified<PartnerSlip>(model.Id);
     }
 
     public async Task DeleteAsync(string id)
     {
-        if (string.IsNullOrEmpty(id)) return;
+        if (string.IsNullOrEmpty(id))
+        {
+            throw new Exception("PartnerSlip identifier cannot be empty for delete operation.");
+        }
+
         _cardCache.TryRemove(id, out _);
 
-        // Мгновенно удаляем из списка UI
-        UiEventBus.NotifyDocumentModified<PartnerSlip>(id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try { await _restClient.DeleteAsync($"/api/partners/slips/{id}"); } catch { }
-        });
+            await _restClient.DeleteAsync($"/api/partners/slips/{id}");
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to delete PartnerSlip '{0}'. Details: {1}", id, detail), ex);
+        }
+
+        UiEventBus.NotifyDocumentModified<PartnerSlip>(id);
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)

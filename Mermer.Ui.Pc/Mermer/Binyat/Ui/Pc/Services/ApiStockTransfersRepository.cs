@@ -13,8 +13,6 @@ namespace Mermer.Ui.Pc.Services;
 public class ApiStockTransfersRepository : IRepositoryWithFacets<StockTransfer>, IRepository<StockTransfer>, IReadOnlyRepository<StockTransfer>
 {
     private readonly RestClient _restClient;
-    private const string DocType = "StockTransfer";
-
     private static readonly ConcurrentDictionary<string, StockTransfer> _cardCache = new(StringComparer.OrdinalIgnoreCase);
 
     public ApiStockTransfersRepository(RestClient restClient)
@@ -35,14 +33,12 @@ public class ApiStockTransfersRepository : IRepositoryWithFacets<StockTransfer>,
             if (remote != null)
             {
                 _cardCache[remote.Id] = remote;
-                LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                 return remote;
             }
         }
         catch { }
 
-        return LocalSqliteCache.GetAllDocuments<StockTransfer>(DocType)?
-            .FirstOrDefault(s => string.Equals(s.Id, id, StringComparison.OrdinalIgnoreCase));
+        return null;
     }
 
     public async Task<IEnumerable<StockTransfer>> GetAsync(string[] ids)
@@ -57,7 +53,6 @@ public class ApiStockTransfersRepository : IRepositoryWithFacets<StockTransfer>,
         return result;
     }
 
-    // --- БЫСТРАЯ ВЫБОРКА ПО ДАТАМ (ПРЯМОЙ СРЕЗ С СЕРВЕРА) ---
     public async Task<IEnumerable<StockTransfer>> GetAsync(params Expression<Func<StockTransfer, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
@@ -106,8 +101,6 @@ public class ApiStockTransfersRepository : IRepositoryWithFacets<StockTransfer>,
     public async Task<int> CountAsync(params Expression<Func<StockTransfer, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
-
-        // Если проверяется фильтр Conflicted без дат — запрашиваем точный подсчет у API
         bool isConflictedFilter = predicates != null && predicates.Any(p => p.ToString().Contains("IsConflicted"));
 
         try
@@ -135,7 +128,6 @@ public class ApiStockTransfersRepository : IRepositoryWithFacets<StockTransfer>,
         }
         catch { }
 
-        // Фоллбэк: загружаем записи и честно фильтруем их через предикаты
         var items = await GetAsync(predicates);
         return items.Count();
     }
@@ -145,14 +137,19 @@ public class ApiStockTransfersRepository : IRepositoryWithFacets<StockTransfer>,
         if (_cardCache.Count > 0)
             return _cardCache.Values.ToList();
 
-        var local = LocalSqliteCache.GetAllDocuments<StockTransfer>(DocType);
-        if (local != null)
+        try
         {
-            foreach (var item in local)
+            var remote = await _restClient.GetAsync<List<StockTransfer>>("/api/warehousing/transfers");
+            if (remote != null && remote.Any())
             {
-                if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+                foreach (var item in remote)
+                {
+                    if (!string.IsNullOrEmpty(item?.Id))
+                        _cardCache[item.Id] = item;
+                }
             }
         }
+        catch { }
 
         return _cardCache.Values.ToList();
     }
@@ -166,24 +163,18 @@ public class ApiStockTransfersRepository : IRepositoryWithFacets<StockTransfer>,
         if (string.IsNullOrEmpty(model.Id)) model.Id = Guid.NewGuid().ToString();
 
         _cardCache[model.Id] = model;
-        LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
 
-        // Мгновенно обновляем перемещения товаров между складами
-        UiEventBus.NotifyDocumentModified<StockTransfer>(model.Id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
-                await _restClient.PostAsync("/api/warehousing/transfers", model);
-                LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
-                UiEventBus.NotifyDocumentModified<StockTransfer>(model.Id);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[STOCK TRANSFER SYNC ERROR]: {ex.Message}");
-            }
-        });
+            await _restClient.PostAsync("/api/warehousing/transfers", model);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[STOCK TRANSFER SAVE ERROR]: {ex.Message}");
+            throw;
+        }
+
+        UiEventBus.NotifyDocumentModified<StockTransfer>(model.Id);
     }
 
     public async Task DeleteAsync(string id)
@@ -191,13 +182,17 @@ public class ApiStockTransfersRepository : IRepositoryWithFacets<StockTransfer>,
         if (string.IsNullOrEmpty(id)) return;
         _cardCache.TryRemove(id, out _);
 
-        // Мгновенно удаляем перемещение товаров из UI
-        UiEventBus.NotifyDocumentModified<StockTransfer>(id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try { await _restClient.DeleteAsync($"/api/warehousing/transfers/{id}"); } catch { }
-        });
+            await _restClient.DeleteAsync($"/api/warehousing/transfers/{id}");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[STOCK TRANSFER DELETE ERROR]: {ex.Message}");
+            throw;
+        }
+
+        UiEventBus.NotifyDocumentModified<StockTransfer>(id);
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)

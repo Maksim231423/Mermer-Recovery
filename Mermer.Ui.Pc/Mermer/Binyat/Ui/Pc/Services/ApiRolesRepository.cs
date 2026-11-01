@@ -13,7 +13,6 @@ namespace Mermer.Ui.Pc.Services;
 public class ApiRolesRepository : IRepository<Role>
 {
     private readonly RestClient _restClient;
-    private const string DocType = "Role";
 
     private static readonly ConcurrentDictionary<string, Role> _cardCache = new(StringComparer.OrdinalIgnoreCase);
     private static List<Role> _rolesCache;
@@ -21,7 +20,7 @@ public class ApiRolesRepository : IRepository<Role>
 
     public ApiRolesRepository(RestClient restClient)
     {
-        _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
+        _restClient = restClient ?? throw new Exception("Http RestClient cannot be null.");
     }
 
     public async Task<Role> GetAsync(string id)
@@ -42,7 +41,6 @@ public class ApiRolesRepository : IRepository<Role>
             {
                 var normalized = NormalizeAuthorizations(remote);
                 _cardCache[normalized.Id] = normalized;
-                LocalSqliteCache.SaveDocument(DocType, normalized.Id, normalized, isSynced: true);
                 return normalized;
             }
         }
@@ -83,44 +81,25 @@ public class ApiRolesRepository : IRepository<Role>
                 return _rolesCache;
         }
 
-        // 1. Читаем из локального SQLite
-        var local = LocalSqliteCache.GetAllDocuments<Role>(DocType)?.ToList() ?? new List<Role>();
-        if (local.Any())
+        try
         {
-            lock (_syncLock)
+            var remote = await _restClient.GetAsync<List<Role>>("/api/roles");
+            if (remote != null && remote.Any())
             {
-                _rolesCache = local.Select(NormalizeAuthorizations).ToList();
-                foreach (var r in _rolesCache)
+                lock (_syncLock)
                 {
-                    if (!string.IsNullOrEmpty(r?.Id)) _cardCache[r.Id] = r;
-                }
-            }
-        }
-
-        // 2. Если в локальной БД пусто — подгружаем с API
-        if (_rolesCache == null || _rolesCache.Count == 0)
-        {
-            try
-            {
-                var remote = await _restClient.GetAsync<List<Role>>("/api/roles");
-                if (remote != null && remote.Any())
-                {
-                    lock (_syncLock)
+                    _rolesCache = remote.Select(NormalizeAuthorizations).ToList();
+                    foreach (var role in _rolesCache)
                     {
-                        _rolesCache = remote.Select(NormalizeAuthorizations).ToList();
-                        foreach (var role in _rolesCache)
+                        if (!string.IsNullOrEmpty(role?.Id))
                         {
-                            if (!string.IsNullOrEmpty(role?.Id))
-                            {
-                                _cardCache[role.Id] = role;
-                                LocalSqliteCache.SaveDocument(DocType, role.Id, role, isSynced: true);
-                            }
+                            _cardCache[role.Id] = role;
                         }
                     }
                 }
             }
-            catch { }
         }
+        catch { }
 
         return _rolesCache ?? Enumerable.Empty<Role>();
     }
@@ -135,7 +114,11 @@ public class ApiRolesRepository : IRepository<Role>
 
     private async Task SaveAsync(Role model, bool isNew)
     {
-        if (model == null) return;
+        if (model == null)
+        {
+            throw new Exception("Cannot save an empty Role entity.");
+        }
+
         if (string.IsNullOrEmpty(model.Id)) model.Id = Guid.NewGuid().ToString();
 
         var normalized = NormalizeAuthorizations(model);
@@ -151,32 +134,27 @@ public class ApiRolesRepository : IRepository<Role>
             }
         }
 
-        LocalSqliteCache.SaveDocument(DocType, normalized.Id, normalized, isSynced: false);
-
-        // Мгновенно обновляем справочник ролей в интерфейсе
-        UiEventBus.NotifyDocumentModified<Role>(normalized.Id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
-                var payload = CreatePayload(normalized);
-                if (isNew) await _restClient.PostAsync("/api/roles", payload);
-                else await _restClient.PutAsync($"/api/roles/{normalized.Id}", payload);
+            var payload = CreatePayload(normalized);
+            if (isNew) await _restClient.PostAsync("/api/roles", payload);
+            else await _restClient.PutAsync($"/api/roles/{normalized.Id}", payload);
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to save Role '{0}'. Details: {1}", model.Id, detail), ex);
+        }
 
-                LocalSqliteCache.SaveDocument(DocType, normalized.Id, normalized, isSynced: true);
-                UiEventBus.NotifyDocumentModified<Role>(normalized.Id);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[ROLE SYNC WARNING]: {ex.Message}");
-            }
-        });
+        UiEventBus.NotifyDocumentModified<Role>(normalized.Id);
     }
 
     public async Task DeleteAsync(string id)
     {
-        if (string.IsNullOrEmpty(id)) return;
+        if (string.IsNullOrEmpty(id))
+        {
+            throw new Exception("Role identifier cannot be empty for delete operation.");
+        }
 
         _cardCache.TryRemove(id, out _);
         lock (_syncLock)
@@ -184,13 +162,17 @@ public class ApiRolesRepository : IRepository<Role>
             _rolesCache?.RemoveAll(x => x.Id == id);
         }
 
-        // Мгновенно убираем удаленную роль из списка
-        UiEventBus.NotifyDocumentModified<Role>(id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try { await _restClient.DeleteAsync($"/api/roles/{id}"); } catch { }
-        });
+            await _restClient.DeleteAsync($"/api/roles/{id}");
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to delete Role '{0}'. Details: {1}", id, detail), ex);
+        }
+
+        UiEventBus.NotifyDocumentModified<Role>(id);
     }
 
     private static Role NormalizeAuthorizations(Role role)

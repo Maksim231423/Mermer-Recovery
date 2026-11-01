@@ -12,92 +12,133 @@
                 xmlns:controls="clr-namespace:Mermer.Ui.Pc.Controls"
                 xmlns:dxg="http://schemas.devexpress.com/winfx/2008/xaml/grid"
                 Loaded="ActivationView_OnLoaded">
-  <DockPanel>
-    <Grid FocusManager.FocusedElement="{Binding ElementName=FirstFocus}">
-      <dxlc:LayoutControl Width="500" Orientation="Vertical" VerticalAlignment="Center" HorizontalAlignment="Center"
+    <DockPanel>
+        <Grid FocusManager.FocusedElement="{Binding ElementName=FirstFocus}">
+            <dxlc:LayoutControl Width="540" Orientation="Vertical" VerticalAlignment="Center" HorizontalAlignment="Center"
                           IsEnabled="{Binding IsBusy, Converter={dxmvvm:BooleanNegationConverter}}">
-        <dxlc:LayoutGroup View="Tabs">
-          <dxlc:LayoutGroup Orientation="Vertical" Header="{Localize 'Client License Info'}">
-            <dxlc:LayoutGroup Visibility="{Binding ClientActivationStatus.IsActive, Converter={dx:BooleanToVisibilityConverter}}">
-              <TextBlock FontSize="24" Foreground="Green" Text="{Localize 'Client is activated'}"/>
-            </dxlc:LayoutGroup>
-            <dxlc:LayoutGroup Visibility="{Binding ClientActivationStatus.IsActive, Converter={dx:BooleanToVisibilityConverter Invert=true}}">
-              <TextBlock FontSize="24" Foreground="DarkRed" Text="{Localize 'Client is NOT activated'}"/>
-            </dxlc:LayoutGroup>
-            <dxg:GridControl Height="150" ItemsSource="{Binding ClientActivationStatus.ActiveDates}">
-              <dxg:GridControl.Columns>
-                <dxg:GridColumn FieldName="DateValidFrom" Header="{Localize DateActiveFrom}"/>
-                <dxg:GridColumn FieldName="DateValidTill" Header="{Localize DateActiveTill}"/>
-              </dxg:GridControl.Columns>
-              <dxg:GridControl.View>
-                <dxg:TableView ShowSearchPanelMode="Never" NewItemRowPosition="None" ShowGroupPanel="false" AllowEditing="false"
-                               AutoWidth="true"/>
-              </dxg:GridControl.View>
-            </dxg:GridControl>
-            <dxlc:LayoutItem Height="5"/>
-            <StackPanel HorizontalAlignment="Right" Orientation="Horizontal"
-                        dx:ThemeManager.ThemeName="Office2013DarkGray;Touch">
-              <Button Margin="0,0,10,0" Content="{Localize 'Update Status'}"
-                      Command="{Binding UpdateClientStatusCommand}"/>
-              <Button Margin="0,0,10,0" Content="{Localize Reactivate}" Command="{Binding ReactivateClientCommand}"/>
-              <Button Content="{Localize Deactivate}" Command="{Binding DeactivateClientCommand}"/>
-            </StackPanel>
-            <dxlc:LayoutItem Height="15"/>
-            <dxlc:LayoutItem Label="{Localize 'License Id'}">
-              <dxe:TextEdit EditValue="{Binding ClientLicenseId, UpdateSourceTrigger=PropertyChanged}"/>
-            </dxlc:LayoutItem>
-            <dxlc:LayoutItem Label="{Localize Note}">
-              <dxe:TextEdit x:Name="ClientNote" EditValue="{Binding Note, UpdateSourceTrigger=PropertyChanged}"/>
-            </dxlc:LayoutItem>
-            <StackPanel HorizontalAlignment="Right" Orientation="Horizontal"
-                        dx:ThemeManager.ThemeName="Office2013DarkGray;Touch">
-              <Button Margin="0,0,10,0" Content="{Localize 'Activate Client'}" Command="{Binding ActivateClientCommand}"/>
-              <Button IsCancel="true" Content="{Localize Close}" Command="{Binding CloseCommand}"/>
-            </StackPanel>
-          </dxlc:LayoutGroup>
-          <dxlc:LayoutGroup Orientation="Vertical" Header="{Localize 'Server License Info'}">
-            <dxlc:LayoutGroup Visibility="{Binding ServerActivationStatus.IsActive, Converter={dx:BooleanToVisibilityConverter}}">
-              <TextBlock FontSize="24" Foreground="Green" Text="{Localize 'Server is activated'}"/>
-            </dxlc:LayoutGroup>
-            <dxlc:LayoutGroup Visibility="{Binding ServerActivationStatus.IsActive, Converter={dx:BooleanToVisibilityConverter Invert=true}}">
-              <TextBlock FontSize="24" Foreground="DarkRed" Text="{Localize 'Server is NOT activated'}"/>
-            </dxlc:LayoutGroup>
-            <dxg:GridControl Height="150" ItemsSource="{Binding ServerActivationStatus.ActiveDates}">
-              <dxg:GridControl.Columns>
-                <dxg:GridColumn FieldName="DateValidFrom" Header="{Localize DateActiveFrom}"/>
-                <dxg:GridColumn FieldName="DateValidTill" Header="{Localize DateActiveTill}"/>
-              </dxg:GridControl.Columns>
-              <dxg:GridControl.View>
-                <dxg:TableView ShowSearchPanelMode="Never" NewItemRowPosition="None" ShowGroupPanel="false" AllowEditing="false"
-                               AutoWidth="true"/>
-              </dxg:GridControl.View>
-            </dxg:GridControl>
-            <dxlc:LayoutItem Height="5"/>
-            <StackPanel HorizontalAlignment="Right" Orientation="Horizontal"
-                        dx:ThemeManager.ThemeName="Office2013DarkGray;Touch">
-              <Button Margin="0,0,10,0" Content="{Localize 'Update Status'}"
-                      Command="{Binding UpdateServerStatusCommand}"/>
-              <Button Margin="0,0,10,0" Content="{Localize Reactivate}" Command="{Binding ReactivateServerCommand}"/>
-              <Button Content="{Localize Deactivate}" Command="{Binding DeactivateServerCommand}"/>
-            </StackPanel>
-            <dxlc:LayoutItem Height="15"/>
-            <dxlc:LayoutItem Label="{Localize 'License Id'}">
-              <dxe:TextEdit EditValue="{Binding ServerLicenseId, UpdateSourceTrigger=PropertyChanged}"/>
-            </dxlc:LayoutItem>
-            <dxlc:LayoutItem Label="{Localize Note}">
-              <dxe:TextEdit x:Name="ServerNote" EditValue="{Binding Note, UpdateSourceTrigger=PropertyChanged}"/>
-            </dxlc:LayoutItem>
-            <StackPanel HorizontalAlignment="Right" Orientation="Horizontal"
-                        dx:ThemeManager.ThemeName="Office2013DarkGray;Touch">
-              <Button Margin="0,0,10,0" Content="{Localize 'Activate Server'}" Command="{Binding ActivateServerCommand}"/>
-              <Button IsCancel="true" Content="{Localize Close}" Command="{Binding CloseCommand}"/>
-            </StackPanel>
-          </dxlc:LayoutGroup>
-        </dxlc:LayoutGroup>
-      </dxlc:LayoutControl>
-      <Grid Visibility="{Binding IsBusy, Converter={dxmvvm:BooleanToVisibilityConverter}}">
-        <dx:WaitIndicator DeferedVisibility="{Binding IsBusy}"/>
-      </Grid>
-    </Grid>
-  </DockPanel>
+                <dxlc:LayoutGroup View="Tabs">
+
+                    <!-- 1. CLIENT LICENSE -->
+                    <dxlc:LayoutGroup Orientation="Vertical" Header="{Localize 'Client License Info'}">
+                        <dxlc:LayoutGroup Visibility="{Binding ClientActivationStatus.IsActive, Converter={dx:BooleanToVisibilityConverter}}">
+                            <TextBlock FontSize="24" Foreground="Green" Text="{Localize 'Client is activated'}"/>
+                        </dxlc:LayoutGroup>
+                        <dxlc:LayoutGroup Visibility="{Binding ClientActivationStatus.IsActive, Converter={dx:BooleanToVisibilityConverter Invert=true}}">
+                            <TextBlock FontSize="24" Foreground="DarkRed" Text="{Localize 'Client is NOT activated'}"/>
+                        </dxlc:LayoutGroup>
+                        <dxg:GridControl Height="150" ItemsSource="{Binding ClientActivationStatus.ActiveDates}">
+                            <dxg:GridControl.Columns>
+                                <dxg:GridColumn FieldName="DateValidFrom" Header="{Localize DateActiveFrom}"/>
+                                <dxg:GridColumn FieldName="DateValidTill" Header="{Localize DateActiveTill}"/>
+                            </dxg:GridControl.Columns>
+                            <dxg:GridControl.View>
+                                <dxg:TableView ShowSearchPanelMode="Never" NewItemRowPosition="None" ShowGroupPanel="false" AllowEditing="false" AutoWidth="true"/>
+                            </dxg:GridControl.View>
+                        </dxg:GridControl>
+                        <dxlc:LayoutItem Height="5"/>
+                        <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" dx:ThemeManager.ThemeName="Office2013DarkGray;Touch">
+                            <Button Margin="0,0,10,0" Content="{Localize 'Update Status'}" Command="{Binding UpdateClientStatusCommand}"/>
+                            <Button Margin="0,0,10,0" Content="{Localize Reactivate}" Command="{Binding ReactivateClientCommand}"/>
+                            <Button Content="{Localize Deactivate}" Command="{Binding DeactivateClientCommand}"/>
+                        </StackPanel>
+                        <dxlc:LayoutItem Height="15"/>
+                        <dxlc:LayoutItem Label="Machine Id">
+                            <dxe:TextEdit EditValue="{Binding MachineId, Mode=OneWay}" 
+                                IsReadOnly="True" 
+                                ShowBorder="True" />            
+                        </dxlc:LayoutItem>
+                        <dxlc:LayoutItem Label="{Localize 'License Id'}">
+                            <dxe:TextEdit EditValue="{Binding ClientLicenseId, UpdateSourceTrigger=PropertyChanged}"
+                                          NullText="License key..."/>
+                        </dxlc:LayoutItem>
+                        <dxlc:LayoutItem Label="{Localize Note}">
+                            <dxe:TextEdit x:Name="ClientNote" EditValue="{Binding Note, UpdateSourceTrigger=PropertyChanged}"/>
+                        </dxlc:LayoutItem>
+                        <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" dx:ThemeManager.ThemeName="Office2013DarkGray;Touch">
+                            <Button Margin="0,0,10,0" Content="{Localize 'Activate Client'}" Command="{Binding ActivateClientCommand}"/>
+                            <Button IsCancel="true" Content="{Localize Close}" Command="{Binding CloseCommand}"/>
+                        </StackPanel>
+                    </dxlc:LayoutGroup>
+
+                    <!-- 2. SERVER LICENSE -->
+                    <dxlc:LayoutGroup Orientation="Vertical" Header="{Localize 'Server License Info'}">
+                        <dxlc:LayoutGroup Visibility="{Binding ServerActivationStatus.IsActive, Converter={dx:BooleanToVisibilityConverter}}">
+                            <TextBlock FontSize="24" Foreground="Green" Text="{Localize 'Server is activated'}"/>
+                        </dxlc:LayoutGroup>
+                        <dxlc:LayoutGroup Visibility="{Binding ServerActivationStatus.IsActive, Converter={dx:BooleanToVisibilityConverter Invert=true}}">
+                            <TextBlock FontSize="24" Foreground="DarkRed" Text="{Localize 'Server is NOT activated'}"/>
+                        </dxlc:LayoutGroup>
+                        <dxg:GridControl Height="150" ItemsSource="{Binding ServerActivationStatus.ActiveDates}">
+                            <dxg:GridControl.Columns>
+                                <dxg:GridColumn FieldName="DateValidFrom" Header="{Localize DateActiveFrom}"/>
+                                <dxg:GridColumn FieldName="DateValidTill" Header="{Localize DateActiveTill}"/>
+                            </dxg:GridControl.Columns>
+                            <dxg:GridControl.View>
+                                <dxg:TableView ShowSearchPanelMode="Never" NewItemRowPosition="None" ShowGroupPanel="false" AllowEditing="false" AutoWidth="true"/>
+                            </dxg:GridControl.View>
+                        </dxg:GridControl>
+                        <dxlc:LayoutItem Height="5"/>
+                        <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" dx:ThemeManager.ThemeName="Office2013DarkGray;Touch">
+                            <Button Margin="0,0,10,0" Content="{Localize 'Update Status'}" Command="{Binding UpdateServerStatusCommand}"/>
+                            <Button Margin="0,0,10,0" Content="{Localize Reactivate}" Command="{Binding ReactivateServerCommand}"/>
+                            <Button Content="{Localize Deactivate}" Command="{Binding DeactivateServerCommand}"/>
+                        </StackPanel>
+                        <dxlc:LayoutItem Height="15"/>
+                        <dxlc:LayoutItem Label="{Localize 'License Id'}">
+                            <dxe:TextEdit EditValue="{Binding ServerLicenseId, UpdateSourceTrigger=PropertyChanged}"
+                                         NullText="License key..." />
+                        </dxlc:LayoutItem>
+                        <dxlc:LayoutItem Label="{Localize Note}">
+                            <dxe:TextEdit x:Name="ServerNote" EditValue="{Binding Note, UpdateSourceTrigger=PropertyChanged}"/>
+                        </dxlc:LayoutItem>
+                        <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" dx:ThemeManager.ThemeName="Office2013DarkGray;Touch">
+                            <Button Margin="0,0,10,0" Content="{Localize 'Activate Server'}" Command="{Binding ActivateServerCommand}"/>
+                            <Button IsCancel="true" Content="{Localize Close}" Command="{Binding CloseCommand}"/>
+                        </StackPanel>
+                    </dxlc:LayoutGroup>
+
+                    <!-- 3. SYNCHRONIZATION LICENSE -->
+                    <dxlc:LayoutGroup Orientation="Vertical" Header="Sync License Info">
+                        <dxlc:LayoutGroup Visibility="{Binding SyncActivationStatus.IsActive, Converter={dx:BooleanToVisibilityConverter}}">
+                            <TextBlock FontSize="24" Foreground="Green" Text="Synchronization is activated"/>
+                        </dxlc:LayoutGroup>
+                        <dxlc:LayoutGroup Visibility="{Binding SyncActivationStatus.IsActive, Converter={dx:BooleanToVisibilityConverter Invert=true}}">
+                            <TextBlock FontSize="24" Foreground="DarkRed" Text="Synchronization is NOT activated"/>
+                        </dxlc:LayoutGroup>
+                        <dxg:GridControl Height="150" ItemsSource="{Binding SyncActivationStatus.ActiveDates}">
+                            <dxg:GridControl.Columns>
+                                <dxg:GridColumn FieldName="DateValidFrom" Header="{Localize DateActiveFrom}"/>
+                                <dxg:GridColumn FieldName="DateValidTill" Header="{Localize DateActiveTill}"/>
+                            </dxg:GridControl.Columns>
+                            <dxg:GridControl.View>
+                                <dxg:TableView ShowSearchPanelMode="Never" NewItemRowPosition="None" ShowGroupPanel="false" AllowEditing="false" AutoWidth="true"/>
+                            </dxg:GridControl.View>
+                        </dxg:GridControl>
+                        <dxlc:LayoutItem Height="5"/>
+                        <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" dx:ThemeManager.ThemeName="Office2013DarkGray;Touch">
+                            <Button Margin="0,0,10,0" Content="{Localize 'Update Status'}" Command="{Binding UpdateSyncStatusCommand}"/>
+                            <Button Margin="0,0,10,0" Content="{Localize Reactivate}" Command="{Binding ReactivateSyncCommand}"/>
+                            <Button Content="{Localize Deactivate}" Command="{Binding DeactivateSyncCommand}"/>
+                        </StackPanel>
+                        <dxlc:LayoutItem Height="15"/>
+                        <dxlc:LayoutItem Label="{Localize 'License Id'}">
+                            <dxe:TextEdit EditValue="{Binding SyncLicenseId, UpdateSourceTrigger=PropertyChanged}"
+                                          NullText="License key..."/>
+                        </dxlc:LayoutItem>
+                        <dxlc:LayoutItem Label="{Localize Note}">
+                            <dxe:TextEdit EditValue="{Binding Note, UpdateSourceTrigger=PropertyChanged}"/>
+                        </dxlc:LayoutItem>
+                        <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" dx:ThemeManager.ThemeName="Office2013DarkGray;Touch">
+                            <Button Margin="0,0,10,0" Content="Activate Sync" Command="{Binding ActivateSyncCommand}"/>
+                            <Button IsCancel="true" Content="{Localize Close}" Command="{Binding CloseCommand}"/>
+                        </StackPanel>
+                    </dxlc:LayoutGroup>
+
+                </dxlc:LayoutGroup>
+            </dxlc:LayoutControl>
+            <Grid Visibility="{Binding IsBusy, Converter={dxmvvm:BooleanToVisibilityConverter}}">
+                <dx:WaitIndicator DeferedVisibility="{Binding IsBusy}"/>
+            </Grid>
+        </Grid>
+    </DockPanel>
 </mvx:MvxWpfView>

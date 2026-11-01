@@ -12,6 +12,7 @@ namespace Mermer.Data.Postgres;
 /// </summary>
 public class MermerDbContext : DbContext
 {
+    public static string CurrentClientId { get; set; } = "default";
     public MermerDbContext(DbContextOptions<MermerDbContext> options) : base(options) { }
 
     // ── Reference Tables ──
@@ -309,6 +310,7 @@ public class MermerDbContext : DbContext
             // ── Добавленные связи для ордера ──
             e.HasOne(x => x.User).WithMany().HasForeignKey(x => x.UserId);
             e.HasOne(x => x.Warehouse).WithMany().HasForeignKey(x => x.WarehouseId);
+            e.Property(x => x.IsSynced).HasColumnName("is_synced").HasDefaultValue(false);
         });
 
         // ── Stock Slip Lines (Строки складских ордеров) ──
@@ -368,6 +370,7 @@ public class MermerDbContext : DbContext
             e.HasOne(x => x.Depository).WithMany().HasForeignKey(x => x.DepositoryId);
             e.HasOne(x => x.Partner).WithMany().HasForeignKey(x => x.PartnerId);
             e.HasOne(x => x.DisplayCurrency).WithMany().HasForeignKey(x => x.DisplayCurrencyId);
+            e.Property(x => x.IsSynced).HasColumnName("is_synced").HasDefaultValue(false);
         });
 
         // ── Invoice Lines ──
@@ -550,5 +553,153 @@ public class MermerDbContext : DbContext
             e.HasOne(x => x.FundsTransfer).WithMany(t => t.Lines).HasForeignKey(x => x.FundsTransferId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne(x => x.Currency).WithMany().HasForeignKey(x => x.CurrencyId);
         });
+
+        // Автоматически находит ВСЕ сущности в контексте и настраивает колонку client_id
+        foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+        {
+            var clrType = entityType.ClrType;
+
+            // Исключаем системные таблицы
+            if (clrType.Name.Contains("Migration") || clrType.Name.Contains("License"))
+                continue;
+
+            // Если в классе еще нет свойства ClientId — EF создаст Shadow Property (теневое свойство в БД)
+            var clientProp = entityType.FindProperty("ClientId");
+            if (clientProp == null)
+            {
+                modelBuilder.Entity(clrType)
+                    .Property<string>("ClientId")
+                    .HasColumnName("client_id")
+                    .HasDefaultValue("default")
+                    .IsRequired();
+
+                modelBuilder.Entity(clrType)
+                    .HasIndex("ClientId");
+            }
+            else
+            {
+                modelBuilder.Entity(clrType)
+                    .Property("ClientId")
+                    .HasColumnName("client_id")
+                    .HasDefaultValue("default")
+                    .IsRequired();
+            }
+        }
+    }
+
+    public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        // 0. Получаем текущего клиента из собственного статического свойства контекста
+        var currentTenant = !string.IsNullOrWhiteSpace(CurrentClientId) && CurrentClientId != "default"
+            ? CurrentClientId
+            : "default";
+
+        // ====================================================================
+        // 1. АВТОМАТИЧЕСКАЯ ПРИВЯЗКА CLIENT_ID ДЛЯ ВСЕХ НОВЫХ ЗАПИСЕЙ
+        // ====================================================================
+        var addedEntries = ChangeTracker.Entries()
+            .Where(e => e.State == EntityState.Added)
+            .ToList();
+
+        foreach (var entry in addedEntries)
+        {
+            var clientProp = entry.Metadata.FindProperty("ClientId");
+            if (clientProp != null)
+            {
+                var val = entry.Property("ClientId").CurrentValue as string;
+                if (string.IsNullOrWhiteSpace(val) || val == "default")
+                {
+                    entry.Property("ClientId").CurrentValue = currentTenant;
+                }
+            }
+        }
+
+        // ====================================================================
+        // 2. ОТСЛЕЖИВАНИЕ ИЗМЕНЕНИЙ В СТРОКАХ НАКЛАДНЫХ (INVOICE LINES)
+        // ====================================================================
+        var lineEntries = ChangeTracker.Entries<InvoiceLineEntity>()
+            .Where(e => e.State == EntityState.Added || e.State == EntityState.Modified || e.State == EntityState.Deleted)
+            .ToList();
+
+        foreach (var lineEntry in lineEntries)
+        {
+            var invoiceId = lineEntry.State == EntityState.Deleted
+                ? lineEntry.OriginalValues.GetValue<Guid>("InvoiceId")
+                : lineEntry.Entity.InvoiceId;
+
+            if (invoiceId != Guid.Empty)
+            {
+                var parentInvoice = Invoices.Local.FirstOrDefault(i => i.Id == invoiceId);
+                if (parentInvoice != null)
+                {
+                    parentInvoice.IsSynced = false;
+                    parentInvoice.UpdatedAt = now;
+                }
+            }
+        }
+
+        // ====================================================================
+        // 3. ОТСЛЕЖИВАНИЕ ИЗМЕНЕНИЙ В СТРОКАХ СКЛАДСКИХ АКТОВ (STOCK SLIP LINES)
+        // ====================================================================
+        var slipLineEntries = ChangeTracker.Entries<StockSlipLineEntity>()
+            .Where(e => e.State == EntityState.Added || e.State == EntityState.Modified || e.State == EntityState.Deleted)
+            .ToList();
+
+        foreach (var slipLineEntry in slipLineEntries)
+        {
+            var slipId = slipLineEntry.State == EntityState.Deleted
+                ? slipLineEntry.OriginalValues.GetValue<Guid>("StockSlipId")
+                : slipLineEntry.Entity.StockSlipId;
+
+            if (slipId != Guid.Empty)
+            {
+                var parentSlip = StockSlips.Local.FirstOrDefault(s => s.Id == slipId);
+                if (parentSlip != null)
+                {
+                    parentSlip.IsSynced = false;
+                    parentSlip.UpdatedAt = now;
+                }
+            }
+        }
+
+        // ====================================================================
+        // 4. УПРАВЛЕНИЕ ФЛАГОМ ISSYNCED ДЛЯ НАКЛАДНЫХ (INVOICES)
+        // ====================================================================
+        var invoiceEntries = ChangeTracker.Entries<InvoiceEntity>()
+            .Where(e => e.State == EntityState.Added || e.State == EntityState.Modified)
+            .ToList();
+
+        foreach (var entry in invoiceEntries)
+        {
+            bool isExplicitlyMarkedSynced = entry.Property(x => x.IsSynced).IsModified && entry.Entity.IsSynced;
+
+            if (!isExplicitlyMarkedSynced)
+            {
+                entry.Entity.IsSynced = false;
+                entry.Entity.UpdatedAt = now;
+            }
+        }
+
+        // ====================================================================
+        // 5. УПРАВЛЕНИЕ ФЛАГОМ ISSYNCED ДЛЯ СКЛАДСКИХ АКТОВ (STOCK SLIPS)
+        // ====================================================================
+        var slipEntries = ChangeTracker.Entries<StockSlipEntity>()
+            .Where(e => e.State == EntityState.Added || e.State == EntityState.Modified)
+            .ToList();
+
+        foreach (var entry in slipEntries)
+        {
+            bool isExplicitlyMarkedSynced = entry.Property(x => x.IsSynced).IsModified && entry.Entity.IsSynced;
+
+            if (!isExplicitlyMarkedSynced)
+            {
+                entry.Entity.IsSynced = false;
+                entry.Entity.UpdatedAt = now;
+            }
+        }
+
+        return base.SaveChangesAsync(cancellationToken);
     }
 }

@@ -10,6 +10,6 @@ public partial class ActivationView : MvxWpfView
 
     private void ActivationView_OnLoaded(object sender, RoutedEventArgs e)
     {
-        ClientNote.Text = ServerNote.Text = $"{Environment.MachineName} - {Environment.UserName}";
+        //ClientNote.Text = ServerNote.Text = $"{Environment.MachineName} - {Environment.UserName}";
     }
 }

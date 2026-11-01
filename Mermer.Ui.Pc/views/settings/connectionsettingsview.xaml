@@ -5,63 +5,118 @@
                 xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
                 xmlns:dx="http://schemas.devexpress.com/winfx/2008/xaml/core"
                 xmlns:dxmvvm="http://schemas.devexpress.com/winfx/2008/xaml/mvvm"
-                xmlns:dxlc="http://schemas.devexpress.com/winfx/2008/xaml/layoutcontrol"
                 xmlns:dxe="http://schemas.devexpress.com/winfx/2008/xaml/editors"
-                xmlns:dxg="http://schemas.devexpress.com/winfx/2008/xaml/grid"
-                xmlns:mvx="clr-namespace:MvvmCross.Wpf.Views;assembly=MvvmCross.Wpf"
-                xmlns:sys="clr-namespace:System;assembly=mscorlib"
-                xmlns:vm="clr-namespace:Mermer.Ui.Core.ViewModels.Settings;assembly=Mermer.Ui.Core">
-  <DockPanel>
-    <StackPanel DockPanel.Dock="Bottom" HorizontalAlignment="Right" Orientation="Horizontal"
-                dx:ThemeManager.ThemeName="Office2013DarkGray;Touch">
-      <Button Margin="0,0,10,0" IsDefault="true" Content="{Localize Save}" Command="{Binding SaveCommand}"/>
-      <Button IsCancel="true" Content="{Localize Cancel}" Command="{Binding CloseCommand}"/>
-    </StackPanel>
-    <Grid FocusManager.FocusedElement="{Binding ElementName=FirstFocus}">
-      <dxlc:LayoutControl Width="400" Orientation="Vertical" VerticalAlignment="Center" HorizontalAlignment="Center"
-                          IsEnabled="{Binding IsBusy, Converter={dxmvvm:BooleanNegationConverter}}">
-        <dxlc:LayoutGroup Orientation="Vertical">
-          <dxlc:LayoutItem Label="{Localize 'Connection mode'}">
-            <dxe:ComboBoxEdit x:Name="FirstFocus" DisplayMember="Text" ValueMember="Value"
-                              ItemsSource="{Binding ConnectionModes}"
-                              EditValue="{Binding Config.Mode, UpdateSourceTrigger=PropertyChanged}"/>
-          </dxlc:LayoutItem>
-          <dxlc:LayoutGroup Orientation="Vertical"
-                            Visibility="{Binding Config.IsDirectModeSelected, Converter={dxmvvm:BooleanToVisibilityConverter}}">
-            <dxlc:LayoutItem Label="{Localize 'Database address'}">
-              <dxe:TextEdit EditValue="{Binding Config.DatabaseAddress, UpdateSourceTrigger=PropertyChanged}"/>
-            </dxlc:LayoutItem>
-            <dxlc:LayoutItem Label="{Localize 'Database name'}">
-              <dxe:TextEdit EditValue="{Binding Config.DatabaseName, UpdateSourceTrigger=PropertyChanged}"/>
-            </dxlc:LayoutItem>
-            <dxlc:LayoutItem Label="{Localize 'Database user'}">
-              <dxe:TextEdit EditValue="{Binding Config.DatabaseUser, UpdateSourceTrigger=PropertyChanged}"/>
-            </dxlc:LayoutItem>
-            <dxlc:LayoutItem Label="{Localize 'Database password'}">
-              <dxe:PasswordBoxEdit EditValue="{Binding Config.DatabasePassword, UpdateSourceTrigger=PropertyChanged}"/>
-            </dxlc:LayoutItem>
-            <dxlc:LayoutItem Label="{Localize Initialization}">
-              <dxlc:LayoutGroup Orientation="Vertical">
-                <dxe:CheckEdit Content="{Localize 'Allow Reporting'}"
-                               EditValue="{Binding Config.AllowReporting, UpdateSourceTrigger=PropertyChanged}"/>
-                <Button MinHeight="30" Content="{Localize 'Create/Update Indexes'}"
-                        Command="{Binding CreateInitialSchemaCommand}"/>
-                <Button MinHeight="30" Content="{Localize 'Create Initial Data'}"
-                        Command="{Binding CreateInitialDataCommand}"/>
-              </dxlc:LayoutGroup>
-            </dxlc:LayoutItem>
-          </dxlc:LayoutGroup>
-          <dxlc:LayoutGroup Orientation="Vertical"
-                            Visibility="{Binding Config.IsDirectModeSelected, Converter={dxmvvm:BooleanToVisibilityConverter Inverse=true}}">
-            <dxlc:LayoutItem Label="{Localize 'Service address'}">
-              <dxe:TextEdit EditValue="{Binding Config.ServiceAddress, UpdateSourceTrigger=PropertyChanged}"/>
-            </dxlc:LayoutItem>
-          </dxlc:LayoutGroup>
-        </dxlc:LayoutGroup>
-      </dxlc:LayoutControl>
-      <Grid Visibility="{Binding IsBusy, Converter={dxmvvm:BooleanToVisibilityConverter}}">
-        <dx:WaitIndicator DeferedVisibility="{Binding IsBusy}"/>
-      </Grid>
+                xmlns:mvx="clr-namespace:MvvmCross.Wpf.Views;assembly=MvvmCross.Wpf">
+    <Grid Background="Transparent">
+        <DockPanel LastChildFill="True">
+
+            <!-- Нижние кнопки управления -->
+            <Border DockPanel.Dock="Bottom" Padding="0,20,30,25" Background="Transparent">
+                <StackPanel HorizontalAlignment="Right" Orientation="Horizontal"
+                    dx:ThemeManager.ThemeName="Office2013DarkGray;Touch">
+                    <Button MinWidth="130" MinHeight="36" Margin="0,0,12,0" IsDefault="True"
+                  Content="Save" Command="{Binding SaveCommand}"/>
+                    <Button MinWidth="130" MinHeight="36" IsCancel="True"
+                  Content="Cancel" Command="{Binding CloseCommand}"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Центральная форма настроек -->
+            <Grid VerticalAlignment="Center" HorizontalAlignment="Center" Width="580">
+                <StackPanel Orientation="Vertical" IsEnabled="{Binding IsBusy, Converter={dxmvvm:BooleanNegationConverter}}">
+
+                    <!-- Главный заголовок -->
+                    <TextBlock Text="Connection &amp; Synchronization" 
+                       FontSize="22" 
+                       FontWeight="Bold" 
+                       Foreground="#0F172A" 
+                       Margin="0,0,0,4"/>
+
+                    <TextBlock Text="Configure local database API and cloud VDS synchronization parameters." 
+                     FontSize="13" 
+                     Foreground="#475569" 
+                     Margin="0,0,0,20"/>
+
+                    <!-- СЕКЦИЯ 1: Локальная база / Сервер на кассе -->
+                    <Border BorderBrush="#CBD5E1" BorderThickness="1" CornerRadius="4" Padding="16" Margin="0,0,0,16" Background="#F8FAFC">
+                        <StackPanel Orientation="Vertical">
+                            <TextBlock Text="1. Local Database Engine (Local API)" 
+                         FontSize="14" 
+                         FontWeight="Bold" 
+                         Foreground="#0F172A" 
+                         Margin="0,0,0,4"/>
+
+                            <TextBlock Text="Point to the local API service running on this terminal or main station." 
+                         FontSize="12" 
+                         Foreground="#64748B" 
+                         Margin="0,0,0,10"/>
+
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <dxe:TextEdit Grid.Column="0"
+                              EditValue="{Binding ServiceAddress, UpdateSourceTrigger=PropertyChanged, Mode=TwoWay}"
+                              NullText="http://127.0.0.1:5050"
+                              Height="36"
+                              FontSize="13"
+                              Margin="0,0,10,0"/>
+
+                                <Button Grid.Column="1" 
+                        Content="Test Local" 
+                        MinWidth="110" 
+                        Height="36" 
+                        Command="{Binding TestLocalConnectionCommand}"/>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- СЕКЦИЯ 2: Облачная синхронизация VDS (Offline-First) -->
+                    <Border BorderBrush="#CBD5E1" BorderThickness="1" CornerRadius="4" Padding="16" Margin="0,0,0,10" Background="#F8FAFC">
+                        <StackPanel Orientation="Vertical">
+                            <dxe:CheckEdit Content="Enable Cloud Synchronization (Remote VDS)" 
+                             IsChecked="{Binding IsSyncEnabled, Mode=TwoWay}"
+                             FontWeight="Bold"
+                             Foreground="#0F172A"
+                             Margin="0,0,0,6"/>
+
+                            <TextBlock Text="When internet is available, local transactions are seamlessly synchronized to VDS." 
+                         FontSize="12" 
+                         Foreground="#64748B" 
+                         Margin="0,0,0,10"/>
+
+                            <Grid Margin="0,0,0,4" IsEnabled="{Binding IsSyncEnabled}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <dxe:TextEdit Grid.Column="0"
+                              EditValue="{Binding VdsServerUrl, UpdateSourceTrigger=PropertyChanged, Mode=TwoWay}"
+                              NullText="https://vds.mermer-erp.com:5050"
+                              Height="36"
+                              FontSize="13"
+                              Margin="0,0,10,0"/>
+
+                                <Button Grid.Column="1" 
+                        Content="Test VDS" 
+                        MinWidth="110" 
+                        Height="36" 
+                        Command="{Binding TestVdsConnectionCommand}"/>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
+                </StackPanel>
+
+                <!-- Индикатор выполнения операции -->
+                <Grid Visibility="{Binding IsBusy, Converter={dxmvvm:BooleanToVisibilityConverter}}">
+                    <dx:WaitIndicator DeferedVisibility="{Binding IsBusy}"/>
+                </Grid>
+            </Grid>
+
+        </DockPanel>
     </Grid>
-  </DockPanel>
 </mvx:MvxWpfView>

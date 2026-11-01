@@ -13,15 +13,13 @@ namespace Mermer.Ui.Pc.Services;
 public class ApiExpensesRepository : IRepositoryWithFacets<Expense>, IRepository<Expense>, IReadOnlyRepository<Expense>
 {
     private readonly RestClient _restClient;
-    private const string DocType = "Expense";
-
     private static readonly ConcurrentDictionary<string, Expense> _cardCache = new(StringComparer.OrdinalIgnoreCase);
     private static List<Expense> _memoryCache;
     private static readonly object _syncLock = new();
 
     public ApiExpensesRepository(RestClient restClient)
     {
-        _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
+        _restClient = restClient ?? throw new Exception("Http RestClient cannot be null.");
     }
 
     public async Task<Expense> GetAsync(string id)
@@ -41,7 +39,6 @@ public class ApiExpensesRepository : IRepositoryWithFacets<Expense>, IRepository
             if (remote != null)
             {
                 _cardCache[remote.Id] = remote;
-                LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                 return remote;
             }
         }
@@ -82,44 +79,23 @@ public class ApiExpensesRepository : IRepositoryWithFacets<Expense>, IRepository
                 return _memoryCache;
         }
 
-        // 1. Читаем из локального SQLite
-        var local = LocalSqliteCache.GetAllDocuments<Expense>(DocType)?.ToList() ?? new List<Expense>();
-        if (local.Any())
+        try
         {
-            lock (_syncLock)
+            var remote = await _restClient.GetAsync<List<Expense>>("/api/expenses");
+            if (remote != null && remote.Any())
             {
-                _memoryCache = local;
-                foreach (var exp in local)
+                lock (_syncLock)
                 {
-                    if (!string.IsNullOrEmpty(exp?.Id)) _cardCache[exp.Id] = exp;
-                }
-            }
-        }
-
-        // 2. Если локально пусто — запрашиваем API
-        if (_memoryCache == null || _memoryCache.Count == 0)
-        {
-            try
-            {
-                var remote = await _restClient.GetAsync<List<Expense>>("/api/expenses");
-                if (remote != null && remote.Any())
-                {
-                    lock (_syncLock)
+                    _memoryCache = remote;
+                    foreach (var exp in remote)
                     {
-                        _memoryCache = remote;
-                        foreach (var exp in remote)
-                        {
-                            if (!string.IsNullOrEmpty(exp?.Id))
-                            {
-                                _cardCache[exp.Id] = exp;
-                                LocalSqliteCache.SaveDocument(DocType, exp.Id, exp, isSynced: true);
-                            }
-                        }
+                        if (!string.IsNullOrEmpty(exp?.Id))
+                            _cardCache[exp.Id] = exp;
                     }
                 }
             }
-            catch { }
         }
+        catch { }
 
         return _memoryCache ?? Enumerable.Empty<Expense>();
     }
@@ -134,7 +110,11 @@ public class ApiExpensesRepository : IRepositoryWithFacets<Expense>, IRepository
 
     public async Task SaveAsync(Expense model)
     {
-        if (model == null) return;
+        if (model == null)
+        {
+            throw new Exception("Cannot save an empty Expense entity.");
+        }
+
         if (string.IsNullOrEmpty(model.Id)) model.Id = Guid.NewGuid().ToString();
 
         _cardCache[model.Id] = model;
@@ -148,29 +128,25 @@ public class ApiExpensesRepository : IRepositoryWithFacets<Expense>, IRepository
             }
         }
 
-        LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: false);
-
-        // Мгновенное обновление статей расходов в UI
-        UiEventBus.NotifyDocumentModified<Expense>(model.Id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
-                await _restClient.PostAsync("/api/expenses", model);
-                LocalSqliteCache.SaveDocument(DocType, model.Id, model, isSynced: true);
-                UiEventBus.NotifyDocumentModified<Expense>(model.Id);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[EXPENSE SYNC ERROR]: {ex.Message}");
-            }
-        });
+            await _restClient.PostAsync("/api/expenses", model);
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to save Expense '{0}'. Details: {1}", model.Id, detail), ex);
+        }
+
+        UiEventBus.NotifyDocumentModified<Expense>(model.Id);
     }
 
     public async Task DeleteAsync(string id)
     {
-        if (string.IsNullOrEmpty(id)) return;
+        if (string.IsNullOrEmpty(id))
+        {
+            throw new Exception("Expense identifier cannot be empty for delete operation.");
+        }
 
         _cardCache.TryRemove(id, out _);
         lock (_syncLock)
@@ -178,13 +154,17 @@ public class ApiExpensesRepository : IRepositoryWithFacets<Expense>, IRepository
             _memoryCache?.RemoveAll(x => x.Id == id);
         }
 
-        // Мгновенное удаление статьи расхода из списка
-        UiEventBus.NotifyDocumentModified<Expense>(id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try { await _restClient.DeleteAsync($"/api/expenses/{id}"); } catch { }
-        });
+            await _restClient.DeleteAsync($"/api/expenses/{id}");
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to delete Expense '{0}'. Details: {1}", id, detail), ex);
+        }
+
+        UiEventBus.NotifyDocumentModified<Expense>(id);
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)

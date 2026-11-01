@@ -18,7 +18,6 @@ public class ApiPartnersRepository :
     IRepositoryWithFacets<Partner>
 {
     private readonly RestClient _restClient;
-    private const string DocType = "Partner";
 
     private static readonly ConcurrentDictionary<string, Partner> _cardCache = new(StringComparer.OrdinalIgnoreCase);
     private static List<Partner> _memoryCache;
@@ -26,7 +25,7 @@ public class ApiPartnersRepository :
 
     public ApiPartnersRepository(RestClient restClient)
     {
-        _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
+        _restClient = restClient ?? throw new Exception("Http RestClient cannot be null.");
     }
 
     public async Task<IEnumerable<Partner>> GetAllAsync()
@@ -37,44 +36,23 @@ public class ApiPartnersRepository :
                 return _memoryCache;
         }
 
-        // 1. Быстрое чтение из локального SQLite
-        var local = LocalSqliteCache.GetAllDocuments<Partner>(DocType)?.ToList() ?? new List<Partner>();
-        if (local.Any())
+        try
         {
-            lock (_syncLock)
+            var remote = await _restClient.GetAsync<List<Partner>>("/api/partners");
+            if (remote != null && remote.Any())
             {
-                _memoryCache = local.OrderBy(p => p.Name).ToList();
-                foreach (var p in local)
+                lock (_syncLock)
                 {
-                    if (!string.IsNullOrEmpty(p?.Id)) _cardCache[p.Id] = p;
-                }
-            }
-        }
-
-        // 2. Если в локальной БД пусто — подгружаем с бэкенда
-        if (_memoryCache == null || _memoryCache.Count == 0)
-        {
-            try
-            {
-                var remote = await _restClient.GetAsync<List<Partner>>("/api/partners");
-                if (remote != null && remote.Any())
-                {
-                    lock (_syncLock)
+                    _memoryCache = remote.OrderBy(p => p.Name).ToList();
+                    foreach (var p in remote)
                     {
-                        _memoryCache = remote.OrderBy(p => p.Name).ToList();
-                        foreach (var p in remote)
-                        {
-                            if (!string.IsNullOrEmpty(p?.Id))
-                            {
-                                _cardCache[p.Id] = p;
-                                LocalSqliteCache.SaveDocument(DocType, p.Id, p, isSynced: true);
-                            }
-                        }
+                        if (!string.IsNullOrEmpty(p?.Id))
+                            _cardCache[p.Id] = p;
                     }
                 }
             }
-            catch { }
         }
+        catch { }
 
         return _memoryCache ?? Enumerable.Empty<Partner>();
     }
@@ -98,10 +76,7 @@ public class ApiPartnersRepository :
                     foreach (var p in remote)
                     {
                         if (!string.IsNullOrEmpty(p?.Id))
-                        {
                             _cardCache[p.Id] = p;
-                            LocalSqliteCache.SaveDocument(DocType, p.Id, p, isSynced: true);
-                        }
                     }
                 }
             }
@@ -126,7 +101,6 @@ public class ApiPartnersRepository :
             if (remote != null)
             {
                 _cardCache[remote.Id] = remote;
-                LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                 return remote;
             }
         }
@@ -167,7 +141,11 @@ public class ApiPartnersRepository :
 
     public async Task SaveAsync(Partner entity)
     {
-        if (entity == null) return;
+        if (entity == null)
+        {
+            throw new Exception("Cannot save an empty Partner entity.");
+        }
+
         bool isNew = string.IsNullOrEmpty(entity.Id) || entity.Id == Guid.Empty.ToString();
         if (isNew) entity.Id = Guid.NewGuid().ToString();
 
@@ -183,30 +161,26 @@ public class ApiPartnersRepository :
             }
         }
 
-        LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
-
-        // Мгновенно обновляем реестр контрагентов
-        UiEventBus.NotifyDocumentModified<Partner>(entity.Id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
-                if (isNew) await _restClient.PostAsync("/api/partners", entity);
-                else await _restClient.PutAsync($"/api/partners/{entity.Id}", entity);
-                LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
-                UiEventBus.NotifyDocumentModified<Partner>(entity.Id);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[PARTNER SYNC ERROR]: {ex.Message}");
-            }
-        });
+            if (isNew) await _restClient.PostAsync("/api/partners", entity);
+            else await _restClient.PutAsync($"/api/partners/{entity.Id}", entity);
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to save Partner '{0}'. Details: {1}", entity.Id, detail), ex);
+        }
+
+        UiEventBus.NotifyDocumentModified<Partner>(entity.Id);
     }
 
     public async Task DeleteAsync(string id)
     {
-        if (string.IsNullOrEmpty(id)) return;
+        if (string.IsNullOrEmpty(id))
+        {
+            throw new Exception("Partner identifier cannot be empty for delete operation.");
+        }
 
         _cardCache.TryRemove(id, out _);
         lock (_syncLock)
@@ -214,18 +188,25 @@ public class ApiPartnersRepository :
             _memoryCache?.RemoveAll(x => x.Id == id);
         }
 
-        // Мгновенно удаляем контрагента из открытого списка
-        UiEventBus.NotifyDocumentModified<Partner>(id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try { await _restClient.DeleteAsync($"/api/partners/{id}"); } catch { }
-        });
+            await _restClient.DeleteAsync($"/api/partners/{id}");
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to delete Partner '{0}'. Details: {1}", id, detail), ex);
+        }
+
+        UiEventBus.NotifyDocumentModified<Partner>(id);
     }
 
     public async Task MergeAsync(string mainItemId, string[] mergeItemIds, bool disableMergedItems)
     {
-        if (string.IsNullOrEmpty(mainItemId) || mergeItemIds == null || !mergeItemIds.Any()) return;
+        if (string.IsNullOrEmpty(mainItemId) || mergeItemIds == null || !mergeItemIds.Any())
+        {
+            throw new Exception("Invalid parameters for merging partners.");
+        }
 
         try
         {
@@ -236,10 +217,8 @@ public class ApiPartnersRepository :
                 DisableMergedItems = disableMergedItems
             };
 
-            // 1. Отправляем команду слияния на бэкенд в PostgreSQL
             await _restClient.PostAsync("/api/partners/merge", payload);
 
-            // 2. Если стояла галочка отключения дубликатов — обновляем статус в кэше и SQLite
             if (disableMergedItems)
             {
                 var mergeSet = new HashSet<string>(mergeItemIds, StringComparer.OrdinalIgnoreCase);
@@ -251,7 +230,6 @@ public class ApiPartnersRepository :
                         foreach (var item in _memoryCache.Where(p => mergeSet.Contains(p.Id)))
                         {
                             item.IsDisabled = true;
-                            LocalSqliteCache.SaveDocument(DocType, item.Id, item, isSynced: true);
                         }
                     }
                 }
@@ -261,37 +239,16 @@ public class ApiPartnersRepository :
                     if (_cardCache.TryGetValue(id, out var cachedPartner))
                     {
                         cachedPartner.IsDisabled = true;
-                        LocalSqliteCache.SaveDocument(DocType, id, cachedPartner, isSynced: true);
                     }
                 }
             }
 
-            // 3. Запрашиваем свежий список с сервера и обновляем кэш
-            try
-            {
-                var remote = await _restClient.GetAsync<List<Partner>>("/api/partners");
-                if (remote != null && remote.Any())
-                {
-                    lock (_syncLock)
-                    {
-                        _memoryCache = remote.OrderBy(p => p.Name).ToList();
-                        foreach (var p in remote)
-                        {
-                            if (!string.IsNullOrEmpty(p?.Id))
-                            {
-                                _cardCache[p.Id] = p;
-                                LocalSqliteCache.SaveDocument(DocType, p.Id, p, isSynced: true);
-                            }
-                        }
-                    }
-                }
-            }
-            catch { }
+            await ReloadAsync();
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[PARTNER MERGE ERROR]: {ex.Message}");
-            throw;
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to merge partners into '{0}'. Details: {1}", mainItemId, detail), ex);
         }
     }
 

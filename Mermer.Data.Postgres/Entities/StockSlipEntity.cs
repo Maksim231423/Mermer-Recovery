@@ -38,6 +38,7 @@ public class StockSlipEntity
 
     [Column("date")]
     public DateTimeOffset Date { get; set; }
+    public bool IsSynced { get; set; } = false;
 
     [Column("created_at")]
     public DateTimeOffset CreatedAt { get; set; }

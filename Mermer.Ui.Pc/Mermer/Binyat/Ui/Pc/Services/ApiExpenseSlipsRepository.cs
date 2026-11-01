@@ -13,14 +13,11 @@ namespace Mermer.Ui.Pc.Services;
 public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRepository<ExpenseSlip>, IReadOnlyRepository<ExpenseSlip>
 {
     private readonly RestClient _restClient;
-    private const string DocType = "ExpenseSlip";
-
     private static readonly ConcurrentDictionary<string, ExpenseSlip> _cardCache = new(StringComparer.OrdinalIgnoreCase);
 
     public ApiExpenseSlipsRepository(RestClient restClient)
     {
-        _restClient = restClient ?? throw new ArgumentNullException(nameof(restClient));
-        SyncPendingSlips();
+        _restClient = restClient ?? throw new Exception("Http RestClient cannot be null.");
     }
 
     public async Task<ExpenseSlip> GetAsync(string id)
@@ -30,17 +27,12 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
         if (_cardCache.TryGetValue(id, out var cached))
             return cached;
 
-        await GetAllAsync();
-        if (_cardCache.TryGetValue(id, out cached))
-            return cached;
-
         try
         {
             var remote = await _restClient.GetAsync<ExpenseSlip>($"/api/spending/slips/{id}");
             if (remote != null)
             {
                 _cardCache[remote.Id] = remote;
-                LocalSqliteCache.SaveDocument(DocType, remote.Id, remote, isSynced: true);
                 return remote;
             }
         }
@@ -61,7 +53,6 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
         return result;
     }
 
-    // --- ПОЛУЧЕНИЕ СПИСКА (С ФИЛЬТРОМ ИЛИ ЗА ВСЁ ВРЕМЯ) ---
     public async Task<IEnumerable<ExpenseSlip>> GetAsync(params Expression<Func<ExpenseSlip, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
@@ -88,10 +79,7 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
                 return query.ToList();
             }
         }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[ExpenseSlips GetAsync Error]: {ex.Message}");
-        }
+        catch { }
 
         var all = await GetAllAsync();
         var fallbackQuery = all.AsQueryable();
@@ -103,7 +91,6 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
         return fallbackQuery.ToList();
     }
 
-    // --- ПОДСЧЕТ ДЛЯ ПЛИТОК ДАТ (ЛОГИКА СЧЕТЧИКОВ СОХРАНЕНА) ---
     public async Task<int> CountAsync(params Expression<Func<ExpenseSlip, bool>>[] predicates)
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
@@ -121,10 +108,7 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
             var res = await _restClient.GetAsync<CountResponse>(url);
             if (res != null) return res.Count;
         }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[ExpenseSlips CountAsync Error]: {ex.Message}");
-        }
+        catch { }
 
         var items = await GetAsync(predicates);
         return items.Count();
@@ -135,14 +119,19 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
         if (_cardCache.Count > 0)
             return _cardCache.Values.ToList();
 
-        var local = LocalSqliteCache.GetAllDocuments<ExpenseSlip>(DocType);
-        if (local != null)
+        try
         {
-            foreach (var item in local)
+            var remote = await _restClient.GetAsync<List<ExpenseSlip>>("/api/spending/slips");
+            if (remote != null)
             {
-                if (!string.IsNullOrEmpty(item?.Id)) _cardCache[item.Id] = item;
+                foreach (var item in remote)
+                {
+                    if (!string.IsNullOrEmpty(item?.Id))
+                        _cardCache[item.Id] = item;
+                }
             }
         }
+        catch { }
 
         return _cardCache.Values.ToList();
     }
@@ -152,47 +141,54 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
 
     public async Task<ExpenseSlip> SaveAsync(ExpenseSlip entity)
     {
-        if (entity == null) return null;
-        if (string.IsNullOrEmpty(entity.Id) || entity.Id == Guid.Empty.ToString())
-            entity.Id = Guid.NewGuid().ToString();
+        if (entity == null)
+        {
+            throw new Exception("Cannot save an empty ExpenseSlip entity.");
+        }
+
+        bool isNew = string.IsNullOrEmpty(entity.Id) || entity.Id == Guid.Empty.ToString();
+        if (isNew) entity.Id = Guid.NewGuid().ToString();
 
         _cardCache[entity.Id] = entity;
-        LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: false);
-
-        // Мгновенное обновление расхода в списке
-        UiEventBus.NotifyDocumentModified<ExpenseSlip>(entity.Id);
-
         var payload = BuildPayload(entity);
 
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
+            if (isNew)
                 await _restClient.PostAsync("/api/spending/slips", payload);
-                LocalSqliteCache.SaveDocument(DocType, entity.Id, entity, isSynced: true);
-                UiEventBus.NotifyDocumentModified<ExpenseSlip>(entity.Id);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[EXPENSE SLIP SYNC ERROR]: {ex.Message}");
-            }
-        });
+            else
+                await _restClient.PutAsync($"/api/spending/slips/{entity.Id}", payload);
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to save ExpenseSlip '{0}'. Details: {1}", entity.Id, detail), ex);
+        }
 
+        UiEventBus.NotifyDocumentModified<ExpenseSlip>(entity.Id);
         return entity;
     }
 
     public async Task DeleteAsync(string id)
     {
-        if (string.IsNullOrEmpty(id)) return;
+        if (string.IsNullOrEmpty(id))
+        {
+            throw new Exception("ExpenseSlip identifier cannot be empty for delete operation.");
+        }
+
         _cardCache.TryRemove(id, out _);
 
-        // Мгновенное удаление из списка
-        UiEventBus.NotifyDocumentModified<ExpenseSlip>(id);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try { await _restClient.DeleteAsync($"/api/spending/slips/{id}"); } catch { }
-        });
+            await _restClient.DeleteAsync($"/api/spending/slips/{id}");
+        }
+        catch (Exception ex)
+        {
+            var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+            throw new Exception(string.Format("Failed to delete ExpenseSlip '{0}'. Details: {1}", id, detail), ex);
+        }
+
+        UiEventBus.NotifyDocumentModified<ExpenseSlip>(id);
     }
 
     public async Task<Dictionary<string, Dictionary<string, int>>> GetFacets(params string[] fields)
@@ -216,38 +212,9 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
                 }
             }
         }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[ExpenseSlips GetFacets Error]: {ex.Message}");
-        }
+        catch { }
 
         return dict;
-    }
-
-    // --- ФОНОВАЯ ДОСЫЛКА НЕОТПРАВЛЕННЫХ ЗАПИСЕЙ ИЗ SQLITE ---
-    private void SyncPendingSlips()
-    {
-        Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(2500);
-                var allLocal = LocalSqliteCache.GetAllDocuments<ExpenseSlip>(DocType);
-                if (allLocal == null) return;
-
-                foreach (var slip in allLocal)
-                {
-                    try
-                    {
-                        var payload = BuildPayload(slip);
-                        await _restClient.PostAsync("/api/spending/slips", payload);
-                        LocalSqliteCache.SaveDocument(DocType, slip.Id, slip, isSynced: true);
-                    }
-                    catch { }
-                }
-            }
-            catch { }
-        });
     }
 
     private static object BuildPayload(ExpenseSlip entity)
@@ -285,7 +252,6 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
         };
     }
 
-    // --- ПАРСЕР ДАТ ИЗ ВЫРАЖЕНИЙ MVVMCROSS ---
     private static (bool HasDates, DateTime From, DateTime Till) TryExtractDateRange(Expression<Func<ExpenseSlip, bool>>[] predicates)
     {
         if (predicates == null || predicates.Length == 0)
