@@ -30,6 +30,7 @@ public class PgInvoicesRepository : IInvoicesRepository
             return null;
 
         var entity = await _db.Invoices
+            .AsNoTracking()
             .Include(i => i.Lines)
             .Include(i => i.Discounts)
             .Include(i => i.Payments)
@@ -600,6 +601,8 @@ public class PgInvoicesRepository : IInvoicesRepository
 
     private static Invoice MapToModel(InvoiceEntity e)
     {
+        var defaultCurrencyId = e.DisplayCurrencyId?.ToString();
+
         return new Invoice
         {
             Id = e.Id.ToString(),
@@ -613,7 +616,7 @@ public class PgInvoicesRepository : IInvoicesRepository
             WarehouseId = e.WarehouseId?.ToString(),
             DepositoryId = e.DepositoryId?.ToString(),
             PartnerId = e.PartnerId?.ToString(),
-            DisplayCurrencyId = e.DisplayCurrencyId?.ToString(),
+            DisplayCurrencyId = defaultCurrencyId,
             StockPriceGroup = e.StockPriceGroup,
             DebitCreditLeftAmount = e.DebitCreditLeftAmount,
             Description = e.Description,
@@ -621,16 +624,21 @@ public class PgInvoicesRepository : IInvoicesRepository
             UserName = e.UserName,
             Group = e.Group,
             Tags = e.Tags != null ? e.Tags.ToList() : new List<string>(),
-            Lines = e.Lines.Select(l => new InvoiceLine
+            Lines = e.Lines.Select(l =>
             {
-                Id = l.Id.ToString(),
-                SourceId = l.SourceId?.ToString(),
-                StockId = l.StockId?.ToString(),
-                UnitId = l.UnitId?.ToString(),
-                Quantity = l.Quantity,
-                Price = l.Price,
-                CurrencyId = l.CurrencyId?.ToString(),
-                SortOrder = l.SortOrder
+                var unitId = l.UnitId?.ToString();
+
+                return new InvoiceLine
+                {
+                    Id = l.Id.ToString(),
+                    SourceId = l.SourceId?.ToString(),
+                    StockId = l.StockId?.ToString(),
+                    UnitId = unitId,
+                    Quantity = l.Quantity,
+                    Price = l.Price,
+                    CurrencyId = l.CurrencyId?.ToString() ?? defaultCurrencyId,
+                    SortOrder = l.SortOrder
+                };
             }).ToList(),
             Discounts = e.Discounts.Select(d => new InvoiceDiscount
             {
@@ -641,28 +649,29 @@ public class PgInvoicesRepository : IInvoicesRepository
                 SortOrder = d.SortOrder
             }).ToList(),
             Payments = e.Payments
-                .Where(p => p.PaymentType == "Payment")
+                .Where(p => string.Equals(p.PaymentType, "Payment", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(p.PaymentType))
                 .Select(p => new InvoicePayment
                 {
                     Id = p.Id.ToString(),
                     Amount = p.Amount,
-                    CurrencyId = p.CurrencyId?.ToString(),
+                    // Гарантируем, что у платежа есть CurrencyId (если null, берем валюту документа)
+                    CurrencyId = p.CurrencyId?.ToString() ?? defaultCurrencyId,
                     SortOrder = p.SortOrder
                 }).ToList(),
             Changes = e.Payments
-                .Where(p => p.PaymentType == "Change")
+                .Where(p => string.Equals(p.PaymentType, "Change", StringComparison.OrdinalIgnoreCase))
                 .Select(p => new InvoicePayment
                 {
                     Id = p.Id.ToString(),
                     Amount = p.Amount,
-                    CurrencyId = p.CurrencyId?.ToString(),
+                    CurrencyId = p.CurrencyId?.ToString() ?? defaultCurrencyId,
                     SortOrder = p.SortOrder
                 }).ToList(),
             Overheads = e.Overheads.Select(o => new InvoiceOverhead
             {
                 Id = o.Id.ToString(),
                 Amount = o.Amount,
-                CurrencyId = o.CurrencyId?.ToString(),
+                CurrencyId = o.CurrencyId?.ToString() ?? defaultCurrencyId,
                 Description = o.Description,
                 SortOrder = o.SortOrder
             }).ToList()
@@ -742,12 +751,12 @@ public class PgInvoicesRepository : IInvoicesRepository
     }
 
     private static InvoicePaymentEntity MapPaymentToEntity(
-        InvoicePayment p, Guid invoiceId, string paymentType)
+    InvoicePayment p, Guid invoiceId, string paymentType)
     {
         Guid.TryParse(p.CurrencyId, out var currencyId);
         return new InvoicePaymentEntity
         {
-            Id = Guid.TryParse(p.Id, out var pid) ? pid : Guid.NewGuid(),
+            Id = Guid.TryParse(p.Id, out var pid) && pid != Guid.Empty ? pid : Guid.NewGuid(),
             InvoiceId = invoiceId,
             PaymentType = paymentType,
             Amount = p.Amount,

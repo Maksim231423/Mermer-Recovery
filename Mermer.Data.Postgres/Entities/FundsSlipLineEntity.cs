@@ -1,15 +1,16 @@
-﻿using System;
+﻿using Mermer.Data.Postgres.Entities;
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
 
-namespace Mermer.Data.Postgres.Entities;
-
+[Table("funds_slip_lines")]
 public class FundsSlipLineEntity
 {
-    public Guid Id { get; set; }
-    public Guid FundsSlipId { get; set; }
-    public decimal Amount { get; set; }
-    public Guid? CurrencyId { get; set; }
-    public int SortOrder { get; set; }
+    [Key][Column("id")] public Guid Id { get; set; }
+    [Column("funds_slip_id")] public Guid FundsSlipId { get; set; }
+    [Column("amount")] public decimal Amount { get; set; }
+    [Column("currency_id")] public Guid? CurrencyId { get; set; }
+    [Column("sort_order")] public int SortOrder { get; set; }
 
-    public FundsSlipEntity FundsSlip { get; set; }
-    public CurrencyEntity Currency { get; set; }
+    [ForeignKey(nameof(FundsSlipId))] public FundsSlipEntity? FundsSlip { get; set; }
+    [ForeignKey(nameof(CurrencyId))] public CurrencyEntity? Currency { get; set; }
 }

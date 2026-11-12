@@ -1,10 +1,12 @@
-﻿using MvvmCross.Core.Navigation;
-using MvvmCross.Core.ViewModels;
-using MvvmCross.Plugins.Messenger;
-using Mermer.Activations.Models;
+﻿using Mermer.Activations.Models;
 using Mermer.Activations.Services;
+using Mermer.Common.Settings;
 using Mermer.Mvvm.Services;
 using Mermer.Mvvm.ViewModels;
+using Mermer.Services;
+using MvvmCross.Core.Navigation;
+using MvvmCross.Core.ViewModels;
+using MvvmCross.Plugins.Messenger;
 using System;
 using System.Threading.Tasks;
 using System.Windows.Input;
@@ -15,8 +17,9 @@ namespace Mermer.Ui.Core.ViewModels.Settings;
 public class ActivationViewModel : DialogViewModel
 {
     private readonly IBinyatActivationService _activationService;
-    private string _note;
+    private readonly IConfigurator _configurator;
 
+    private string _note;
     private string _clientLicenseId;
     private ActivationStatus _clientActivationStatus;
 
@@ -26,7 +29,14 @@ public class ActivationViewModel : DialogViewModel
     private string _syncLicenseId;
     private ActivationStatus _syncActivationStatus;
 
+    private bool _isVdsEnabled;
     private string _machineId;
+
+    public bool IsVdsEnabled
+    {
+        get => _isVdsEnabled;
+        set => SetProperty(ref _isVdsEnabled, value, nameof(IsVdsEnabled));
+    }
 
     public string MachineId
     {
@@ -38,17 +48,40 @@ public class ActivationViewModel : DialogViewModel
         IMvxMessenger messenger,
         IMvxNavigationService navigationService,
         IBinyatActivationService activationService,
-        IUserInteractionService userInteractionService)
+        IUserInteractionService userInteractionService,
+        IConfigurator configurator)
         : base(messenger, navigationService, userInteractionService)
     {
         _activationService = activationService ?? throw new Exception("Activation service cannot be null.");
+        _configurator = configurator;
     }
 
     protected override async Task OnLoad()
     {
         await base.OnLoad();
 
-        // Получаем аппаратный MachineId автономно прямо в Core
+        // 1. Считываем флаг Enable VDS из конфигуратора или системного реестра
+        try
+        {
+            var connSettings = await _configurator.GetConfigAsync<ConnectionSettings>();
+            IsVdsEnabled = connSettings?.AllowReporting ?? false;
+
+            if (!IsVdsEnabled)
+            {
+                using var regKey = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\MermerCS\Binyat_Postgres\ConnectionSettings");
+                if (regKey != null)
+                {
+                    var val = regKey.GetValue("AllowReporting")?.ToString();
+                    if (bool.TryParse(val, out bool regBool)) IsVdsEnabled = regBool;
+                }
+            }
+        }
+        catch
+        {
+            IsVdsEnabled = false;
+        }
+
+        // 2. Получаем идентификатор оборудования
         try
         {
             MachineId = GetHardwareMachineId();
@@ -60,17 +93,25 @@ public class ActivationViewModel : DialogViewModel
             Note = MachineId;
         }
 
-        await Task.WhenAll(
+        // 3. Загружаем статусы лицензий
+        var tasks = new System.Collections.Generic.List<Task>
+        {
             OnUpdateClientStatusAsync(),
-            OnUpdateServerStatusAsync(),
-            OnUpdateSyncStatusAsync());
+            OnUpdateServerStatusAsync()
+        };
+
+        if (IsVdsEnabled)
+        {
+            tasks.Add(OnUpdateSyncStatusAsync());
+        }
+
+        await Task.WhenAll(tasks);
     }
 
     private static string GetHardwareMachineId()
     {
         try
         {
-            // Формируем уникальный идентификатор устройства на основе данных машины
             var raw = string.Format("{0}_{1}", Environment.MachineName, Environment.ProcessorCount);
             using var sha = System.Security.Cryptography.SHA256.Create();
             var hash = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(raw));
@@ -309,10 +350,12 @@ public class ActivationViewModel : DialogViewModel
     }
 
     public ICommand UpdateSyncStatusCommand =>
-        new MvxAsyncCommand(OnUpdateSyncStatusAsync, () => !IsBusy);
+        new MvxAsyncCommand(OnUpdateSyncStatusAsync, () => !IsBusy && IsVdsEnabled);
 
     private async Task OnUpdateSyncStatusAsync()
     {
+        if (!IsVdsEnabled) return;
+
         IsBusy = true;
         try
         {
@@ -329,10 +372,12 @@ public class ActivationViewModel : DialogViewModel
     }
 
     public ICommand ActivateSyncCommand =>
-        new MvxAsyncCommand(OnActivateSyncAsync, () => !IsBusy && !string.IsNullOrEmpty(SyncLicenseId));
+        new MvxAsyncCommand(OnActivateSyncAsync, () => !IsBusy && IsVdsEnabled && !string.IsNullOrEmpty(SyncLicenseId));
 
     public virtual async Task OnActivateSyncAsync()
     {
+        if (!IsVdsEnabled) return;
+
         IsBusy = true;
         try
         {
@@ -351,10 +396,12 @@ public class ActivationViewModel : DialogViewModel
     }
 
     public ICommand ReactivateSyncCommand =>
-        new MvxAsyncCommand(OnReactivateSyncAsync, () => !IsBusy);
+        new MvxAsyncCommand(OnReactivateSyncAsync, () => !IsBusy && IsVdsEnabled);
 
     private async Task OnReactivateSyncAsync()
     {
+        if (!IsVdsEnabled) return;
+
         IsBusy = true;
         try
         {
@@ -373,10 +420,12 @@ public class ActivationViewModel : DialogViewModel
     }
 
     public ICommand DeactivateSyncCommand =>
-        new MvxAsyncCommand(OnDeactivateSyncAsync, () => !IsBusy);
+        new MvxAsyncCommand(OnDeactivateSyncAsync, () => !IsBusy && IsVdsEnabled);
 
     private async Task OnDeactivateSyncAsync()
     {
+        if (!IsVdsEnabled) return;
+
         IsBusy = true;
         try
         {
@@ -393,10 +442,6 @@ public class ActivationViewModel : DialogViewModel
             UpdateSyncStatusCommand.Execute(null);
         }
     }
-
-    // ==========================================
-    // HELPERS
-    // ==========================================
 
     private static string CleanErrorMessage(string rawMessage)
     {

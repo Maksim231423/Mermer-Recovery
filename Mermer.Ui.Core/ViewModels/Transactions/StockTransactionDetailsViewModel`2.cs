@@ -103,7 +103,19 @@ public class StockTransactionDetailsViewModel<T, TLine> :
     protected override Task PreLoad()
     {
         this.StocksCache = new ObservableCollection<Stock>();
-        return Task.WhenAll(base.PreLoad(), this.Warehouses.Initialize(), this.StockSearcher.Initialize());
+
+        // Запуск инициализации поисковика в фоне без блокировки открытия формы
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await this.StockSearcher.Initialize();
+            }
+            catch { }
+        });
+
+        // Инициализируем только базовые справочники складов
+        return Task.WhenAll(base.PreLoad(), this.Warehouses.Initialize());
     }
 
     protected override async Task OnLoad()

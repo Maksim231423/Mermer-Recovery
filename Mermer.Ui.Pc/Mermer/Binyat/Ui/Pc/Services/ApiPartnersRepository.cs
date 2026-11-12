@@ -120,15 +120,19 @@ public class ApiPartnersRepository :
     public async Task<IEnumerable<Partner>> GetAsync(params Expression<Func<Partner, bool>>[] predicates)
     {
         var all = await GetAllAsync();
-        var query = all.AsQueryable();
-        if (predicates != null)
+
+        // Если предикатов нет — отдаем уже отсортированный кэш без лишней работы
+        if (predicates == null || predicates.Length == 0)
+            return all;
+
+        IEnumerable<Partner> result = all;
+        foreach (var p in predicates.Where(x => x != null))
         {
-            foreach (var p in predicates.Where(x => x != null))
-            {
-                query = query.Where(p);
-            }
+            var compiled = p.Compile();
+            result = result.Where(compiled);
         }
-        return query.OrderBy(p => p.Name).ToList();
+
+        return result.ToList();
     }
 
     public async Task<int> CountAsync(params Expression<Func<Partner, bool>>[] predicates)

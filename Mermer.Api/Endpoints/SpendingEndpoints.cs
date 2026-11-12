@@ -1,16 +1,17 @@
-﻿using System;
+﻿using Mermer.Data.Postgres;
+using Mermer.Data.Postgres.Entities;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.EntityFrameworkCore;
+using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Routing;
-using Microsoft.EntityFrameworkCore;
-using Mermer.Data.Postgres;
-using Mermer.Data.Postgres.Entities;
 
 namespace Mermer.Api.Endpoints;
 
@@ -21,13 +22,22 @@ public static class SpendingEndpoints
         var group = routes.MapGroup("/api/spending/slips").WithTags("SpendingSlips");
 
         // 1. СПИСОК АКТОВ РАСХОДОВ
-        group.MapGet("", async (DateTime? from, DateTime? till, string? depositoryId, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 500;
-            int skip = offset.GetValueOrDefault(0);
+            int take = int.TryParse(req.Query["limit"], out var lVal) ? Math.Clamp(lVal, 1, 1000) : 500;
+            int skip = int.TryParse(req.Query["offset"], out var oVal) ? Math.Max(0, oVal) : 0;
 
-            var startDate = from.HasValue ? ParseSafeUtc(from.Value) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            var endDate = till.HasValue ? ParseSafeTillUtc(till.Value) : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+            string? depositoryId = req.Query["depositoryId"].FirstOrDefault();
+
+            DateTime startDate = !string.IsNullOrEmpty(fromStr)
+                ? ParseSafeFilterDate(fromStr, isTill: false)
+                : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+
+            DateTime endDate = !string.IsNullOrEmpty(tillStr)
+                ? ParseSafeFilterDate(tillStr, isTill: true)
+                : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
             var defaultCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
                              ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
@@ -59,7 +69,7 @@ public static class SpendingEndpoints
                 {
                     Id = s.Id.ToString(),
                     Code = s.Code ?? "",
-                    Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // Локальное время
+                    Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
                     Type = "ExpenseSlip",
                     FundsSlipType = "ExpenseSlip",
                     DepositoryId = s.DepositoryId?.ToString(),
@@ -98,10 +108,19 @@ public static class SpendingEndpoints
         });
 
         // 2. ПОДСЧЕТ ДЛЯ ПЛИТОК ДАТ
-        group.MapGet("/count", async (DateTime? from, DateTime? till, string? depositoryId, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            var startDate = from.HasValue ? ParseSafeUtc(from.Value) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            var endDate = till.HasValue ? ParseSafeTillUtc(till.Value) : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+            string? depositoryId = req.Query["depositoryId"].FirstOrDefault();
+
+            DateTime startDate = !string.IsNullOrEmpty(fromStr)
+                ? ParseSafeFilterDate(fromStr, isTill: false)
+                : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+
+            DateTime endDate = !string.IsNullOrEmpty(tillStr)
+                ? ParseSafeFilterDate(tillStr, isTill: true)
+                : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
             var query = db.ExpenseSlips
                 .AsNoTracking()
@@ -122,6 +141,7 @@ public static class SpendingEndpoints
             if (s == null) return Results.NotFound();
 
             var docCurrencyId = s.DisplayCurrencyId?.ToString() ?? (await db.Currencies.FirstOrDefaultAsync(c => c.IsDefault))?.Id.ToString();
+            // ИСПРАВЛЕНО: s.Date имеет тип DateTime, поэтому UtcDateTime не вызывается
             var convertions = await GetCurrencyConvertionsAsync(db, s.Date, ct);
             decimal total = s.Lines?.Sum(l => l.Amount) ?? 0m;
 
@@ -129,7 +149,7 @@ public static class SpendingEndpoints
             {
                 Id = s.Id.ToString(),
                 Code = s.Code ?? "",
-                Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // Локальное время
+                Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
                 Type = "ExpenseSlip",
                 FundsSlipType = "ExpenseSlip",
                 DepositoryId = s.DepositoryId?.ToString(),
@@ -215,8 +235,9 @@ public static class SpendingEndpoints
 
             Guid? userId = Guid.TryParse(GetStringProp(root, "userId", "UserId"), out var uG) ? uG : null;
 
-            // БЕЗОПАСНЫЙ ПАРСИНГ ДАТЫ БЕЗ ДВОЙНОГО СДВИГА:
-            DateTime date = ParseClientDate(GetStringProp(root, "date", "Date"));
+            // ИСПРАВЛЕНО: Парсим напрямую в DateTime с типом Utc
+            string? dateStr = GetStringProp(root, "date", "Date");
+            DateTime date = !string.IsNullOrEmpty(dateStr) ? ParseCleanDate(dateStr) : DateTime.UtcNow;
 
             var tagsList = ExtractTagsFromRawJson(root);
             string groupName = GetStringProp(root, "group", "Group", "groupName", "GroupName") ?? "";
@@ -331,10 +352,19 @@ public static class SpendingEndpoints
         });
 
         // 7. ЖУРНАЛ СТАТЕЙ РАСХОДОВ
-        routes.MapGet("/api/spending/actions/count", async (DateTime? from, DateTime? till, string? expenseId, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        routes.MapGet("/api/spending/actions/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            var startDate = from.HasValue ? ParseSafeUtc(from.Value) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            var endDate = till.HasValue ? ParseSafeTillUtc(till.Value) : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+            string? expenseId = req.Query["expenseId"].FirstOrDefault();
+
+            DateTime startDate = !string.IsNullOrEmpty(fromStr)
+                ? ParseSafeFilterDate(fromStr, isTill: false)
+                : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+
+            DateTime endDate = !string.IsNullOrEmpty(tillStr)
+                ? ParseSafeFilterDate(tillStr, isTill: true)
+                : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
             var rawDeps = req.Query["depositoryId"].ToArray();
             var depGuids = rawDeps
@@ -367,11 +397,21 @@ public static class SpendingEndpoints
             return Results.Ok(new { count = countAll });
         }).WithTags("SpendingActions");
 
-        routes.MapGet("/api/spending/actions", async (DateTime? from, DateTime? till, string? expenseId, int? limit, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        routes.MapGet("/api/spending/actions", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 10000) : 5000;
-            var startDate = from.HasValue ? ParseSafeUtc(from.Value) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            var endDate = till.HasValue ? ParseSafeTillUtc(till.Value) : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
+            int take = int.TryParse(req.Query["limit"], out var lVal) ? Math.Clamp(lVal, 1, 10000) : 5000;
+
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+            string? expenseId = req.Query["expenseId"].FirstOrDefault();
+
+            DateTime startDate = !string.IsNullOrEmpty(fromStr)
+                ? ParseSafeFilterDate(fromStr, isTill: false)
+                : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+
+            DateTime endDate = !string.IsNullOrEmpty(tillStr)
+                ? ParseSafeFilterDate(tillStr, isTill: true)
+                : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
             var rawDeps = req.Query["depositoryId"].ToArray();
             var depGuids = rawDeps
@@ -405,7 +445,7 @@ public static class SpendingEndpoints
                     {
                         TransactionId = s.Id.ToString(),
                         TransactionCode = s.Code ?? "",
-                        TransactionDate = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // Локальное время
+                        TransactionDate = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
                         TransactionType = "ExpenseSlip",
                         TransactionUserId = s.UserId?.ToString(),
                         TransactionUserName = s.UserName,
@@ -425,58 +465,44 @@ public static class SpendingEndpoints
     }
 
     #region Helpers
-    private static DateTime ParseClientDate(string? dateStr)
+    private static DateTime ParseCleanDate(string raw)
     {
-        if (string.IsNullOrEmpty(dateStr) || !DateTime.TryParse(dateStr, out var dt))
-            return DateTime.UtcNow;
-
-        return dt.Kind switch
+        raw = raw.Replace(" ", "+").Trim();
+        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
         {
-            DateTimeKind.Utc => dt,
-            DateTimeKind.Local => dt.ToUniversalTime(),
-            _ => DateTime.SpecifyKind(dt, DateTimeKind.Local).ToUniversalTime()
-        };
-    }
-
-    private static DateTime ParseSafeUtc(DateTime dt)
-    {
-        if (dt == DateTime.MinValue) return DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-        return dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
-    }
-
-    private static DateTime ParseSafeTillUtc(DateTime dt)
-    {
-        if (dt >= DateTime.MaxValue.AddDays(-2)) return DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
-
-        var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
-        if (dt.TimeOfDay == TimeSpan.Zero && dt.Kind != DateTimeKind.Utc)
-        {
-            return utc.Date.AddDays(1).AddTicks(-1);
+            return dto.UtcDateTime;
         }
-        return utc;
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            return dt.ToUniversalTime();
+        }
+        return DateTime.UtcNow;
     }
 
-    private static List<string> ExtractTagsFromRawJson(JsonElement root)
+    private static DateTime ParseSafeFilterDate(string raw, bool isTill = false)
     {
-        var list = new List<string>();
-        if (!root.TryGetProperty("tags", out var tagsProp) &&
-            !root.TryGetProperty("Tags", out tagsProp))
+        raw = raw.Replace(" ", "+").Trim();
+        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
         {
-            return list;
-        }
-
-        if (tagsProp.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in tagsProp.EnumerateArray())
+            var res = dto.UtcDateTime;
+            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
             {
-                if (item.ValueKind == JsonValueKind.String)
-                {
-                    var s = item.GetString();
-                    if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
-                }
+                res = res.Date.AddDays(1).AddTicks(-1);
             }
+            return res;
         }
-        return list.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            var res = dt.ToUniversalTime();
+            if (isTill && dt.TimeOfDay == TimeSpan.Zero)
+            {
+                res = res.Date.AddDays(1).AddTicks(-1);
+            }
+            return res;
+        }
+
+        return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
     }
 
     private static async Task<object[]> GetCurrencyConvertionsAsync(MermerDbContext db, DateTime docDate, CancellationToken ct)
@@ -505,6 +531,29 @@ public static class SpendingEndpoints
             });
         }
         return convertions.ToArray();
+    }
+
+    private static List<string> ExtractTagsFromRawJson(JsonElement root)
+    {
+        var list = new List<string>();
+        if (!root.TryGetProperty("tags", out var tagsProp) &&
+            !root.TryGetProperty("Tags", out tagsProp))
+        {
+            return list;
+        }
+
+        if (tagsProp.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in tagsProp.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.String)
+                {
+                    var s = item.GetString();
+                    if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
+                }
+            }
+        }
+        return list.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     private static bool TryGetPropCaseInsensitive(JsonElement el, string name, out JsonElement val)
@@ -538,7 +587,7 @@ public static class SpendingEndpoints
             if (TryGetPropCaseInsensitive(el, n, out var p))
             {
                 if (p.ValueKind == JsonValueKind.Number) return p.GetDecimal();
-                if (p.ValueKind == JsonValueKind.String && decimal.TryParse(p.GetString(), out var v)) return v;
+                if (p.ValueKind == JsonValueKind.String && decimal.TryParse(p.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var v)) return v;
             }
         }
         return 0m;

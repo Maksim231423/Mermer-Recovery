@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -21,18 +22,23 @@ public static class StockTransfersEndpoints
         var group = routes.MapGroup("/api/warehousing/transfers").WithTags("StockTransfers");
 
         // 1. СПИСОК ПЕРЕМЕЩЕНИЙ
-        group.MapGet("/", async (DateTime? from, DateTime? till, string? warehouseId, string? destinationWarehouseId, bool? conflicted, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 10000) : 5000;
-            int skip = offset.GetValueOrDefault(0);
+            int take = int.TryParse(req.Query["limit"], out var lVal) ? Math.Clamp(lVal, 1, 10000) : 5000;
+            int skip = int.TryParse(req.Query["offset"], out var oVal) ? Math.Max(0, oVal) : 0;
 
-            // Безопасное определение границ диапазона с захватом полного дня
-            DateTimeOffset startDate = from.HasValue && from.Value.Year > 2000
-                ? ParseSafeUtcOffset(from.Value)
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+            string? warehouseId = req.Query["warehouseId"].FirstOrDefault();
+            string? destinationWarehouseId = req.Query["destinationWarehouseId"].FirstOrDefault();
+            bool? conflicted = bool.TryParse(req.Query["conflicted"], out var cVal) ? cVal : null;
+
+            DateTimeOffset startDate = !string.IsNullOrEmpty(fromStr)
+                ? ParseSafeFilterOffset(fromStr, isTill: false)
                 : DateTimeOffset.MinValue;
 
-            DateTimeOffset endDate = till.HasValue && till.Value.Year < 2099
-                ? ParseSafeUtcOffset(till.Value, isTill: true)
+            DateTimeOffset endDate = !string.IsNullOrEmpty(tillStr)
+                ? ParseSafeFilterOffset(tillStr, isTill: true)
                 : DateTimeOffset.MaxValue;
 
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
@@ -139,7 +145,7 @@ public static class StockTransfersEndpoints
                 {
                     Id = t.Id.ToString(),
                     Code = t.Code ?? string.Empty,
-                    Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // Локальное время
+                    Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
                     Type = "StockTransfer",
                     WarehouseId = t.WarehouseId?.ToString(),
                     DestinationWarehouseId = t.DestinationWarehouseId?.ToString(),
@@ -171,20 +177,26 @@ public static class StockTransfersEndpoints
         });
 
         // 1.1. БЫСТРЫЙ ПОДСЧЕТ ДЛЯ ПЛИТОК ДАТ
-        group.MapGet("/count", async (DateTime? from, DateTime? till, string? warehouseId, string? destinationWarehouseId, bool? conflicted, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             var query = db.StockTransfers.AsNoTracking().Where(t => !t.IsDisabled);
 
-            if (from.HasValue && from.Value.Year > 2000)
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+            string? warehouseId = req.Query["warehouseId"].FirstOrDefault();
+            string? destinationWarehouseId = req.Query["destinationWarehouseId"].FirstOrDefault();
+            bool? conflicted = bool.TryParse(req.Query["conflicted"], out var cVal) ? cVal : null;
+
+            if (!string.IsNullOrEmpty(fromStr))
             {
-                var fUtc = ParseSafeUtcOffset(from.Value);
-                query = query.Where(t => t.Date >= fUtc);
+                var startDate = ParseSafeFilterOffset(fromStr, isTill: false);
+                query = query.Where(t => t.Date >= startDate);
             }
 
-            if (till.HasValue && till.Value.Year < 2099)
+            if (!string.IsNullOrEmpty(tillStr))
             {
-                var tUtc = ParseSafeUtcOffset(till.Value, isTill: true);
-                query = query.Where(t => t.Date <= tUtc);
+                var endDate = ParseSafeFilterOffset(tillStr, isTill: true);
+                query = query.Where(t => t.Date <= endDate);
             }
 
             if (Guid.TryParse(warehouseId, out var srcGuid))
@@ -224,7 +236,7 @@ public static class StockTransfersEndpoints
             {
                 Id = t.Id.ToString(),
                 Code = t.Code ?? string.Empty,
-                Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // Локальное время
+                Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
                 Type = "StockTransfer",
                 WarehouseId = t.WarehouseId?.ToString(),
                 DestinationWarehouseId = t.DestinationWarehouseId?.ToString(),
@@ -295,14 +307,11 @@ public static class StockTransfersEndpoints
                 dispCurId = defCur?.Id;
             }
 
-            // БЕЗОПАСНЫЙ ПАРСИНГ ДАТЫ (Без двойного смещения часового пояса)
             DateTimeOffset date = DateTimeOffset.UtcNow;
             string? dateStr = GetStringProp(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr) && DateTimeOffset.TryParse(dateStr, out var pDate))
+            if (!string.IsNullOrEmpty(dateStr))
             {
-                date = pDate.Offset == TimeSpan.Zero && !dateStr.EndsWith("Z", StringComparison.OrdinalIgnoreCase)
-                    ? new DateTimeOffset(DateTime.SpecifyKind(pDate.DateTime, DateTimeKind.Local).ToUniversalTime())
-                    : pDate.ToUniversalTime();
+                date = ParseCleanDateOffset(dateStr);
             }
 
             var tagsList = ExtractTagsFromRawJson(root);
@@ -456,20 +465,15 @@ public static class StockTransfersEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var now = DateTime.UtcNow.Date;
-                    var transfers = await db.StockTransfers
-                        .AsNoTracking()
-                        .Where(r => !r.IsDisabled)
-                        .Select(r => r.Date)
-                        .ToListAsync(ct);
+                    var now = DateTimeOffset.Now;
+                    var todayStart = new DateTimeOffset(now.Year, now.Month, now.Day, 0, 0, 0, now.Offset);
+                    var weekStart = todayStart.AddDays(-7);
+                    var monthStart = new DateTimeOffset(now.Year, now.Month, 1, 0, 0, 0, now.Offset);
 
-                    var dates = transfers.Select(d => d.UtcDateTime.Date).ToList();
-
-                    int countAll = dates.Count;
-                    int countToday = dates.Count(d => d == now);
-                    int countWeek = dates.Count(d => d >= now.AddDays(-7));
-                    int countMonth = dates.Count(d => d.Month == now.Month && d.Year == now.Year);
-                    int countYear = dates.Count(d => d.Year == now.Year);
+                    var countToday = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= todayStart, ct);
+                    var countWeek = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= weekStart, ct);
+                    var countMonth = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= monthStart, ct);
+                    var countAll = await db.StockTransfers.CountAsync(r => !r.IsDisabled, ct);
 
                     result[field] = new Dictionary<string, int>
                     {
@@ -490,17 +494,43 @@ public static class StockTransfersEndpoints
     }
 
     #region Helpers
-    private static DateTimeOffset ParseSafeUtcOffset(DateTime dt, bool isTill = false)
+    private static DateTimeOffset ParseCleanDateOffset(string raw)
     {
-        if (dt == DateTime.MinValue) return new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc));
-        if (dt >= DateTime.MaxValue.AddDays(-2)) return new DateTimeOffset(new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc));
-
-        var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
-        if (isTill && dt.TimeOfDay == TimeSpan.Zero && dt.Kind != DateTimeKind.Utc)
+        raw = raw.Replace(" ", "+").Trim();
+        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
         {
-            utc = utc.Date.AddDays(1).AddTicks(-1);
+            return dto.ToUniversalTime();
         }
-        return new DateTimeOffset(utc);
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            return new DateTimeOffset(dt.ToUniversalTime());
+        }
+        return DateTimeOffset.UtcNow;
+    }
+
+    private static DateTimeOffset ParseSafeFilterOffset(string raw, bool isTill = false)
+    {
+        raw = raw.Replace(" ", "+").Trim();
+        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
+        {
+            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
+            {
+                return new DateTimeOffset(dto.Year, dto.Month, dto.Day, 23, 59, 59, dto.Offset).ToUniversalTime();
+            }
+            return dto.ToUniversalTime();
+        }
+
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            var offset = DateTimeOffset.Now.Offset;
+            if (isTill && dt.TimeOfDay == TimeSpan.Zero)
+            {
+                return new DateTimeOffset(dt.Year, dt.Month, dt.Day, 23, 59, 59, offset).ToUniversalTime();
+            }
+            return new DateTimeOffset(dt, offset).ToUniversalTime();
+        }
+
+        return isTill ? DateTimeOffset.UtcNow.AddYears(10) : DateTimeOffset.UtcNow.AddYears(-10);
     }
 
     private static List<string> ExtractTagsFromRawJson(JsonElement root)
@@ -521,14 +551,6 @@ public static class StockTransfersEndpoints
                 {
                     var s = item.GetString();
                     if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
-                }
-                else if (item.ValueKind == JsonValueKind.Object)
-                {
-                    if (item.TryGetProperty("Text", out var t) || item.TryGetProperty("Value", out t) || item.TryGetProperty("Name", out t))
-                    {
-                        var s = t.GetString();
-                        if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
-                    }
                 }
             }
         }

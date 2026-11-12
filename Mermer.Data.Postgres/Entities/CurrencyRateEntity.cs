@@ -1,25 +1,19 @@
 ﻿using System;
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace Mermer.Data.Postgres.Entities;
 
-/// <summary>
-/// Currency Rate entity — historical exchange rate entry.
-/// Maps to: Mermer.FundsManagement.Models.CurrencyRate
-/// </summary>
+[Table("currency_rates")]
 public class CurrencyRateEntity
 {
-    public Guid Id { get; set; }
-    public Guid CurrencyId { get; set; }
-    public DateTime ValidFrom { get; set; }
+    [Key][Column("id")] public Guid Id { get; set; }
+    [Column("currency_id")] public Guid CurrencyId { get; set; }
+    [Column("valid_from")] public DateTime ValidFrom { get; set; }
+    [Column("multiplier")] public decimal Multiplier { get; set; } = 1m;
+    [Column("divider")] public decimal Divider { get; set; } = 1m;
+    [Column("created_at")] public DateTimeOffset CreatedAt { get; set; }
 
-    /// <summary>NUMERIC(18,8) — multiplier for currency conversion. Must not be zero.</summary>
-    public decimal Multiplier { get; set; } = 1m;
-
-    /// <summary>NUMERIC(18,8) — divider for currency conversion. Must not be zero.</summary>
-    public decimal Divider { get; set; } = 1m;
-
-    public DateTimeOffset CreatedAt { get; set; }
-
-    // Navigation
+    [ForeignKey(nameof(CurrencyId))]
     public CurrencyEntity Currency { get; set; } = null!;
 }

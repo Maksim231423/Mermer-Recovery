@@ -1,26 +1,40 @@
 ﻿using System;
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+using System.Text.Json.Serialization;
 
 namespace Mermer.Data.Postgres.Entities;
 
-/// <summary>
-/// Invoice Stock Unit Convertion entity — snapshot of unit conversion at invoice time.
-/// Maps to: Mermer.Transactions.Models.StockUnitConvertion
-/// </summary>
+[Table("invoice_stock_unit_convertions")]
 public class InvoiceStockUnitConvertionEntity
 {
+    [Key]
+    [Column("id")]
     public Guid Id { get; set; }
+
+    [Column("invoice_id")]
     public Guid InvoiceId { get; set; }
+
+    [Column("stock_id")]
     public Guid StockId { get; set; }
+
+    [Column("unit_id")]
     public Guid UnitId { get; set; }
 
-    /// <summary>NUMERIC(18,8)</summary>
+    [Column("multiplier")]
     public decimal Multiplier { get; set; } = 1m;
 
-    /// <summary>NUMERIC(18,8)</summary>
+    [Column("divider")]
     public decimal Divider { get; set; } = 1m;
 
     // Navigation
-    public InvoiceEntity Invoice { get; set; } = null!;
-    public StockEntity Stock { get; set; } = null!;
-    public StockUnitEntity Unit { get; set; } = null!;
+    [ForeignKey(nameof(InvoiceId))]
+    [JsonIgnore]
+    public InvoiceEntity? Invoice { get; set; }
+
+    [ForeignKey(nameof(StockId))]
+    public StockEntity? Stock { get; set; }
+
+    [ForeignKey(nameof(UnitId))]
+    public StockUnitEntity? Unit { get; set; }
 }

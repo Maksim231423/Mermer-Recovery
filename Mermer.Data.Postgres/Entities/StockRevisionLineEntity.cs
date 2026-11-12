@@ -1,6 +1,7 @@
 ﻿using System;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
+using System.Text.Json.Serialization;
 
 namespace Mermer.Data.Postgres.Entities;
 
@@ -39,5 +40,18 @@ public class StockRevisionLineEntity
     public string? UserName { get; set; }
 
     [ForeignKey(nameof(StockRevisionId))]
-    public StockRevisionEntity StockRevision { get; set; } = null!;
+    [JsonIgnore]
+    public StockRevisionEntity? StockRevision { get; set; }
+
+    [ForeignKey(nameof(StockId))]
+    public StockEntity? Stock { get; set; }
+
+    [ForeignKey(nameof(UnitId))]
+    public StockUnitEntity? Unit { get; set; }
+
+    [ForeignKey(nameof(CurrencyId))]
+    public CurrencyEntity? Currency { get; set; }
+
+    [ForeignKey(nameof(UserId))]
+    public UserEntity? User { get; set; }
 }

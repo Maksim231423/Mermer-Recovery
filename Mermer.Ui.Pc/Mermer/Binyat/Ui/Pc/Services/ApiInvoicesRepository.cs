@@ -199,8 +199,12 @@ namespace Mermer.Ui.Pc.Services
         {
             if (string.IsNullOrEmpty(id)) return null;
 
-            if (_cardCache.TryGetValue(id, out var cached))
+            // Берем из кэша ТОЛЬКО если там полная карточка со строками
+            if (_cardCache.TryGetValue(id, out var cached) &&
+                cached.Lines != null && cached.Lines.Any())
+            {
                 return cached;
+            }
 
             try
             {
@@ -208,13 +212,12 @@ namespace Mermer.Ui.Pc.Services
                 if (inv != null && !string.IsNullOrEmpty(inv.Id))
                 {
                     _cardCache[inv.Id] = inv;
+                    return inv;
                 }
-                return inv;
             }
-            catch
-            {
-                return null;
-            }
+            catch { }
+
+            return cached;
         }
 
         public async Task<IEnumerable<Invoice>> GetAsync(string[] ids)

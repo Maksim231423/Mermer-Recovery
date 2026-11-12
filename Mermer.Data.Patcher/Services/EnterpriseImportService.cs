@@ -58,7 +58,11 @@ public class EnterpriseImportService
                     Name = GetStringProperty(targetContainer, "name") ?? "Без названия",
                     Phone = GetStringProperty(targetContainer, "phone"),
                     Address = GetStringProperty(targetContainer, "address"),
-                    IsDisabled = GetBoolProperty(targetContainer, "isDisabled")
+                    Group = GetStringProperty(targetContainer, "group") ?? GetStringProperty(targetContainer, "groupName") ?? string.Empty,
+                    Tags = GetStringArrayProperty(targetContainer, "tags") ?? Array.Empty<string>(),
+                    IsDisabled = GetBoolProperty(targetContainer, "isDisabled"),
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
                 };
 
                 batch.Add(pgPartner);
@@ -587,14 +591,21 @@ public class EnterpriseImportService
 
     private static string? GetStringProperty(JsonElement container, string propertyName)
     {
-        if (container.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.String)
+        if (container.ValueKind == JsonValueKind.Object && container.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.String)
             return prop.GetString();
+        return null;
+    }
+
+    private static string[]? GetStringArrayProperty(JsonElement container, string propertyName)
+    {
+        if (container.ValueKind == JsonValueKind.Object && container.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.Array)
+            return prop.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToArray();
         return null;
     }
 
     private static bool GetBoolProperty(JsonElement container, string propertyName)
     {
-        if (container.TryGetProperty(propertyName, out var prop))
+        if (container.ValueKind == JsonValueKind.Object && container.TryGetProperty(propertyName, out var prop))
         {
             if (prop.ValueKind == JsonValueKind.True) return true;
             if (prop.ValueKind == JsonValueKind.False) return false;

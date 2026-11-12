@@ -1,6 +1,7 @@
 ﻿using System;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
+using System.Text.Json.Serialization;
 
 namespace Mermer.Data.Postgres.Entities;
 
@@ -41,9 +42,16 @@ public class StockTransferLineEntity
     [Column("sort_order")]
     public int SortOrder { get; set; }
 
+    [ForeignKey(nameof(StockId))]
     public StockEntity? Stock { get; set; }
+
+    [ForeignKey(nameof(UnitId))]
     public StockUnitEntity? Unit { get; set; }
 
+    [ForeignKey(nameof(ReceivedUnitId))]
+    public StockUnitEntity? ReceivedUnit { get; set; }
+
     [ForeignKey(nameof(StockTransferId))]
-    public StockTransferEntity StockTransfer { get; set; } = null!;
+    [JsonIgnore]
+    public StockTransferEntity? StockTransfer { get; set; }
 }

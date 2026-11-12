@@ -15,7 +15,7 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
 {
     private readonly RestClient _restClient;
 
-    // Оперативный кэш открытых карточек в памяти
+    // Оперативный кэш открытых карточек в памяти (по Id)
     private static readonly ConcurrentDictionary<string, Bill> _cardCache = new(StringComparer.OrdinalIgnoreCase);
 
     public ApiBillsRepository(RestClient restClient)
@@ -27,8 +27,13 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
     {
         if (string.IsNullOrEmpty(id)) return null;
 
-        if (_cardCache.TryGetValue(id, out var cached))
+        // Берем из кэша только если карточка полная (содержит строки и курсы)
+        if (_cardCache.TryGetValue(id, out var cached) &&
+            cached.Lines != null && cached.Lines.Any() &&
+            cached.CurrencyConvertions != null && cached.CurrencyConvertions.Any())
+        {
             return cached;
+        }
 
         try
         {
@@ -41,7 +46,7 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
         }
         catch { }
 
-        return null;
+        return cached;
     }
 
     public async Task<IEnumerable<Bill>> GetAsync(string[] ids)
@@ -60,12 +65,16 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
 
-        if (hasDates)
+        // Фильтруем по дате ТОЛЬКО если это реальный период, а не "All Records" (где даты 0001 или 9999 года)
+        if (hasDates && from.Year > 1900 && till.Year < 2099)
         {
             try
             {
-                var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var fromUtc = from.Kind == DateTimeKind.Utc ? from : from.ToUniversalTime();
+                var tillUtc = till.Kind == DateTimeKind.Utc ? till : till.ToUniversalTime();
+
+                var fromStr = fromUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var tillStr = tillUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
                 var remoteSlice = await _restClient.GetAsync<List<Bill>>($"/api/bills?from={fromStr}&till={tillStr}&limit=50000");
                 if (remoteSlice != null)
@@ -86,10 +95,12 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
             catch { }
         }
 
+        // Запрос ВСЕХ записей (All Records) без параметров дат
         var all = await GetAllAsync();
         var fallbackQuery = all.AsQueryable();
         if (predicates != null)
         {
+            // Не применяем предикаты дат с годами 0001 или 9999 к результату
             foreach (var p in predicates.Where(x => x != null)) fallbackQuery = fallbackQuery.Where(p);
         }
         return fallbackQuery.OrderByDescending(b => b.Date).ToList();
@@ -99,12 +110,16 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
     {
         var (hasDates, from, till) = TryExtractDateRange(predicates);
 
-        if (hasDates)
+        if (hasDates && from.Year > 1900 && till.Year < 2099)
         {
             try
             {
-                var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var fromUtc = from.Kind == DateTimeKind.Utc ? from : from.ToUniversalTime();
+                var tillUtc = till.Kind == DateTimeKind.Utc ? till : till.ToUniversalTime();
+
+                var fromStr = fromUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var tillStr = tillUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
                 var res = await _restClient.GetAsync<CountResponse>($"/api/bills/count?from={fromStr}&till={tillStr}");
                 if (res != null) return res.Count;
             }
@@ -126,15 +141,11 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
 
     public async Task<IEnumerable<Bill>> GetAllAsync()
     {
-        if (_cardCache.Count > 0)
-        {
-            return _cardCache.Values.OrderByDescending(b => b.Date).ToList();
-        }
-
+        // Всегда запрашиваем актуальный полный список с сервера
         try
         {
             var remote = await _restClient.GetAsync<List<Bill>>("/api/bills?limit=50000");
-            if (remote != null && remote.Any())
+            if (remote != null)
             {
                 foreach (var item in remote)
                 {
@@ -143,7 +154,7 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
                         _cardCache[item.Id] = item;
                     }
                 }
-                return _cardCache.Values.OrderByDescending(b => b.Date).ToList();
+                return remote.OrderByDescending(b => b.Date).ToList();
             }
         }
         catch { }
@@ -156,10 +167,7 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
 
     public async Task<Bill> SaveAsync(Bill entity)
     {
-        if (entity == null)
-        {
-            throw new Exception("Cannot save an empty Bill entity.");
-        }
+        if (entity == null) throw new Exception("Cannot save an empty Bill entity.");
 
         bool isNew = string.IsNullOrEmpty(entity.Id) || entity.Id == Guid.Empty.ToString();
         if (isNew) entity.Id = Guid.NewGuid().ToString();
@@ -189,10 +197,7 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
 
     public async Task DeleteAsync(string id)
     {
-        if (string.IsNullOrEmpty(id))
-        {
-            throw new Exception("Bill identifier cannot be empty for delete operation.");
-        }
+        if (string.IsNullOrEmpty(id)) throw new Exception("Bill identifier cannot be empty for delete operation.");
 
         _cardCache.TryRemove(id, out _);
 

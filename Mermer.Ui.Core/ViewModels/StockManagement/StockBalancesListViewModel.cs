@@ -158,12 +158,6 @@ public class StockBalancesListViewModel :
                     .FirstOrDefault(w => !w.IsDisabled && string.Equals(w.OfficeId, config.DefaultOfficeId, StringComparison.OrdinalIgnoreCase))?.Id;
             }
 
-            // 3. Fallback: первый активный склад
-            if (string.IsNullOrEmpty(targetWhId))
-            {
-                targetWhId = this.Warehouses?.List?.FirstOrDefault(w => !w.IsDisabled)?.Id;
-            }
-
             if (!string.IsNullOrEmpty(targetWhId))
             {
                 this._selectedWarehouseIds = new List<object> { targetWhId };

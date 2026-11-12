@@ -147,12 +147,12 @@ public class PartnerBalancesListViewModel :
             _loaded = true;
         }
 
-        if (string.IsNullOrEmpty(CurrencyId) && Currencies.List != null)
-        {
-            CurrencyId = Currencies.List.FirstOrDefault(x => x.IsDefault)?.Id
-                         ?? Currencies.List.FirstOrDefault()?.Id;
-        }
+        // ИСПРАВЛЕНО: Валюта по умолчанию НЕ устанавливается (всегда null),
+        // даже если в настройках программы задан DefaultCurrencyId.
+        CurrencyId = null;
     }
+
+
 
     protected override async Task<IEnumerable<PartnerBalanceByTypeWithBalance>> GetFilteredListByDateAsync(
     DateTime from,
@@ -167,24 +167,34 @@ public class PartnerBalancesListViewModel :
     return this.ApplyCustomCurrencyRate(await this._repository.GetByTypeAsync(DateTime.MinValue, DateTime.MaxValue, this.PartnerId, this.OfficeIds));
   }
 
-  private void ApplyCustomCurrencyRate() => this.List = this.ApplyCustomCurrencyRate(this.List);
+    private void ApplyCustomCurrencyRate() => this.List = this.ApplyCustomCurrencyRate(this.List);
 
-  private IEnumerable<PartnerBalanceByTypeWithBalance> ApplyCustomCurrencyRate(
-    IEnumerable<PartnerBalanceByTypeWithBalance> list)
-  {
-    Decimal rate = 0M;
-    Currency currency = this.Currencies.List.SingleOrDefault<Currency>((Func<Currency, bool>) (x => x.Id == this._currencyId));
-    CurrencyRate rate1 = currency != null ? currency.GetRate() : (CurrencyRate) null;
-    if (rate1 != null)
-      rate = rate1.Divider / rate1.Multiplier;
-    return list.Select<PartnerBalanceByTypeWithBalance, PartnerBalanceByTypeWithBalance>((Func<PartnerBalanceByTypeWithBalance, PartnerBalanceByTypeWithBalance>) (item =>
+    private IEnumerable<PartnerBalanceByTypeWithBalance> ApplyCustomCurrencyRate(
+        IEnumerable<PartnerBalanceByTypeWithBalance> list)
     {
-      item.ResultingBalanceInCustomCurrency = item.ResultingBalance * rate;
-      return item;
-    }));
-  }
+        if (list == null) return list;
 
-  public ICommand SelectOrViewDetailsCommand
+        decimal rate = 0M;
+
+        if (!string.IsNullOrEmpty(this._currencyId))
+        {
+            Currency currency = this.Currencies?.List?.SingleOrDefault(x => x.Id == this._currencyId);
+            CurrencyRate rate1 = currency?.GetRate();
+
+            if (rate1 != null && rate1.Multiplier != 0M)
+            {
+                rate = rate1.Divider / rate1.Multiplier;
+            }
+        }
+
+        return list.Select(item =>
+        {
+            item.ResultingBalanceInCustomCurrency = item.ResultingBalance * rate;
+            return item;
+        });
+    }
+
+    public ICommand SelectOrViewDetailsCommand
   {
     get
     {

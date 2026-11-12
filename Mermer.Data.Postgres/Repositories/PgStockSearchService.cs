@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -11,17 +12,6 @@ using Mermer.Data.Postgres.Abstractions;
 
 namespace Mermer.Data.Postgres.Repositories;
 
-/// <summary>
-/// PostgreSQL implementation of stock search using pg_trgm extension.
-/// 
-/// Performance: Single SQL query replaces 3 sequential Couchbase round-trips:
-///   1. FTS query → IDs
-///   2. N1QL JOIN Stock+Currency → data
-///   3. GetAsync balancesRepository → balances
-/// 
-/// All combined into one query with JOINs, targeting < 100ms response.
-/// Uses Dapper for raw SQL performance (no EF Core overhead for search).
-/// </summary>
 public class PgStockSearchService : IStockSearchService
 {
     private readonly string _connectionString;
@@ -44,10 +34,6 @@ public class PgStockSearchService : IStockSearchService
 
         var normalizedSearch = searchText.Trim().ToLowerInvariant();
 
-        // Build optimized query:
-        // 1. Try exact match on code/barcode first (highest priority)
-        // 2. Trigram similarity on name, code, short_name
-        // 3. LEFT JOIN prices, units, balances — single round-trip
         var sql = BuildSearchQuery(warehouseId, priceGroup);
 
         var parameters = new DynamicParameters();
@@ -56,8 +42,10 @@ public class PgStockSearchService : IStockSearchService
         parameters.Add("@limit", limit);
         parameters.Add("@minSimilarity", minSimilarity);
 
-        if (!string.IsNullOrEmpty(warehouseId))
-            parameters.Add("@warehouseId", Guid.Parse(warehouseId));
+        if (!string.IsNullOrEmpty(warehouseId) && Guid.TryParse(warehouseId, out var wGuid))
+            parameters.Add("@warehouseId", wGuid);
+        else
+            parameters.Add("@warehouseId", (object?)null);
 
         if (!string.IsNullOrEmpty(priceGroup))
             parameters.Add("@priceGroup", priceGroup);
@@ -65,14 +53,11 @@ public class PgStockSearchService : IStockSearchService
         await using var connection = new NpgsqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        // Wrap in a transaction so SET LOCAL is scoped to this query only.
-        // Plain `SET pg_trgm.similarity_threshold = ...` would leak across the
-        // pooled connection's lifetime and corrupt subsequent searches.
         await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
         await connection.ExecuteAsync(
             new CommandDefinition(
-                $"SET LOCAL pg_trgm.similarity_threshold = {minSimilarity.ToString(System.Globalization.CultureInfo.InvariantCulture)}",
+                $"SET LOCAL pg_trgm.similarity_threshold = {minSimilarity.ToString(CultureInfo.InvariantCulture)}",
                 transaction: tx,
                 cancellationToken: cancellationToken));
 
@@ -81,7 +66,6 @@ public class PgStockSearchService : IStockSearchService
 
         await tx.CommitAsync(cancellationToken);
 
-        // Apply highlight formatting to match old behavior
         var resultList = results.ToList();
         var searchTerms = normalizedSearch.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
@@ -94,13 +78,9 @@ public class PgStockSearchService : IStockSearchService
         return resultList;
     }
 
-    /// <summary>
-    /// Builds the optimized SQL query that combines stock data, price, unit, balance,
-    /// and trigram similarity scoring in a single round-trip.
-    /// </summary>
     private static string BuildSearchQuery(string? warehouseId, string? priceGroup)
     {
-        var sb = new StringBuilder(2048);
+        var sb = new StringBuilder(2500);
 
         sb.AppendLine(@"
 WITH scored_stocks AS (
@@ -121,39 +101,37 @@ WITH scored_stocks AS (
     FROM stocks s
     WHERE NOT s.is_disabled
       AND (
-          -- Exact code match
           LOWER(COALESCE(s.code, '')) = @search
-          -- Exact barcode match
           OR @search = ANY(SELECT LOWER(unnest(s.barcodes)))
-          -- Trigram similarity on name
           OR LOWER(s.name) % @search
-          -- Trigram similarity on code
           OR LOWER(COALESCE(s.code, '')) % @search
-          -- Trigram similarity on short_name
           OR LOWER(COALESCE(s.short_name, '')) % @search
-          -- ILIKE fallback for substring matches
           OR s.name ILIKE @searchPattern
           OR COALESCE(s.code, '') ILIKE @searchPattern
-          -- Full-text search fallback
           OR s.search_vector @@ plainto_tsquery('simple', @search)
       )
 )
 SELECT
-    ss.id::text    AS ""Id"",
-    ss.code        AS ""Code"",
-    ss.name        AS ""Name"",
-    ss.short_name  AS ""ShortName"",
-    ss.is_disabled AS ""IsDisabled"",
-    ss.match_score AS ""Similarity"",
+    ss.id::text     AS ""Id"",
+    ss.code         AS ""Code"",
+    ss.name         AS ""Name"",
+    ss.short_name   AS ""ShortName"",
+    ss.is_disabled  AS ""IsDisabled"",
+    ss.match_score  AS ""Similarity"",
 
-    -- Current price (latest valid price entry)
-    COALESCE(sp.price, 0)       AS ""Price"",
+    -- Current sale price
+    COALESCE(sp.price, 0) AS ""Price"",
     COALESCE(c.name, (SELECT name FROM currencies WHERE is_default = true AND is_disabled = false LIMIT 1)) AS ""Currency"",
     COALESCE(sp.currency_id::text, (SELECT id::text FROM currencies WHERE is_default = true AND is_disabled = false LIMIT 1)) AS ""CurrencyId"",
 
     -- Default unit
     su.id::text     AS ""UnitId"",
     su.name         AS ""Unit"",
+
+    -- Last purchase price info
+    lp.price                AS ""LastPurchasePrice"",
+    COALESCE(lpc.name, c_def.name) AS ""LastPurchaseCurrency"",
+    COALESCE(lp.currency_id::text, c_def.id::text) AS ""LastPurchaseCurrencyId"",
 
     -- Stock balance");
 
@@ -171,7 +149,7 @@ SELECT
         sb.AppendLine(@"
 FROM scored_stocks ss
 
--- Latest price
+-- Latest sale price
 LEFT JOIN LATERAL (
     SELECT sp2.price, sp2.currency_id
     FROM stock_prices sp2
@@ -187,11 +165,38 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) sp ON TRUE
 
--- Currency name
+-- Currency name for sale price
 LEFT JOIN currencies c ON c.id = sp.currency_id
 
+-- Default fallback currency
+LEFT JOIN LATERAL (
+    SELECT id, name
+    FROM currencies
+    WHERE is_default = true AND is_disabled = false
+    LIMIT 1
+) c_def ON TRUE
+
 -- Default unit
-LEFT JOIN stock_units su ON su.stock_id = ss.id AND su.is_default = TRUE");
+LEFT JOIN stock_units su ON su.stock_id = ss.id AND su.is_default = TRUE
+
+-- ПОСЛЕДНЯЯ ЦЕНА ЗАКУПКИ (Last Purchase Price)
+LEFT JOIN LATERAL (
+    SELECT 
+        il.price,
+        COALESCE(il.currency_id, i.display_currency_id) AS currency_id
+    FROM invoice_lines il
+    JOIN invoices i ON i.id = il.invoice_id
+    WHERE il.stock_id = ss.id
+      AND i.is_completed = true 
+      AND i.is_disabled = false
+      AND i.invoice_type = 'Purchase'
+      AND (@warehouseId::uuid IS NULL OR i.warehouse_id = @warehouseId)
+    ORDER BY i.date DESC, il.sort_order DESC
+    LIMIT 1
+) lp ON TRUE
+
+-- Currency name for last purchase price
+LEFT JOIN currencies lpc ON lpc.id = lp.currency_id");
 
         // Balance join
         if (!string.IsNullOrEmpty(warehouseId))
@@ -218,11 +223,6 @@ LIMIT @limit;");
         return sb.ToString();
     }
 
-    /// <summary>
-    /// Highlights matching terms in text using HTML bold tags.
-    /// Replaces the O(n*m) string.Replace loop from StockSearchServiceOld
-    /// with a more efficient approach.
-    /// </summary>
     private static string? FormatHighlight(string? text, string[] searchTerms)
     {
         if (string.IsNullOrEmpty(text) || searchTerms.Length == 0)

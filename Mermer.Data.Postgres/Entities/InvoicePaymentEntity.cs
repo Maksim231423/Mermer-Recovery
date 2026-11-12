@@ -1,26 +1,37 @@
 ﻿using System;
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+using System.Text.Json.Serialization;
 
 namespace Mermer.Data.Postgres.Entities;
 
-/// <summary>
-/// Invoice Payment entity.
-/// Maps to: Mermer.Commerce.Models.InvoicePayment
-/// </summary>
+[Table("invoice_payments")]
 public class InvoicePaymentEntity
 {
+    [Key]
+    [Column("id")]
     public Guid Id { get; set; }
+
+    [Column("invoice_id")]
     public Guid InvoiceId { get; set; }
 
-    /// <summary>Payment or Change</summary>
+    [Column("payment_type")]
     public string PaymentType { get; set; } = "Payment";
 
-    /// <summary>NUMERIC(18,4) — payment amount.</summary>
+    [Column("amount")]
     public decimal Amount { get; set; }
 
+    [Column("currency_id")]
     public Guid? CurrencyId { get; set; }
+
+    [Column("sort_order")]
     public int SortOrder { get; set; }
 
     // Navigation
-    public InvoiceEntity Invoice { get; set; } = null!;
+    [ForeignKey(nameof(InvoiceId))]
+    [JsonIgnore]
+    public InvoiceEntity? Invoice { get; set; }
+
+    [ForeignKey(nameof(CurrencyId))]
     public CurrencyEntity? Currency { get; set; }
 }

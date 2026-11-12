@@ -18,9 +18,6 @@ namespace Mermer.Api.Endpoints;
 
 public static class EnterpriseEndpoints
 {
-    // ==========================================
-    // СТАТИЧЕСКИЙ IN-MEMORY КЭШ СПРАВОЧНИКОВ
-    // ==========================================
     private static object? _cachedOffices;
     private static object? _cachedWarehouses;
     private static object? _cachedCurrencies;
@@ -29,7 +26,6 @@ public static class EnterpriseEndpoints
     {
         var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
 
-        // Обработчик получения офисов (с кэшированием)
         async Task<IResult> GetOffices(MermerDbContext db, CancellationToken ct)
         {
             if (_cachedOffices != null)
@@ -44,7 +40,6 @@ public static class EnterpriseEndpoints
         routes.MapGet("/api/enterprise/offices", GetOffices).WithTags("Enterprise");
         routes.MapGet("/api/offices", GetOffices).WithTags("Enterprise");
 
-        // Обработчик получения складов (с кэшированием)
         async Task<IResult> GetWarehouses(MermerDbContext db, CancellationToken ct)
         {
             if (_cachedWarehouses != null)
@@ -69,7 +64,6 @@ public static class EnterpriseEndpoints
         routes.MapGet("/api/enterprise/warehouses", GetWarehouses).WithTags("Enterprise");
         routes.MapGet("/api/warehouses", GetWarehouses).WithTags("Enterprise");
 
-        // Валюты: список (активные по умолчанию, все — только при includeDisabled=true)
         routes.MapGet("/api/currencies", async (bool? includeDisabled, MermerDbContext db, CancellationToken ct) =>
         {
             bool showDisabled = includeDisabled ?? false;
@@ -102,7 +96,6 @@ public static class EnterpriseEndpoints
             return Results.Json(result, jsonOptions);
         }).WithTags("Enterprise");
 
-        // Валюты: по ID
         routes.MapGet("/api/currencies/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
         {
             if (!Guid.TryParse(id, out var guid)) return Results.NotFound();
@@ -129,7 +122,6 @@ public static class EnterpriseEndpoints
             return Results.Json(result, jsonOptions);
         }).WithTags("Enterprise");
 
-        // Сохранение валюты (Атомарный UPSERT без ошибок 23505)
         Func<HttpContext, MermerDbContext, CancellationToken, Task<IResult>> saveCurrencyHandler = async (context, db, ct) =>
         {
             using var reader = new StreamReader(context.Request.Body);
@@ -153,7 +145,12 @@ public static class EnterpriseEndpoints
             bool isDisabled = GetBoolProperty(root, "isDisabled", "IsDisabled");
             int decimals = GetIntProperty(root, "decimals", "Decimals", 2);
 
-            var incomingRates = new List<CurrencyRateEntity>();
+            // Получаем активного клиента из контекста (если не задан — fallback на default)
+            string tenantId = !string.IsNullOrWhiteSpace(MermerDbContext.CurrentClientId) && MermerDbContext.CurrentClientId != "default"
+                ? MermerDbContext.CurrentClientId
+                : "default";
+
+            var incomingRates = new List<object>();
             if (TryGetPropertyCaseInsensitive(root, "rates", out var ratesProp) && ratesProp.ValueKind == JsonValueKind.Array)
             {
                 foreach (var rateJson in ratesProp.EnumerateArray())
@@ -163,27 +160,27 @@ public static class EnterpriseEndpoints
                     if (multiplier == 0m) multiplier = 1m;
                     if (divider == 0m) divider = 1m;
 
-                    // ИСПРАВЛЕНИЕ: берем чистую дату до перевода в UTC
                     DateTime validFrom = DateTime.UtcNow.Date;
                     string? validFromStr = GetStringProperty(rateJson, "validFrom", "ValidFrom", "rateValidFrom", "RateValidFrom");
                     if (!string.IsNullOrEmpty(validFromStr) && DateTime.TryParse(validFromStr, out var parsedDate))
                     {
-                        // Извлекаем чистую календарную дату года/месяца/дня, не вычитая часовой пояс
-                        validFrom = DateTime.SpecifyKind(parsedDate.Date, DateTimeKind.Utc);
+                        var utcDate = parsedDate.ToUniversalTime();
+                        validFrom = DateTime.SpecifyKind(utcDate.Date, DateTimeKind.Utc);
                     }
                     else
                     {
                         validFrom = DateTime.SpecifyKind(validFrom, DateTimeKind.Utc);
                     }
 
-                    incomingRates.Add(new CurrencyRateEntity
+                    incomingRates.Add(new
                     {
                         Id = Guid.NewGuid(),
                         CurrencyId = currencyId,
                         ValidFrom = validFrom,
                         Multiplier = multiplier,
                         Divider = divider,
-                        CreatedAt = DateTime.UtcNow
+                        CreatedAt = DateTimeOffset.UtcNow,
+                        ClientId = tenantId
                     });
                 }
             }
@@ -195,7 +192,6 @@ public static class EnterpriseEndpoints
 
             try
             {
-                // 1. Снимаем признак Default у остальных, если эта валюта выбрана по умолчанию
                 if (isDefault)
                 {
                     await conn.ExecuteAsync(
@@ -203,16 +199,16 @@ public static class EnterpriseEndpoints
                         new { id = currencyId }, tx);
                 }
 
-                // 2. Атомарный UPSERT валюты (гарантирует отсутствие ошибки 23505 pkey)
                 const string upsertCurrencySql = """
-                    INSERT INTO currencies (id, name, description, is_default, is_disabled, decimals, created_at, updated_at)
-                    VALUES (@id, @name, @description, @isDefault, @isDisabled, @decimals, @now, @now)
+                    INSERT INTO currencies (id, name, description, is_default, is_disabled, decimals, client_id, created_at, updated_at)
+                    VALUES (@id, @name, @description, @isDefault, @isDisabled, @decimals, @clientId, @now, @now)
                     ON CONFLICT (id) DO UPDATE SET
                         name = EXCLUDED.name,
                         description = EXCLUDED.description,
                         is_default = EXCLUDED.is_default,
                         is_disabled = EXCLUDED.is_disabled,
                         decimals = EXCLUDED.decimals,
+                        client_id = EXCLUDED.client_id,
                         updated_at = EXCLUDED.updated_at;
                     """;
 
@@ -224,17 +220,17 @@ public static class EnterpriseEndpoints
                     isDefault,
                     isDisabled,
                     decimals,
+                    clientId = tenantId,
                     now = DateTimeOffset.UtcNow
                 }, tx);
 
-                // 3. Обновляем курсы
                 await conn.ExecuteAsync("DELETE FROM currency_rates WHERE currency_id = @id;", new { id = currencyId }, tx);
 
                 if (incomingRates.Count > 0)
                 {
                     const string insertRateSql = """
-                        INSERT INTO currency_rates (id, currency_id, valid_from, multiplier, divider, created_at)
-                        VALUES (@Id, @CurrencyId, @ValidFrom, @Multiplier, @Divider, @CreatedAt);
+                        INSERT INTO currency_rates (id, currency_id, valid_from, multiplier, divider, client_id, created_at)
+                        VALUES (@Id, @CurrencyId, @ValidFrom, @Multiplier, @Divider, @ClientId, @CreatedAt);
                         """;
                     await conn.ExecuteAsync(insertRateSql, incomingRates, tx);
                 }
@@ -248,7 +244,6 @@ public static class EnterpriseEndpoints
                 return Results.Problem(ex.Message);
             }
 
-            // Инвалидация кэша валют
             _cachedCurrencies = null;
 
             return Results.Json(new { Id = currencyId.ToString(), Name = name }, jsonOptions);

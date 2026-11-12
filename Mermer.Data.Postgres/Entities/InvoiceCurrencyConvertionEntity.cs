@@ -1,24 +1,34 @@
 ﻿using System;
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+using System.Text.Json.Serialization;
 
 namespace Mermer.Data.Postgres.Entities;
 
-/// <summary>
-/// Invoice Currency Convertion entity — snapshot of exchange rate at invoice time.
-/// Maps to: Mermer.Transactions.Models.CurrencyConvertion
-/// </summary>
+[Table("invoice_currency_convertions")]
 public class InvoiceCurrencyConvertionEntity
 {
+    [Key]
+    [Column("id")]
     public Guid Id { get; set; }
+
+    [Column("invoice_id")]
     public Guid InvoiceId { get; set; }
+
+    [Column("currency_id")]
     public Guid CurrencyId { get; set; }
 
-    /// <summary>NUMERIC(18,8)</summary>
+    [Column("multiplier")]
     public decimal Multiplier { get; set; } = 1m;
 
-    /// <summary>NUMERIC(18,8)</summary>
+    [Column("divider")]
     public decimal Divider { get; set; } = 1m;
 
     // Navigation
-    public InvoiceEntity Invoice { get; set; } = null!;
-    public CurrencyEntity Currency { get; set; } = null!;
+    [ForeignKey(nameof(InvoiceId))]
+    [JsonIgnore]
+    public InvoiceEntity? Invoice { get; set; }
+
+    [ForeignKey(nameof(CurrencyId))]
+    public CurrencyEntity? Currency { get; set; }
 }

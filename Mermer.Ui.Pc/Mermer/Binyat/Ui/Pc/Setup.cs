@@ -96,10 +96,12 @@ public class Setup : MvxWpfSetup
             var configurator = c.Resolve<IConfigurator>();
             var connSettings = configurator.GetConfig<ConnectionSettings>();
 
-            // Приоритет: 1. То, что настроил пользователь в окне (реестр) -> 2. appsettings.json -> 3. Дефолт
-            string serviceUrl = connSettings?.ServiceAddress
-                                ?? Configuration["ApiUrl"]
-                                ?? "http://127.0.0.1:5050";
+            // Если адрес не задан или остался старый 8088 — принудительно ставим 5050
+            string serviceUrl = connSettings?.ServiceAddress;
+            if (string.IsNullOrWhiteSpace(serviceUrl) || serviceUrl.Contains("8088"))
+            {
+                serviceUrl = "http://127.0.0.1:5050";
+            }
 
             if (serviceUrl.Contains("localhost"))
             {

@@ -1,25 +1,34 @@
 ﻿using System;
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+using System.Text.Json.Serialization;
 
 namespace Mermer.Data.Postgres.Entities;
 
-/// <summary>
-/// Invoice Discount entity.
-/// Maps to: Mermer.Commerce.Models.InvoiceDiscount
-/// </summary>
+[Table("invoice_discounts")]
 public class InvoiceDiscountEntity
 {
+    [Key]
+    [Column("id")]
     public Guid Id { get; set; }
+
+    [Column("invoice_id")]
     public Guid InvoiceId { get; set; }
 
-    /// <summary>Flat or Percentage</summary>
+    [Column("discount_type")]
     public string DiscountType { get; set; } = "Flat";
 
-    /// <summary>NUMERIC(18,4) — discount amount or percentage value.</summary>
+    [Column("amount")]
     public decimal Amount { get; set; }
 
+    [Column("description")]
     public string? Description { get; set; }
+
+    [Column("sort_order")]
     public int SortOrder { get; set; }
 
     // Navigation
-    public InvoiceEntity Invoice { get; set; } = null!;
+    [ForeignKey(nameof(InvoiceId))]
+    [JsonIgnore]
+    public InvoiceEntity? Invoice { get; set; }
 }

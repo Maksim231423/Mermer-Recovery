@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -66,27 +67,14 @@ public static class PartnersEndpoints
             {
                 var prms = new { mainId = mainGuid, mergeIds = mergeGuids, now = DateTime.UtcNow };
 
-                await conn.ExecuteAsync(
-                    "UPDATE invoices SET partner_id = @mainId WHERE partner_id = ANY(@mergeIds);",
-                    prms, tx);
-
-                await conn.ExecuteAsync(
-                    "UPDATE funds_slips SET partner_id = @mainId WHERE partner_id = ANY(@mergeIds);",
-                    prms, tx);
-
-                await conn.ExecuteAsync(
-                    "UPDATE partner_slip_lines SET partner_id = @mainId WHERE partner_id = ANY(@mergeIds);",
-                    prms, tx);
-
-                await conn.ExecuteAsync(
-                    "UPDATE partner_transfer_lines SET partner_id = @mainId WHERE partner_id = ANY(@mergeIds);",
-                    prms, tx);
+                await conn.ExecuteAsync("UPDATE invoices SET partner_id = @mainId WHERE partner_id = ANY(@mergeIds);", prms, tx);
+                await conn.ExecuteAsync("UPDATE funds_slips SET partner_id = @mainId WHERE partner_id = ANY(@mergeIds);", prms, tx);
+                await conn.ExecuteAsync("UPDATE partner_slip_lines SET partner_id = @mainId WHERE partner_id = ANY(@mergeIds);", prms, tx);
+                await conn.ExecuteAsync("UPDATE partner_transfer_lines SET partner_id = @mainId WHERE partner_id = ANY(@mergeIds);", prms, tx);
 
                 if (dto.DisableMergedItems)
                 {
-                    await conn.ExecuteAsync(
-                        "UPDATE partners SET is_disabled = true, updated_at = @now WHERE id = ANY(@mergeIds);",
-                        prms, tx);
+                    await conn.ExecuteAsync("UPDATE partners SET is_disabled = true, updated_at = @now WHERE id = ANY(@mergeIds);", prms, tx);
                 }
 
                 await tx.CommitAsync(ct);
@@ -155,10 +143,14 @@ public static class PartnersEndpoints
         });
 
         // 4. РАСЧЕТ БАЛАНСОВ ПАРТНЕРОВ
-        group.MapGet("/balances/by-type", async (string? partnerId, DateTime? from, DateTime? till, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/balances/by-type", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTime fUtc = from.HasValue ? ParseSafeUtc(from.Value) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            DateTime tUtc = till.HasValue ? ParseSafeTillUtc(till.Value) : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
+            string? partnerId = req.Query["partnerId"].FirstOrDefault();
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+
+            DateTime fUtc = ParseSafeDate(fromStr, isTill: false);
+            DateTime tUtc = ParseSafeDate(tillStr, isTill: true);
 
             Guid? singlePartnerGuid = Guid.TryParse(partnerId, out var pG) ? pG : null;
 
@@ -171,7 +163,7 @@ public static class PartnersEndpoints
                 .ToArray();
 
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
-                         ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
+                         ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => !c.IsDisabled, ct);
             Guid defaultCurrencyId = defCur?.Id ?? Guid.Empty;
 
             var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled, ct);
@@ -274,15 +266,15 @@ public static class PartnersEndpoints
                         0, 0, 0, 0, 0, 0, 0,
                         CASE WHEN fs.funds_slip_type = 'Expense' OR fs.funds_slip_type = 'Payment' 
                              THEN (fsl.amount * CASE 
-                                     WHEN fs.display_currency_id IS NULL OR fs.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
-                                     ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                                     WHEN fsl.currency_id IS NULL OR fsl.currency_id = (SELECT id FROM def_cur) THEN 1.0
+                                     ELSE COALESCE(line_cr.multiplier / NULLIF(line_cr.divider, 0), 1.0)
                                    END) 
                              ELSE 0 
                         END AS payment,
                         CASE WHEN fs.funds_slip_type = 'Income' OR fs.funds_slip_type = 'Collection' 
                              THEN (fsl.amount * CASE 
-                                     WHEN fs.display_currency_id IS NULL OR fs.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
-                                     ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                                     WHEN fsl.currency_id IS NULL OR fsl.currency_id = (SELECT id FROM def_cur) THEN 1.0
+                                     ELSE COALESCE(line_cr.multiplier / NULLIF(line_cr.divider, 0), 1.0)
                                    END) 
                              ELSE 0 
                         END AS collection
@@ -291,9 +283,9 @@ public static class PartnersEndpoints
                     LEFT JOIN LATERAL (
                         SELECT r.multiplier, r.divider 
                         FROM currency_rates r 
-                        WHERE r.currency_id = fs.display_currency_id AND r.valid_from <= fs.date 
+                        WHERE r.currency_id = fsl.currency_id AND r.valid_from <= fs.date 
                         ORDER BY r.valid_from DESC LIMIT 1
-                    ) cr ON true
+                    ) line_cr ON true
                     WHERE fs.partner_id IS NOT NULL 
                       AND fs.is_disabled = false
                       AND (@singlePartner::uuid IS NULL OR fs.partner_id = @singlePartner)
@@ -384,7 +376,7 @@ public static class PartnersEndpoints
 
         group.MapGet("/balances", () => Results.Ok(Array.Empty<object>()));
 
-        // 5. СОХРАНЕНИЕ ПАРТНЕРА (POST / PUT)
+        // 5. СОХРАНЕНИЕ ПАРТНЕРА
         Func<HttpRequest, MermerDbContext, Task<IResult>> savePartnerHandler = async (request, db) =>
         {
             using var reader = new StreamReader(request.Body);
@@ -480,23 +472,19 @@ public static class PartnersEndpoints
         })
         .WithName("PartnerSlipsGetFacets");
 
-        group.MapGet("/slips/count", async (DateTime? from, DateTime? till, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/slips/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            var query = db.PartnerSlips.AsNoTracking().Where(s => !s.IsDisabled);
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
 
-            if (from.HasValue && from.Value.Year > 2000)
-            {
-                var fUtc = ParseSafeUtc(from.Value);
-                query = query.Where(s => s.Date >= fUtc);
-            }
+            DateTime fDate = ParseSafeDate(fromStr, isTill: false);
+            DateTime tDate = ParseSafeDate(tillStr, isTill: true);
 
-            if (till.HasValue && till.Value.Year < 2099)
-            {
-                var tUtc = ParseSafeTillUtc(till.Value);
-                query = query.Where(s => s.Date <= tUtc);
-            }
+            var count = await db.PartnerSlips
+                .AsNoTracking()
+                .Where(s => !s.IsDisabled && s.Date >= fDate && s.Date <= tDate)
+                .CountAsync(ct);
 
-            var count = await query.CountAsync(ct);
             return Results.Ok(new { count });
         });
 
@@ -507,14 +495,20 @@ public static class PartnersEndpoints
         });
 
         // 7. ПОДГРУЗКА PARTNER SLIPS
-        group.MapGet("/slips", async (int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/slips", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
-            int skip = offset.GetValueOrDefault(0);
+            int take = int.TryParse(req.Query["limit"], out var lVal) ? Math.Clamp(lVal, 1, 1000) : 200;
+            int skip = int.TryParse(req.Query["offset"], out var oVal) ? Math.Max(0, oVal) : 0;
+
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+
+            DateTime fDate = ParseSafeDate(fromStr, isTill: false);
+            DateTime tDate = ParseSafeDate(tillStr, isTill: true);
 
             var slips = await db.PartnerSlips
                 .AsNoTracking()
-                .Where(s => !s.IsDisabled)
+                .Where(s => !s.IsDisabled && s.Date >= fDate && s.Date <= tDate)
                 .OrderByDescending(s => s.Date)
                 .Skip(skip)
                 .Take(take)
@@ -587,9 +581,8 @@ public static class PartnersEndpoints
                 officeGuid = defOffice?.Id;
             }
 
-            // Безопасный парсинг даты документа
             string dateStr = GetJsonString(root, "date", "Date");
-            DateTime slipDate = ParseClientDate(dateStr);
+            DateTime slipDate = ParseCleanDate(dateStr);
 
             string groupName = GetJsonString(root, "group", "Group") ?? string.Empty;
             string description = GetJsonString(root, "description", "Description") ?? string.Empty;
@@ -715,36 +708,38 @@ public static class PartnersEndpoints
         })
         .WithName("PartnerTransfersGetFacets");
 
-        group.MapGet("/transfers/count", async (DateTime? from, DateTime? till, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/transfers/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            var query = db.PartnerTransfers.AsNoTracking().Where(t => !t.IsDisabled);
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
 
-            if (from.HasValue && from.Value.Year > 2000)
-            {
-                var fUtc = ParseSafeUtc(from.Value);
-                query = query.Where(t => t.Date >= fUtc);
-            }
+            DateTime fDate = ParseSafeDate(fromStr, isTill: false);
+            DateTime tDate = ParseSafeDate(tillStr, isTill: true);
 
-            if (till.HasValue && till.Value.Year < 2099)
-            {
-                var tUtc = ParseSafeTillUtc(till.Value);
-                query = query.Where(t => t.Date <= tUtc);
-            }
+            var count = await db.PartnerTransfers
+                .AsNoTracking()
+                .Where(t => !t.IsDisabled && t.Date >= fDate && t.Date <= tDate)
+                .CountAsync(ct);
 
-            var count = await query.CountAsync(ct);
             return Results.Ok(new { count });
         })
         .WithName("PartnerTransfersGetCount");
 
         // 10. ПОДГРУЗКА ПЕРЕВОДОВ PARTNER TRANSFERS
-        group.MapGet("/transfers", async (int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/transfers", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
-            int skip = offset.GetValueOrDefault(0);
+            int take = int.TryParse(req.Query["limit"], out var lVal) ? Math.Clamp(lVal, 1, 1000) : 200;
+            int skip = int.TryParse(req.Query["offset"], out var oVal) ? Math.Max(0, oVal) : 0;
+
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+
+            DateTime fDate = ParseSafeDate(fromStr, isTill: false);
+            DateTime tDate = ParseSafeDate(tillStr, isTill: true);
 
             var transfers = await db.PartnerTransfers
                 .AsNoTracking()
-                .Where(t => !t.IsDisabled)
+                .Where(t => !t.IsDisabled && t.Date >= fDate && t.Date <= tDate)
                 .OrderBy(t => t.Group == null ? string.Empty : t.Group.Trim())
                 .ThenByDescending(t => t.Date)
                 .Skip(skip)
@@ -837,7 +832,7 @@ public static class PartnersEndpoints
 
             string code = GetJsonString(root, "code", "Code") ?? $"DOC-{DateTime.UtcNow:yyMMddHHmmss}";
             string dateStr = GetJsonString(root, "date", "Date");
-            DateTime transferDate = ParseClientDate(dateStr);
+            DateTime transferDate = ParseCleanDate(dateStr);
 
             string rawGroup = GetJsonString(root, "group", "Group");
             string groupName = string.IsNullOrWhiteSpace(rawGroup) ? string.Empty : rawGroup.Trim();
@@ -946,10 +941,14 @@ public static class PartnersEndpoints
         });
 
         // 12. ПОДСЧЕТ КОЛИЧЕСТВА ДВИЖЕНИЙ ДЛЯ ПЛИТОК ДАТ
-        group.MapGet("/actions/count", async (string? partnerId, DateTime? from, DateTime? till, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/actions/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTime fUtc = from.HasValue ? ParseSafeUtc(from.Value) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            DateTime tUtc = till.HasValue ? ParseSafeTillUtc(till.Value) : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
+            string? partnerId = req.Query["partnerId"].FirstOrDefault();
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+
+            DateTime fUtc = ParseSafeDate(fromStr, isTill: false);
+            DateTime tUtc = ParseSafeDate(tillStr, isTill: true);
 
             Guid? pGuid = Guid.TryParse(partnerId, out var g) ? g : null;
 
@@ -964,6 +963,22 @@ public static class PartnersEndpoints
             var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled, ct);
             Guid defaultOfficeGuid = defOffice?.Id ?? Guid.Empty;
 
+            // Считываем фильтр Completed (поддерживает completed, isCompleted, IsCompleted)
+            string? compStr = req.Query["completed"].FirstOrDefault()
+                           ?? req.Query["isCompleted"].FirstOrDefault()
+                           ?? req.Query["IsCompleted"].FirstOrDefault();
+
+            bool? completed = true;
+            if (!string.IsNullOrWhiteSpace(compStr))
+            {
+                if (compStr.Equals("all", StringComparison.OrdinalIgnoreCase))
+                    completed = null;
+                else if (bool.TryParse(compStr, out var bVal))
+                    completed = bVal;
+                else if (compStr == "0")
+                    completed = false;
+            }
+
             const string sql = """
                 SELECT 
                     (
@@ -974,6 +989,7 @@ public static class PartnersEndpoints
                           AND (@partner::uuid IS NULL OR i.partner_id = @partner)
                           AND (cardinality(@offices::uuid[]) = 0 OR COALESCE(i.office_id, @defOffice) = ANY(@offices))
                           AND i.date >= @from AND i.date <= @till
+                          AND (@completed::bool IS NULL OR i.is_completed = @completed)
                     )
                     +
                     (
@@ -985,6 +1001,7 @@ public static class PartnersEndpoints
                           AND (@partner::uuid IS NULL OR psl.partner_id = @partner)
                           AND (cardinality(@offices::uuid[]) = 0 OR COALESCE(ps.office_id, @defOffice) = ANY(@offices))
                           AND ps.date >= @from AND ps.date <= @till
+                          AND (@completed::bool IS NULL OR ps.is_completed = @completed)
                     )
                     +
                     (
@@ -996,6 +1013,7 @@ public static class PartnersEndpoints
                           AND (@partner::uuid IS NULL OR ptl.partner_id = @partner)
                           AND (cardinality(@offices::uuid[]) = 0 OR COALESCE(ptl.office_id, @defOffice) = ANY(@offices))
                           AND pt.date >= @from AND pt.date <= @till
+                          AND (@completed::bool IS NULL OR pt.is_completed = @completed)
                     )
                     +
                     (
@@ -1006,6 +1024,7 @@ public static class PartnersEndpoints
                           AND (@partner::uuid IS NULL OR fs.partner_id = @partner)
                           AND (cardinality(@offices::uuid[]) = 0 OR COALESCE(fs.office_id, @defOffice) = ANY(@offices))
                           AND fs.date >= @from AND fs.date <= @till
+                          AND (@completed::bool IS NULL OR fs.is_completed = @completed)
                     ) AS "Count";
                 """;
 
@@ -1013,18 +1032,22 @@ public static class PartnersEndpoints
             await using var conn = new NpgsqlConnection(connStr);
             var totalCount = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
                 sql,
-                new { partner = pGuid, offices = targetOfficeGuids, defOffice = defaultOfficeGuid, from = fUtc, till = tUtc },
+                new { partner = pGuid, offices = targetOfficeGuids, defOffice = defaultOfficeGuid, from = fUtc, till = tUtc, completed },
                 cancellationToken: ct));
 
             return Results.Ok(new { count = totalCount });
         });
 
-        // 13. РЕЕСТР ДВИЖЕНИЙ ПО ПАРТНЕРАМ (ВКЛЮЧАЯ ОПЛАТЫ И КОЛЛЕКЦИИ)
-        group.MapGet("/actions", async (string? partnerId, DateTime? from, DateTime? till, int? limit, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        // 13. РЕЕСТР ДВИЖЕНИЙ ПО ПАРТНЕРАМ
+        group.MapGet("/actions", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 50000) : 10000;
-            DateTime fUtc = from.HasValue ? ParseSafeUtc(from.Value) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            DateTime tUtc = till.HasValue ? ParseSafeTillUtc(till.Value) : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
+            int take = int.TryParse(req.Query["limit"], out var lVal) ? Math.Clamp(lVal, 1, 50000) : 10000;
+            string? partnerId = req.Query["partnerId"].FirstOrDefault();
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+
+            DateTime fUtc = ParseSafeDate(fromStr, isTill: false);
+            DateTime tUtc = ParseSafeDate(tillStr, isTill: true);
 
             Guid? pGuid = Guid.TryParse(partnerId, out var g) ? g : null;
 
@@ -1037,11 +1060,27 @@ public static class PartnersEndpoints
                 .ToArray();
 
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
-                         ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
+                         ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => !c.IsDisabled, ct);
             Guid defaultCurrencyId = defCur?.Id ?? Guid.Empty;
 
             var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled, ct);
             Guid defaultOfficeGuid = defOffice?.Id ?? Guid.Empty;
+
+            // Считываем фильтр Completed (поддерживает completed, isCompleted, IsCompleted)
+            string? compStr = req.Query["completed"].FirstOrDefault()
+                           ?? req.Query["isCompleted"].FirstOrDefault()
+                           ?? req.Query["IsCompleted"].FirstOrDefault();
+
+            bool? completed = null;
+            if (!string.IsNullOrWhiteSpace(compStr))
+            {
+                if (bool.TryParse(compStr, out var bVal))
+                    completed = bVal;
+                else if (compStr == "1")
+                    completed = true;
+                else if (compStr == "0")
+                    completed = false;
+            }
 
             const string sql = """
                 WITH def_cur AS (
@@ -1056,6 +1095,7 @@ public static class PartnersEndpoints
                       AND (@partner::uuid IS NULL OR i.partner_id = @partner)
                       AND (cardinality(@offices::uuid[]) = 0 OR COALESCE(i.office_id, @defOffice) = ANY(@offices))
                       AND i.date >= @from AND i.date <= @till
+                      AND (@completed::bool IS NULL OR i.is_completed = @completed)
                     ORDER BY i.date DESC
                     LIMIT @take
                 ),
@@ -1110,20 +1150,32 @@ public static class PartnersEndpoints
                         CASE WHEN fs.funds_slip_type IN ('Expense', 'Payment') 
                              THEN COALESCE((
                                  SELECT SUM(fsl.amount * CASE 
-                                     WHEN fs.display_currency_id IS NULL OR fs.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
-                                     ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                                     WHEN fsl.currency_id IS NULL OR fsl.currency_id = (SELECT id FROM def_cur) THEN 1.0
+                                     ELSE COALESCE(line_cr.multiplier / NULLIF(line_cr.divider, 0), 1.0)
                                  END)
                                  FROM funds_slip_lines fsl 
+                                 LEFT JOIN LATERAL (
+                                     SELECT r.multiplier, r.divider 
+                                     FROM currency_rates r 
+                                     WHERE r.currency_id = fsl.currency_id AND r.valid_from <= fs.date 
+                                     ORDER BY r.valid_from DESC LIMIT 1
+                                 ) line_cr ON true
                                  WHERE fsl.funds_slip_id = fs.id
                              ), 0) 
                              ELSE 0 END AS "ActionDebit",
                         CASE WHEN fs.funds_slip_type IN ('Income', 'Collection', 'FundsOpening', 'FundsRevisionExceed') 
                              THEN COALESCE((
                                  SELECT SUM(fsl.amount * CASE 
-                                     WHEN fs.display_currency_id IS NULL OR fs.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
-                                     ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                                     WHEN fsl.currency_id IS NULL OR fsl.currency_id = (SELECT id FROM def_cur) THEN 1.0
+                                     ELSE COALESCE(line_cr.multiplier / NULLIF(line_cr.divider, 0), 1.0)
                                  END)
                                  FROM funds_slip_lines fsl 
+                                 LEFT JOIN LATERAL (
+                                     SELECT r.multiplier, r.divider 
+                                     FROM currency_rates r 
+                                     WHERE r.currency_id = fsl.currency_id AND r.valid_from <= fs.date 
+                                     ORDER BY r.valid_from DESC LIMIT 1
+                                 ) line_cr ON true
                                  WHERE fsl.funds_slip_id = fs.id
                              ), 0) 
                              ELSE 0 END AS "ActionCredit",
@@ -1131,17 +1183,12 @@ public static class PartnersEndpoints
                         fs.is_completed                           AS "TransactionIsCompleted",
                         fs.is_disabled                            AS "TransactionIsDisabled"
                     FROM funds_slips fs
-                    LEFT JOIN LATERAL (
-                        SELECT r.multiplier, r.divider 
-                        FROM currency_rates r 
-                        WHERE r.currency_id = fs.display_currency_id AND r.valid_from <= fs.date 
-                        ORDER BY r.valid_from DESC LIMIT 1
-                    ) cr ON true
                     WHERE fs.partner_id IS NOT NULL 
                       AND fs.is_disabled = false
                       AND (@partner::uuid IS NULL OR fs.partner_id = @partner)
                       AND (cardinality(@offices::uuid[]) = 0 OR COALESCE(fs.office_id, @defOffice) = ANY(@offices))
                       AND fs.date >= @from AND fs.date <= @till
+                      AND (@completed::bool IS NULL OR fs.is_completed = @completed)
 
                     UNION ALL
 
@@ -1155,7 +1202,7 @@ public static class PartnersEndpoints
                         psl.debit_amount                          AS "ActionDebit",
                         psl.credit_amount                         AS "ActionCredit",
                         ps.user_name                              AS "TransactionUserName",
-                        true                                      AS "TransactionIsCompleted",
+                        ps.is_completed                           AS "TransactionIsCompleted",
                         ps.is_disabled                            AS "TransactionIsDisabled"
                     FROM partner_slip_lines psl
                     JOIN partner_slips ps ON ps.id = psl.partner_slip_id
@@ -1164,6 +1211,7 @@ public static class PartnersEndpoints
                       AND (@partner::uuid IS NULL OR psl.partner_id = @partner)
                       AND (cardinality(@offices::uuid[]) = 0 OR COALESCE(ps.office_id, @defOffice) = ANY(@offices))
                       AND ps.date >= @from AND ps.date <= @till
+                      AND (@completed::bool IS NULL OR ps.is_completed = @completed)
 
                     UNION ALL
 
@@ -1177,7 +1225,7 @@ public static class PartnersEndpoints
                         ptl.debit_amount                          AS "ActionDebit",
                         ptl.credit_amount                         AS "ActionCredit",
                         pt.user_name                              AS "TransactionUserName",
-                        true                                      AS "TransactionIsCompleted",
+                        pt.is_completed                           AS "TransactionIsCompleted",
                         pt.is_disabled                            AS "TransactionIsDisabled"
                     FROM partner_transfer_lines ptl
                     JOIN partner_transfers pt ON pt.id = ptl.partner_transfer_id
@@ -1186,6 +1234,7 @@ public static class PartnersEndpoints
                       AND (@partner::uuid IS NULL OR ptl.partner_id = @partner)
                       AND (cardinality(@offices::uuid[]) = 0 OR COALESCE(ptl.office_id, @defOffice) = ANY(@offices))
                       AND pt.date >= @from AND pt.date <= @till
+                      AND (@completed::bool IS NULL OR pt.is_completed = @completed)
                 )
                 SELECT 
                     *,
@@ -1202,7 +1251,7 @@ public static class PartnersEndpoints
             await using var conn = new NpgsqlConnection(connStr);
             var rawList = await conn.QueryAsync(new CommandDefinition(
                 sql,
-                new { partner = pGuid, offices = targetOfficeGuids, defOffice = defaultOfficeGuid, defCurId = defaultCurrencyId, from = fUtc, till = tUtc, take },
+                new { partner = pGuid, offices = targetOfficeGuids, defOffice = defaultOfficeGuid, defCurId = defaultCurrencyId, from = fUtc, till = tUtc, completed, take },
                 cancellationToken: ct));
 
             var result = rawList.Select(r => new
@@ -1234,8 +1283,13 @@ public static class PartnersEndpoints
         });
 
         // 14. ПОЛУЧЕНИЕ СУММАРНОГО САЛЬДО ПО ПАРТНЕРУ НА ДАТУ
-        group.MapGet("/balance-to-date", async (string officeId, string partnerId, DateTime? date, string? excludeId, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/balance-to-date", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
+            string? officeId = req.Query["officeId"].FirstOrDefault();
+            string? partnerId = req.Query["partnerId"].FirstOrDefault();
+            string? dateStr = req.Query["date"].FirstOrDefault();
+            string? excludeId = req.Query["excludeId"].FirstOrDefault();
+
             if (string.IsNullOrWhiteSpace(officeId) || string.IsNullOrWhiteSpace(partnerId))
                 return Results.Ok(new { Balance = 0m });
 
@@ -1246,7 +1300,7 @@ public static class PartnersEndpoints
             if (!pGuid.HasValue)
                 return Results.Ok(new { Balance = 0m });
 
-            DateTime dUtc = date.HasValue ? ParseSafeUtc(date.Value) : DateTime.UtcNow;
+            DateTime dUtc = !string.IsNullOrEmpty(dateStr) ? ParseSafeDate(dateStr, isTill: false) : DateTime.UtcNow;
 
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
                          ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
@@ -1260,25 +1314,26 @@ public static class PartnersEndpoints
                     SELECT @defCurId::uuid AS id
                 ),
                 moves AS (
+                    -- 1. Накладные
                     SELECT 
-                        i.date,
                         CASE 
                             WHEN i.invoice_type IN ('Sales', 'PurchaseReturn') THEN
-                                COALESCE((SELECT SUM(il.quantity * (il.price * CASE 
+                                COALESCE(SUM(il.quantity * (il.price * CASE 
                                     WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
                                     ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
-                                END)) FROM invoice_lines il WHERE il.invoice_id = i.id), 0)
+                                END)), 0)
                             ELSE 0
                         END AS debit,
                         CASE 
                             WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN
-                                COALESCE((SELECT SUM(il.quantity * (il.price * CASE 
+                                COALESCE(SUM(il.quantity * (il.price * CASE 
                                     WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
                                     ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
-                                END)) FROM invoice_lines il WHERE il.invoice_id = i.id), 0)
+                                END)), 0)
                             ELSE 0
                         END AS credit
                     FROM invoices i
+                    JOIN invoice_lines il ON il.invoice_id = i.id
                     LEFT JOIN LATERAL (
                         SELECT r.multiplier, r.divider 
                         FROM currency_rates r 
@@ -1287,68 +1342,71 @@ public static class PartnersEndpoints
                     ) cr ON true
                     WHERE i.partner_id = @partner
                       AND i.is_disabled = false
-                      AND COALESCE(i.office_id, @defOffice) = COALESCE(@office, @defOffice)
+                      AND (@office::uuid IS NULL OR COALESCE(i.office_id, @defOffice) = @office)
                       AND i.date < @docDate
                       AND (@excludeId::uuid IS NULL OR i.id <> @excludeId)
+                    GROUP BY i.invoice_type
 
                     UNION ALL
 
+                    -- 2. Кассовые ордера
                     SELECT 
-                        fs.date,
                         CASE 
                             WHEN fs.funds_slip_type IN ('Expense', 'Payment') THEN
-                                COALESCE((SELECT SUM(fsl.amount * CASE 
-                                    WHEN fs.display_currency_id IS NULL OR fs.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
-                                    ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
-                                END) FROM funds_slip_lines fsl WHERE fsl.funds_slip_id = fs.id), 0)
+                                COALESCE(SUM(fsl.amount * CASE 
+                                    WHEN fsl.currency_id IS NULL OR fsl.currency_id = (SELECT id FROM def_cur) THEN 1.0
+                                    ELSE COALESCE(line_cr.multiplier / NULLIF(line_cr.divider, 0), 1.0)
+                                END), 0)
                             ELSE 0
                         END AS debit,
                         CASE 
                             WHEN fs.funds_slip_type IN ('Income', 'Collection', 'FundsOpening', 'FundsRevisionExceed') THEN
-                                COALESCE((SELECT SUM(fsl.amount * CASE 
-                                    WHEN fs.display_currency_id IS NULL OR fs.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
-                                    ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
-                                END) FROM funds_slip_lines fsl WHERE fsl.funds_slip_id = fs.id), 0)
+                                COALESCE(SUM(fsl.amount * CASE 
+                                    WHEN fsl.currency_id IS NULL OR fsl.currency_id = (SELECT id FROM def_cur) THEN 1.0
+                                    ELSE COALESCE(line_cr.multiplier / NULLIF(line_cr.divider, 0), 1.0)
+                                END), 0)
                             ELSE 0
                         END AS credit
                     FROM funds_slips fs
+                    JOIN funds_slip_lines fsl ON fsl.funds_slip_id = fs.id
                     LEFT JOIN LATERAL (
                         SELECT r.multiplier, r.divider 
                         FROM currency_rates r 
-                        WHERE r.currency_id = fs.display_currency_id AND r.valid_from <= fs.date 
+                        WHERE r.currency_id = fsl.currency_id AND r.valid_from <= fs.date 
                         ORDER BY r.valid_from DESC LIMIT 1
-                    ) cr ON true
+                    ) line_cr ON true
                     WHERE fs.partner_id = @partner
                       AND fs.is_disabled = false
-                      AND COALESCE(fs.office_id, @defOffice) = COALESCE(@office, @defOffice)
+                      AND (@office::uuid IS NULL OR COALESCE(fs.office_id, @defOffice) = @office)
                       AND fs.date < @docDate
                       AND (@excludeId::uuid IS NULL OR fs.id <> @excludeId)
+                    GROUP BY fs.funds_slip_type
 
                     UNION ALL
 
+                    -- 3. Документы взаиморасчетов
                     SELECT 
-                        ps.date,
-                        psl.debit_amount AS debit,
-                        psl.credit_amount AS credit
+                        COALESCE(SUM(psl.debit_amount), 0) AS debit,
+                        COALESCE(SUM(psl.credit_amount), 0) AS credit
                     FROM partner_slip_lines psl
                     JOIN partner_slips ps ON ps.id = psl.partner_slip_id
                     WHERE psl.partner_id = @partner
                       AND ps.is_disabled = false
-                      AND COALESCE(ps.office_id, @defOffice) = COALESCE(@office, @defOffice)
+                      AND (@office::uuid IS NULL OR COALESCE(ps.office_id, @defOffice) = @office)
                       AND ps.date < @docDate
                       AND (@excludeId::uuid IS NULL OR ps.id <> @excludeId)
 
                     UNION ALL
 
+                    -- 4. Переводы между партнерами
                     SELECT 
-                        pt.date,
-                        ptl.debit_amount AS debit,
-                        ptl.credit_amount AS credit
+                        COALESCE(SUM(ptl.debit_amount), 0) AS debit,
+                        COALESCE(SUM(ptl.credit_amount), 0) AS credit
                     FROM partner_transfer_lines ptl
                     JOIN partner_transfers pt ON pt.id = ptl.partner_transfer_id
                     WHERE ptl.partner_id = @partner
                       AND pt.is_disabled = false
-                      AND COALESCE(ptl.office_id, @defOffice) = COALESCE(@office, @defOffice)
+                      AND (@office::uuid IS NULL OR COALESCE(ptl.office_id, @defOffice) = @office)
                       AND pt.date < @docDate
                       AND (@excludeId::uuid IS NULL OR pt.id <> @excludeId)
                 )
@@ -1368,41 +1426,53 @@ public static class PartnersEndpoints
     }
 
     #region Helpers
-    private static DateTime ParseClientDate(string? dateStr)
+    private static DateTime ParseCleanDate(string? dateStr)
     {
-        if (string.IsNullOrEmpty(dateStr) || !DateTime.TryParse(dateStr, out var dt))
-            return DateTime.UtcNow;
-
-        return dt.Kind switch
+        if (string.IsNullOrWhiteSpace(dateStr)) return DateTime.UtcNow;
+        dateStr = dateStr.Replace(" ", "+").Trim();
+        if (DateTimeOffset.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
         {
-            DateTimeKind.Utc => dt,
-            DateTimeKind.Local => dt.ToUniversalTime(),
-            _ => DateTime.SpecifyKind(dt, DateTimeKind.Local).ToUniversalTime()
-        };
-    }
-
-    private static DateTime ParseSafeUtc(DateTime dt)
-    {
-        if (dt == DateTime.MinValue) return DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-        return dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
-    }
-
-    private static DateTime ParseSafeTillUtc(DateTime dt)
-    {
-        if (dt >= DateTime.MaxValue.AddDays(-2)) return DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
-
-        var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
-        if (dt.TimeOfDay == TimeSpan.Zero && dt.Kind != DateTimeKind.Utc)
-        {
-            return utc.Date.AddDays(1).AddTicks(-1);
+            return dto.UtcDateTime;
         }
-        return utc;
+        if (DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            return dt.ToUniversalTime();
+        }
+        return DateTime.UtcNow;
+    }
+
+    private static DateTime ParseSafeDate(string? raw, bool isTill)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+
+        raw = raw.Replace(" ", "+").Trim();
+        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
+        {
+            var res = dto.UtcDateTime;
+            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
+            {
+                res = res.Date.AddDays(1).AddTicks(-1);
+            }
+            return res;
+        }
+
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            var res = dt.ToUniversalTime();
+            if (isTill && dt.TimeOfDay == TimeSpan.Zero)
+            {
+                res = res.Date.AddDays(1).AddTicks(-1);
+            }
+            return res;
+        }
+
+        return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
     }
 
     private static List<string> ExtractTagsFromRawJson(JsonElement root)
     {
         var list = new List<string>();
-
         if (!root.TryGetProperty("tags", out var tagsProp) &&
             !root.TryGetProperty("Tags", out tagsProp))
         {
@@ -1444,7 +1514,7 @@ public static class PartnersEndpoints
             if (TryGetPropertyCaseInsensitive(element, name, out var prop) && prop.ValueKind == JsonValueKind.String)
                 return prop.GetString();
         }
-        return null;
+        return string.Empty;
     }
 
     private static decimal GetJsonDecimal(JsonElement element, params string[] propNames)
@@ -1454,7 +1524,7 @@ public static class PartnersEndpoints
             if (TryGetPropertyCaseInsensitive(element, name, out var prop))
             {
                 if (prop.ValueKind == JsonValueKind.Number) return prop.GetDecimal();
-                if (prop.ValueKind == JsonValueKind.String && decimal.TryParse(prop.GetString(), out var val)) return val;
+                if (prop.ValueKind == JsonValueKind.String && decimal.TryParse(prop.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var val)) return val;
             }
         }
         return 0m;

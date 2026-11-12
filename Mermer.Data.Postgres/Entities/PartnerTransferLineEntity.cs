@@ -1,4 +1,5 @@
 ﻿using System;
+using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 using System.Text.Json.Serialization;
 
@@ -7,6 +8,7 @@ namespace Mermer.Data.Postgres.Entities;
 [Table("partner_transfer_lines")]
 public class PartnerTransferLineEntity
 {
+    [Key]
     [Column("id")]
     public Guid Id { get; set; }
 
@@ -31,6 +33,13 @@ public class PartnerTransferLineEntity
     [Column("credit_currency_id")]
     public Guid? CreditCurrencyId { get; set; }
 
+    [ForeignKey(nameof(PartnerTransferId))]
     [JsonIgnore]
-    public PartnerTransferEntity PartnerTransfer { get; set; } = null!;
+    public PartnerTransferEntity? PartnerTransfer { get; set; }
+
+    [ForeignKey(nameof(OfficeId))]
+    public OfficeEntity? Office { get; set; }
+
+    [ForeignKey(nameof(PartnerId))]
+    public PartnerEntity? Partner { get; set; }
 }

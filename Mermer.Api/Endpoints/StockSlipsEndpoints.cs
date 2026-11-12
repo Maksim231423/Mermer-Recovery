@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -21,7 +22,7 @@ public static class StockSlipsEndpoints
         var group = routes.MapGroup("/api/catalog").WithTags("Catalog");
 
         // --- СПИСОК СКЛАДСКИХ ОРДЕРОВ ---
-        group.MapGet("/slips", async (DateTime? from, DateTime? till, string? warehouseId, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/slips", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             try
             {
@@ -47,12 +48,16 @@ public static class StockSlipsEndpoints
                     };
                 }
 
-                // Безопасные границы дат в UTC с включением всего текущего дня
-                DateTimeOffset startDate = from.HasValue
-                    ? ParseSafeUtcOffset(from.Value)
+                string? fromStr = req.Query["from"].FirstOrDefault();
+                string? tillStr = req.Query["till"].FirstOrDefault();
+                string? warehouseId = req.Query["warehouseId"].FirstOrDefault();
+
+                DateTimeOffset startDate = !string.IsNullOrEmpty(fromStr)
+                    ? ParseSafeFilterOffset(fromStr, isTill: false)
                     : DateTimeOffset.MinValue;
-                DateTimeOffset endDate = till.HasValue
-                    ? ParseSafeUtcOffset(till.Value, isTill: true)
+
+                DateTimeOffset endDate = !string.IsNullOrEmpty(tillStr)
+                    ? ParseSafeFilterOffset(tillStr, isTill: true)
                     : DateTimeOffset.MaxValue;
 
                 var slipsQuery = db.StockSlips
@@ -182,7 +187,7 @@ public static class StockSlipsEndpoints
                     {
                         Id = s.Id.ToString(),
                         Code = s.Code ?? string.Empty,
-                        Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО НА LOCAL TIME
+                        Date = s.Date.ToString("yyyy-MM-ddTHH:mm:ss"), // Без искажения таймзоны
                         SlipType = s.SlipType,
                         Type = s.SlipType,
                         WarehouseId = s.WarehouseId?.ToString(),
@@ -248,7 +253,7 @@ public static class StockSlipsEndpoints
             {
                 Id = s.Id.ToString(),
                 Code = s.Code ?? string.Empty,
-                Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО НА LOCAL TIME
+                Date = s.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                 SlipType = s.SlipType,
                 Type = s.SlipType,
                 WarehouseId = s.WarehouseId?.ToString(),
@@ -319,14 +324,12 @@ public static class StockSlipsEndpoints
                 wId = defWh?.Id;
             }
 
-            // БЕЗОПАСНЫЙ ПАРСИНГ ДАТЫ БЕЗ ДВОЙНОГО СДВИГА:
-            DateTimeOffset date = DateTimeOffset.UtcNow;
+            // ИСПРАВЛЕННЫЙ ПАРСИНГ: Сохраняем реальную дату без срезки -2 часа
+            DateTimeOffset date = DateTimeOffset.Now;
             string? dateStr = GetStringProperty(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr) && DateTimeOffset.TryParse(dateStr, out var pDate))
+            if (!string.IsNullOrEmpty(dateStr))
             {
-                date = pDate.Offset == TimeSpan.Zero && !dateStr.EndsWith("Z", StringComparison.OrdinalIgnoreCase)
-                    ? new DateTimeOffset(DateTime.SpecifyKind(pDate.DateTime, DateTimeKind.Local).ToUniversalTime())
-                    : pDate.ToUniversalTime();
+                date = ParseCleanDateOffset(dateStr);
             }
 
             bool isCompleted = GetBoolProperty(root, "isCompleted", "IsCompleted");
@@ -430,21 +433,24 @@ public static class StockSlipsEndpoints
             return Results.Ok();
         });
 
-        // --- 1. БЫСТРЫЙ ПОДСЧЕТ ДЛЯ ПЛИТОК ДАТ ---
-        group.MapGet("/slips/count", async (DateTime? from, DateTime? till, string? warehouseId, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/slips/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             var query = db.StockSlips.AsNoTracking();
 
-            if (from.HasValue && from.Value.Year > 2000)
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+            string? warehouseId = req.Query["warehouseId"].FirstOrDefault();
+
+            if (!string.IsNullOrEmpty(fromStr))
             {
-                var fUtc = ParseSafeUtcOffset(from.Value);
-                query = query.Where(s => s.Date >= fUtc);
+                var fDate = ParseSafeFilterOffset(fromStr, isTill: false);
+                query = query.Where(s => s.Date >= fDate);
             }
 
-            if (till.HasValue && till.Value.Year < 2099)
+            if (!string.IsNullOrEmpty(tillStr))
             {
-                var tUtc = ParseSafeUtcOffset(till.Value, isTill: true);
-                query = query.Where(s => s.Date <= tUtc);
+                var tDate = ParseSafeFilterOffset(tillStr, isTill: true);
+                query = query.Where(s => s.Date <= tDate);
             }
 
             if (Guid.TryParse(warehouseId, out var wGuid))
@@ -456,15 +462,12 @@ public static class StockSlipsEndpoints
             return Results.Ok(new { count });
         });
 
-        // --- 2. ФАСЕТЫ ---
         group.MapGet("/slips/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
             string? fields = ctx.Request.Query["fields"].ToString();
             var fieldList = string.IsNullOrEmpty(fields)
                 ? new[] { "Date", "Group", "Tags" }
-                : fields.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                        .Select(f => f.Trim())
-                        .ToArray();
+                : fields.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
             var result = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
 
@@ -499,29 +502,22 @@ public static class StockSlipsEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var now = DateTime.UtcNow.Date;
-                    var slips = await db.StockSlips
-                        .AsNoTracking()
-                        .Select(s => s.Date)
-                        .ToListAsync(ct);
+                    var now = DateTimeOffset.Now;
+                    var todayStart = new DateTimeOffset(now.Year, now.Month, now.Day, 0, 0, 0, now.Offset);
+                    var weekStart = todayStart.AddDays(-7);
+                    var monthStart = new DateTimeOffset(now.Year, now.Month, 1, 0, 0, 0, now.Offset);
 
-                    var dates = slips.Select(d => d.UtcDateTime.Date).ToList();
-
-                    int countAll = dates.Count;
-                    int countToday = dates.Count(d => d == now);
-                    int countWeek = dates.Count(d => d >= now.AddDays(-7));
-                    int countMonth = dates.Count(d => d.Month == now.Month && d.Year == now.Year);
-                    int countYear = dates.Count(d => d.Year == now.Year);
+                    var countToday = await db.StockSlips.CountAsync(s => s.Date >= todayStart, ct);
+                    var countWeek = await db.StockSlips.CountAsync(s => s.Date >= weekStart, ct);
+                    var countMonth = await db.StockSlips.CountAsync(s => s.Date >= monthStart, ct);
+                    var countAll = await db.StockSlips.CountAsync(ct);
 
                     var dateFacets = new Dictionary<string, int>
                     {
                         { "#Today", countToday },
                         { "#This Week", countWeek },
                         { "#This Month", countMonth },
-                        { "#This Year", countYear },
-                        { "#All Records", countAll },
-                        { "#All", countAll },
-                        { "", countAll }
+                        { "#All Records", countAll }
                     };
                     result[field] = dateFacets;
                 }
@@ -535,61 +531,44 @@ public static class StockSlipsEndpoints
         });
     }
 
-    #region Helpers
-    private static DateTimeOffset ParseSafeUtcOffset(DateTime dt, bool isTill = false)
+    #region Safe Date Helpers
+    private static DateTimeOffset ParseCleanDateOffset(string raw)
     {
-        if (dt == DateTime.MinValue) return new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc));
-        if (dt >= DateTime.MaxValue.AddDays(-2)) return new DateTimeOffset(new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc));
-
-        var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
-        if (isTill && dt.TimeOfDay == TimeSpan.Zero && dt.Kind != DateTimeKind.Utc)
+        raw = raw.Replace(" ", "+").Trim();
+        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
         {
-            utc = utc.Date.AddDays(1).AddTicks(-1);
+            return dto;
         }
-        return new DateTimeOffset(utc);
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            return new DateTimeOffset(dt, DateTimeOffset.Now.Offset);
+        }
+        return DateTimeOffset.Now;
     }
 
-    private static List<string> ExtractTagsFromRawJson(JsonElement root)
+    private static DateTimeOffset ParseSafeFilterOffset(string raw, bool isTill = false)
     {
-        var list = new List<string>();
-
-        if (!root.TryGetProperty("tags", out var tagsProp) &&
-            !root.TryGetProperty("Tags", out tagsProp))
+        raw = raw.Replace(" ", "+").Trim();
+        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
         {
-            return list;
-        }
-
-        if (tagsProp.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in tagsProp.EnumerateArray())
+            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
             {
-                if (item.ValueKind == JsonValueKind.String)
-                {
-                    var s = item.GetString();
-                    if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
-                }
-                else if (item.ValueKind == JsonValueKind.Object)
-                {
-                    if (item.TryGetProperty("Text", out var t) || item.TryGetProperty("Value", out t) || item.TryGetProperty("Name", out t))
-                    {
-                        var s = t.GetString();
-                        if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
-                    }
-                }
+                return new DateTimeOffset(dto.Year, dto.Month, dto.Day, 23, 59, 59, dto.Offset);
             }
-        }
-        else if (tagsProp.ValueKind == JsonValueKind.String)
-        {
-            var raw = tagsProp.GetString();
-            if (!string.IsNullOrWhiteSpace(raw))
-            {
-                list.AddRange(raw.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
-                                 .Select(x => x.Trim())
-                                 .Where(x => !string.IsNullOrWhiteSpace(x)));
-            }
+            return dto;
         }
 
-        return list.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            var offset = DateTimeOffset.Now.Offset;
+            if (isTill && dt.TimeOfDay == TimeSpan.Zero)
+            {
+                return new DateTimeOffset(dt.Year, dt.Month, dt.Day, 23, 59, 59, offset);
+            }
+            return new DateTimeOffset(dt, offset);
+        }
+
+        return isTill ? DateTimeOffset.UtcNow.AddYears(10) : DateTimeOffset.UtcNow.AddYears(-10);
     }
 
     private static async Task<object[]> GetCurrencyConvertionsAsync(MermerDbContext db, DateTime docDate, CancellationToken ct)
@@ -620,6 +599,29 @@ public static class StockSlipsEndpoints
         }
 
         return convertions.ToArray();
+    }
+
+    private static List<string> ExtractTagsFromRawJson(JsonElement root)
+    {
+        var list = new List<string>();
+        if (!root.TryGetProperty("tags", out var tagsProp) &&
+            !root.TryGetProperty("Tags", out tagsProp))
+        {
+            return list;
+        }
+
+        if (tagsProp.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in tagsProp.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.String)
+                {
+                    var s = item.GetString();
+                    if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
+                }
+            }
+        }
+        return list.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     private static bool TryGetPropertyCaseInsensitive(JsonElement element, string propName, out JsonElement value)

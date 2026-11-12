@@ -5,15 +5,15 @@ using Mermer.Data.Postgres;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
 using Npgsql;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-// РАЗРЕШАЕТ Npgsql АВТОМАТИЧЕСКИ ПРЕОБРАЗОВЫВАТЬ DateTime (Local/Unspecified) В UTC
+// 1. Включаем legacy timestamp в Npgsql и привязываем процесс к UTC
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
+Environment.SetEnvironmentVariable("TZ", "UTC");
 
 var builder = WebApplication.CreateBuilder(args);
-
-// builder.WebHost.UseUrls("http://*:5050");
 
 builder.Logging.AddFilter("Microsoft.EntityFrameworkCore.Database.Command", LogLevel.Warning);
 builder.Logging.AddFilter("Microsoft.EntityFrameworkCore.Query", LogLevel.Warning);
@@ -52,21 +52,20 @@ builder.Services.AddSwaggerGen(options =>
     {
         Title = "Mermer ERP API",
         Version = "v1",
-        Description =
-            "HTTP API over the new PostgreSQL data layer. " +
-            "Replaces the legacy Couchbase access for the WPF client.",
+        Description = "HTTP API over PostgreSQL data layer.",
         Contact = new OpenApiContact { Name = "Mermer" }
     });
 
     options.ResolveConflictingActions(apiDescriptions => apiDescriptions.First());
 });
 
+// Глобальная настройка сериализации JSON
 builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(o =>
 {
     o.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
     o.SerializerOptions.PropertyNameCaseInsensitive = true;
-    o.SerializerOptions.Converters.Add(new LocalDateTimeJsonConverter());
-    o.SerializerOptions.Converters.Add(new LocalDateTimeOffsetJsonConverter());
+    o.SerializerOptions.Converters.Add(new UniversalDateTimeConverter());
+    o.SerializerOptions.Converters.Add(new UniversalDateTimeOffsetConverter());
 });
 
 // РЕГИСТРАЦИЯ СЕРВИСОВ СИНХРОНИЗАЦИИ
@@ -83,12 +82,11 @@ builder.Services.AddHostedService<SyncBackgroundWorker>();
 // РЕГИСТРАЦИЯ СЕРВИСОВ ЛИЦЕНЗИРОВАНИЯ И КЭША
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<IServerLicenseValidationService, ServerLicenseValidationService>();
-
 builder.Services.AddSingleton<ILicenseCryptoService, LicenseCryptoService>();
 
 var app = builder.Build();
 
-// ЛОГИРОВАНИЕ ВСЕХ ВХОДЯЩИХ HTTP-ЗАПРОСОВ И ИХ СТАТУСОВ
+// ЛОГИРОВАНИЕ ВСЕХ ВХОДЯЩИХ HTTP-ЗАПРОСОВ
 app.Use(async (context, next) =>
 {
     var path = context.Request.Path + context.Request.QueryString;
@@ -113,32 +111,63 @@ using (var scope = app.Services.CreateScope())
 
     try
     {
-        dbContext.Database.Migrate();
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine("[DB] Миграции успешно применены!");
-    }
-    catch (PostgresException ex) when (ex.SqlState == "42P07")
-    {
-        Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine("[DB] Схема базы уже существует (таблицы созданы скриптом инициализации). Продолжаем запуск...");
+        // Проверяем, существует ли уже физическая таблица в базе данных
+        var conn = dbContext.Database.GetDbConnection();
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'currencies');";
+        bool tablesExist = (bool)(await cmd.ExecuteScalarAsync() ?? false);
+
+        if (!tablesExist)
+        {
+            // База абсолютно чистая — накатываем все миграции с нуля
+            await dbContext.Database.MigrateAsync();
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("[DB] Миграции успешно применены!");
+        }
+        else
+        {
+            // Схема уже развернута (из дампа или патчера).
+            // Синхронизируем таблицу истории миграций без повторного создания таблиц:
+            var pendingMigrations = await dbContext.Database.GetPendingMigrationsAsync();
+            foreach (var migration in pendingMigrations)
+            {
+                await dbContext.Database.ExecuteSqlRawAsync(
+                    @"INSERT INTO ""__EFMigrationsHistory"" (""MigrationId"", ""ProductVersion"") 
+                      VALUES ({0}, '8.0.0') ON CONFLICT DO NOTHING;", migration);
+            }
+
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("[DB] Схема базы уже существует и синхронизирована. Продолжаем запуск...");
+        }
     }
     catch (Exception ex)
     {
         Console.ForegroundColor = ConsoleColor.DarkYellow;
-        Console.WriteLine($"[DB] Предупреждение при миграции: {ex.Message}. Продолжаем запуск...");
+        Console.WriteLine($"[DB] Предупреждение при инициализации базы: {ex.Message}. Продолжаем запуск...");
     }
     finally
     {
         Console.ResetColor();
     }
+
+    // ВЫЗЫВАЕТСЯ ВСЕГДА, НЕЗАВИСИМО ОТ РЕЗУЛЬТАТА МИГРАЦИЙ:
+    try
+    {
+        await MermerDbContext.EnsureClientTenantMigratedAsync(dbContext);
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"[DB] Активный тенант успешно установлен: '{MermerDbContext.CurrentClientId}'");
+        Console.ResetColor();
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[DB] Ошибка привязки тенанта: {ex.Message}");
+    }
 }
 
 app.UseCors();
-
-// ПОДКЛЮЧЕНИЕ ЗАЩИТНОГО MIDDLEWARE СЕРВЕРНОЙ ЛИЦЕНЗИИ
 app.UseMiddleware<ServerLicenseMiddleware>();
 
-// Формируем спецификацию строго в формате Swagger 2.0
 app.UseSwagger(c =>
 {
     c.SerializeAsV2 = true;
@@ -151,8 +180,7 @@ app.UseSwaggerUI(o =>
     o.RoutePrefix = "swagger";
 });
 
-app.MapGet("/", () => Results.Redirect("/swagger"))
-   .ExcludeFromDescription();
+app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
 
 // РЕГИСТРАЦИЯ ЭНДПОИНТОВ
 app.MapHealthEndpoints();
@@ -189,7 +217,10 @@ app.MapWarehouseEndpoints();
 
 app.Run();
 
-public class LocalDateTimeJsonConverter : JsonConverter<DateTime>
+/// <summary>
+/// Конвертер DateTime: отдает строку без сдвигов и смещений
+/// </summary>
+public class UniversalDateTimeConverter : JsonConverter<DateTime>
 {
     public override DateTime Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
@@ -202,12 +233,14 @@ public class LocalDateTimeJsonConverter : JsonConverter<DateTime>
 
     public override void Write(Utf8JsonWriter writer, DateTime value, JsonSerializerOptions options)
     {
-        var local = value.Kind == DateTimeKind.Utc ? value.ToLocalTime() : value;
-        writer.WriteStringValue(local.ToString("yyyy-MM-ddTHH:mm:ss"));
+        writer.WriteStringValue(value.ToString("yyyy-MM-ddTHH:mm:ss"));
     }
 }
 
-public class LocalDateTimeOffsetJsonConverter : JsonConverter<DateTimeOffset>
+/// <summary>
+/// Конвертер DateTimeOffset: отдает точное время без локальных искажений
+/// </summary>
+public class UniversalDateTimeOffsetConverter : JsonConverter<DateTimeOffset>
 {
     public override DateTimeOffset Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
@@ -220,6 +253,6 @@ public class LocalDateTimeOffsetJsonConverter : JsonConverter<DateTimeOffset>
 
     public override void Write(Utf8JsonWriter writer, DateTimeOffset value, JsonSerializerOptions options)
     {
-        writer.WriteStringValue(value.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:sszzz"));
+        writer.WriteStringValue(value.ToString("yyyy-MM-ddTHH:mm:ss"));
     }
 }

@@ -84,41 +84,69 @@ public class LoginViewModel : BaseViewModel
         IsBusy = true;
         try
         {
-            // 1. Обязательная проверка лицензий перед входом
-            var clientStatus = await _activationService.GetClientActiveDatesAsync();
-            var serverStatus = await _activationService.GetServerActiveDatesAsync();
+            // 1. Проверяем обязательные базовые лицензии (Клиент и Сервер)
+            var clientStatusTask = _activationService.GetClientActiveDatesAsync();
+            var serverStatusTask = _activationService.GetServerActiveDatesAsync();
+
+            await Task.WhenAll(clientStatusTask, serverStatusTask);
+
+            var clientStatus = await clientStatusTask;
+            var serverStatus = await serverStatusTask;
 
             bool isClientActive = clientStatus != null && clientStatus.IsActive;
             bool isServerActive = serverStatus != null && serverStatus.IsActive;
 
-            if (!isClientActive || !isServerActive)
+            // 2. Считываем флаг Enable VDS из конфигуратора или реестра
+            var connSettings = await _configurator.GetConfigAsync<ConnectionSettings>();
+            bool isVdsEnabled = connSettings?.AllowReporting ?? false;
+
+            if (!isVdsEnabled)
             {
-                // Снимаем флаг занятости до показа окон
-                IsBusy = false;
-
-                string reason = !isClientActive && !isServerActive
-                    ? "Both Client and Server licenses are not activated."
-                    : (!isClientActive ? "Client license is not activated." : "Server license is not activated.");
-
-                // Сначала выводим ошибку через исключение
                 try
                 {
-                    throw new InvalidOperationException($"Access denied. {reason} Please activate the application.");
+                    using var regKey = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\MermerCS\Binyat_Postgres\ConnectionSettings");
+                    if (regKey != null)
+                    {
+                        var val = regKey.GetValue("AllowReporting")?.ToString();
+                        if (bool.TryParse(val, out bool regBool)) isVdsEnabled = regBool;
+                    }
                 }
-                catch (Exception ex)
-                {
-                    UserInteractionService.ShowExceptionMessage(ex);
-                }
+                catch { }
+            }
 
-                // ТОЛЬКО ПОСЛЕ закрытия диалога ошибки переходим на окно активации
+            // 3. Если галочка VDS включена — проверяем лицензию синхронизации
+            bool isSyncActive = true;
+            if (isVdsEnabled)
+            {
+                var syncStatus = await _activationService.GetSynchronizerActiveDatesAsync();
+                isSyncActive = syncStatus != null && syncStatus.IsActive;
+            }
+
+            // 4. Если хотя бы одна из требуемых лицензий не активна — прерываем вход
+            if (!isClientActive || !isServerActive || !isSyncActive)
+            {
+                IsBusy = false;
+
+                var missingList = new System.Collections.Generic.List<string>();
+                if (!isClientActive) missingList.Add("Client License");
+                if (!isServerActive) missingList.Add("Server License");
+                if (isVdsEnabled && !isSyncActive) missingList.Add("Cloud Synchronization License (VDS)");
+
+                string missingText = string.Join("\n• ", missingList);
+                string message = isVdsEnabled && !isSyncActive
+                    ? $"Access denied. VDS cloud synchronization is enabled in settings, but the required licenses are missing or inactive:\n• {missingText}\n\nPlease activate the Synchronization License or disable VDS in Connection Settings."
+                    : $"Access denied. The following required licenses are missing or inactive:\n• {missingText}\n\nPlease activate the application.";
+
+                UserInteractionService.ShowMessage("License Not Found", message);
+
                 await NavigationService.Navigate<ActivationViewModel>();
                 return;
             }
 
-            // 2. Авторизация
+            // 5. Авторизация
             await _loginService.LoginAsync(Username, Password);
 
-            // 3. Переход в главное окно
+            // 6. Переход в главное окно
             await NavigationService.Navigate<MainViewModel>();
         }
         catch (Exception ex)

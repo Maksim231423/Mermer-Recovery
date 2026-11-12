@@ -128,17 +128,58 @@ public class BinyatActivationService : IBinyatActivationService
     public async Task DeactivateServerAsync()
     {
         string serverId = "local-server-node";
+        const string serverModuleId = "9a953aa5-2fd9-418d-bcf7-fb5bd7d09553";
+
         try { await _activationService.DeactivateAsync(serverId); } catch { }
-        await DeleteActivationResultsAsync(serverId);
+
+        // Удаляем ТОЛЬКО серверный модуль из файла, синхронизацию не трогаем!
+        await RemoveModuleActivationResultAsync(serverId, serverModuleId);
         ClearMemoryCache();
     }
 
     public async Task DeactivateSynchronizerAsync()
     {
         string serverId = "local-server-node";
+        const string syncModuleId = "6b1495a1-60aa-4420-9c30-94718c121c26";
+
         try { await _activationService.DeactivateAsync(serverId); } catch { }
-        await DeleteActivationResultsAsync(serverId);
+
+        // Удаляем ТОЛЬКО модуль синхронизации из файла, сервер остается нетронутым!
+        await RemoveModuleActivationResultAsync(serverId, syncModuleId);
         ClearMemoryCache();
+    }
+
+    private Task RemoveModuleActivationResultAsync(string machineId, string targetModuleId)
+    {
+        try
+        {
+            var filePath = GetFilePath(machineId);
+            if (File.Exists(filePath))
+            {
+                var json = File.ReadAllText(filePath);
+                var items = JsonConvert.DeserializeObject<List<ActivationResultItem>>(json);
+                if (items != null)
+                {
+                    // Удаляем только ту запись, где содержится targetModuleId
+                    items.RemoveAll(x => x.ApplicationModuleIds != null &&
+                                         x.ApplicationModuleIds.Contains(targetModuleId, StringComparer.OrdinalIgnoreCase));
+
+                    if (items.Count > 0)
+                    {
+                        // Перезаписываем файл с оставшимися лицензиями
+                        File.WriteAllText(filePath, JsonConvert.SerializeObject(items, Formatting.Indented));
+                    }
+                    else
+                    {
+                        // Если записей больше не осталось — удаляем пустой файл
+                        File.Delete(filePath);
+                    }
+                }
+            }
+        }
+        catch { }
+
+        return Task.CompletedTask;
     }
 
     // --- МОМЕНТАЛЬНЫЕ ПРОВЕРКИ ИЗ ПАМЯТИ ---

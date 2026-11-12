@@ -37,20 +37,29 @@ public class StockBalanceCalculator : IStockBalanceCalculator
             ))
             .ToListAsync(cancellationToken);
 
-        // 2. Движения по складским ордерам (оприходование, инвентаризация, списание)
-        var slipMovements = await _db.StockSlipLines
+        // 2. Движения по складским ордерам (определяем приход по типу ордера)
+        var rawSlips = await _db.StockSlipLines
             .AsNoTracking()
             .Where(l => l.StockSlip != null
                      && l.StockSlip.IsCompleted
                      && l.StockSlip.WarehouseId.HasValue
                      && l.StockId.HasValue)
-            .Select(l => new MovementRecord(
-                l.StockSlip!.WarehouseId!.Value,
-                l.StockId!.Value,
-                l.Quantity,
-                l.StockSlip.IsStockIncome
-            ))
+            .Select(l => new
+            {
+                WarehouseId = l.StockSlip!.WarehouseId!.Value,
+                StockId = l.StockId!.Value,
+                Quantity = l.Quantity,
+                SlipType = l.StockSlip.SlipType ?? "StockOpening",
+                IsStockIncome = l.StockSlip.IsStockIncome
+            })
             .ToListAsync(cancellationToken);
+
+        var slipMovements = rawSlips.Select(s => new MovementRecord(
+            s.WarehouseId,
+            s.StockId,
+            s.Quantity,
+            IsIncomeSlip(s.SlipType, s.IsStockIncome)
+        )).ToList();
 
         // 3. Движения по перемещениям между складами (StockTransfer)
         var transferLines = await _db.StockTransferLines
@@ -65,7 +74,7 @@ public class StockBalanceCalculator : IStockBalanceCalculator
         var transferMovements = new List<MovementRecord>();
         foreach (var t in transferLines)
         {
-            // Склад-источник: расход
+            // Склад-источник: всегда расход
             if (t.StockTransfer!.WarehouseId.HasValue)
             {
                 transferMovements.Add(new MovementRecord(
@@ -76,7 +85,7 @@ public class StockBalanceCalculator : IStockBalanceCalculator
                 ));
             }
 
-            // Склад-получатель: приход
+            // Склад-получатель: всегда приход
             if (t.StockTransfer.DestinationWarehouseId.HasValue)
             {
                 transferMovements.Add(new MovementRecord(
@@ -88,7 +97,7 @@ public class StockBalanceCalculator : IStockBalanceCalculator
             }
         }
 
-        // 4. Объединяем все три источника складских движений
+        // 4. Объединяем движения
         var allMovements = invoiceMovements
             .Concat(slipMovements)
             .Concat(transferMovements);
@@ -132,6 +141,20 @@ public class StockBalanceCalculator : IStockBalanceCalculator
         return invoiceType.Equals("Purchase", StringComparison.OrdinalIgnoreCase) ||
                invoiceType.Equals("SalesReturn", StringComparison.OrdinalIgnoreCase) ||
                invoiceType.Equals("Opening", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsIncomeSlip(string slipType, bool isStockIncome)
+    {
+        if (slipType.Equals("StockOpening", StringComparison.OrdinalIgnoreCase) ||
+            slipType.Equals("RevisionExceed", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (slipType.Equals("StockSpoilage", StringComparison.OrdinalIgnoreCase) ||
+            slipType.Equals("StockUsage", StringComparison.OrdinalIgnoreCase) ||
+            slipType.Equals("RevisionDeficit", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return isStockIncome;
     }
 
     private record MovementRecord(Guid WarehouseId, Guid StockId, decimal Amount, bool IsIncome);

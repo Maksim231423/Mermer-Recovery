@@ -38,7 +38,6 @@ public class StockSlipEntity
 
     [Column("date")]
     public DateTimeOffset Date { get; set; }
-    public bool IsSynced { get; set; } = false;
 
     [Column("created_at")]
     public DateTimeOffset CreatedAt { get; set; }
@@ -52,7 +51,10 @@ public class StockSlipEntity
     [Column("warehouse_id")]
     public Guid? WarehouseId { get; set; }
 
+    [ForeignKey(nameof(UserId))]
     public UserEntity? User { get; set; }
+
+    [ForeignKey(nameof(WarehouseId))]
     public WarehouseEntity? Warehouse { get; set; }
 
     public ICollection<StockSlipLineEntity> Lines { get; set; } = new List<StockSlipLineEntity>();

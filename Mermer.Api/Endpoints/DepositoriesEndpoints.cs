@@ -1,14 +1,15 @@
-﻿using System;
+﻿using Mermer.Data.Postgres;
+using Mermer.Data.Postgres.Entities;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.EntityFrameworkCore;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Routing;
-using Microsoft.EntityFrameworkCore;
-using Mermer.Data.Postgres;
 
 namespace Mermer.Api.Endpoints;
 
@@ -101,27 +102,27 @@ public static class DepositoriesEndpoints
 
             if (existing is null)
             {
-                var newEntity = Activator.CreateInstance(db.Depositories.EntityType.ClrType);
-                var entry = db.Entry(newEntity);
-
-                entry.Property("Id").CurrentValue = id;
-                entry.Property("Name").CurrentValue = dto.Name ?? "";
-                if (entry.Metadata.FindProperty("OfficeId") != null) entry.Property("OfficeId").CurrentValue = officeId;
-                if (entry.Metadata.FindProperty("Description") != null) entry.Property("Description").CurrentValue = dto.Description ?? "";
-                if (entry.Metadata.FindProperty("Tags") != null) entry.Property("Tags").CurrentValue = dto.Tags;
-                entry.Property("IsDisabled").CurrentValue = dto.IsDisabled;
-
-                db.Add(newEntity);
+                var newEntity = new DepositoryEntity
+                {
+                    Id = id,
+                    Name = dto.Name ?? "",
+                    OfficeId = officeId,
+                    Description = dto.Description ?? "",
+                    Tags = dto.Tags,
+                    IsDisabled = dto.IsDisabled,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    UpdatedAt = DateTimeOffset.UtcNow
+                };
+                db.Depositories.Add(newEntity);
             }
             else
             {
-                var entry = db.Entry(existing);
-
                 existing.Name = dto.Name ?? "";
-                if (entry.Metadata.FindProperty("OfficeId") != null) entry.Property("OfficeId").CurrentValue = officeId;
-                if (entry.Metadata.FindProperty("Description") != null) entry.Property("Description").CurrentValue = dto.Description ?? "";
-                if (entry.Metadata.FindProperty("Tags") != null) entry.Property("Tags").CurrentValue = dto.Tags;
+                existing.OfficeId = officeId;
+                existing.Description = dto.Description ?? "";
+                existing.Tags = dto.Tags;
                 existing.IsDisabled = dto.IsDisabled;
+                existing.UpdatedAt = DateTimeOffset.UtcNow;
             }
 
             await db.SaveChangesAsync(ct);

@@ -62,8 +62,9 @@
                     <dxlc:LayoutGroup View="Tabs" HorizontalAlignment="Stretch">
                         <dxlc:LayoutGroup.TabsStyle>
                             <Style TargetType="{x:Type dx:DXTabControl}">
-                                <Setter Property="TabContentCacheMode" Value="CacheAllTabs"/>
-                                    <Setter Property="dx:DXTabControl.View">
+                                <!-- Кэшируем содержимое вкладок, чтобы форма не пересоздавалась на лету -->
+                                <Setter Property="TabContentCacheMode" Value="CacheTabsOnSelecting"/>
+                                <Setter Property="dx:DXTabControl.View">
                                     <Setter.Value>
                                         <dx:TabControlMultiLineView HeaderLocation="Bottom"/>
                                     </Setter.Value>
@@ -551,19 +552,33 @@
                             </dxlc:LayoutItem>
                             <dxlc:LayoutItem Height="10"/>
                             <dxlc:LayoutItem Label="{Localize Partner}">
-                                <dxg:LookUpEdit x:Name="PartnerEditor" DisplayMember="Fullname" ValueMember="Id" AutoPopulateColumns="false"
-                                EditValue="{Binding Details.PartnerId, UpdateSourceTrigger=PropertyChanged}"
-                                IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"
-                                ItemsSource="{Binding Partners.List}" AllowDefaultButton="{Binding HasSaveAccess}">
+                                <dxg:LookUpEdit x:Name="PartnerEditor" 
+                    DisplayMember="Fullname" 
+                    ValueMember="Id" 
+                    AutoPopulateColumns="False"
+                    IncrementalFiltering="True"
+                    ImmediatePopup="False"
+                    AutoComplete="False"
+                    FilterCondition="Contains"
+                    EditValue="{Binding Details.PartnerId, UpdateSourceTrigger=PropertyChanged}"
+                    IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"
+                    ItemsSource="{Binding Partners.List}" 
+                    AllowDefaultButton="{Binding HasSaveAccess}">
                                     <dxe:PopupBaseEdit.PopupContentTemplate>
                                         <ControlTemplate>
-                                            <dxg:GridControl Name="PART_GridControl" AutoExpandAllGroups="true">
+                                            <dxg:GridControl Name="PART_GridControl" EnableSmartColumnsGeneration="False">
                                                 <dxg:GridControl.Columns>
-                                                    <dxg:GridColumn FieldName="Code" Header="{Localize Code}"/>
-                                                    <dxg:GridColumn FieldName="Name" Width="300" Header="{Localize Name}"/>
+                                                    <dxg:GridColumn FieldName="Code" Width="*" Header="{Localize Code}"/>
+                                                    <dxg:GridColumn FieldName="Name" Width="*" Header="{Localize Name}"/>
                                                 </dxg:GridControl.Columns>
                                                 <dxg:GridControl.View>
-                                                    <dxg:TableView AutoWidth="true"/>
+                                                    <dxg:TableView AutoWidth="True"
+                                       ShowGroupPanel="False"
+                                       SearchDelay="200"
+                                       SearchPanelFindFilter="Contains"
+                                       ShowSearchPanelMode="Always"
+                                       VirtualizingPanel.IsVirtualizing="True"
+                                       VirtualizingPanel.VirtualizationMode="Recycling"/>
                                                 </dxg:GridControl.View>
                                             </dxg:GridControl>
                                         </ControlTemplate>
@@ -572,9 +587,9 @@
                                         <dxg:SearchLookUpEditStyleSettings/>
                                     </dxg:LookUpEdit.StyleSettings>
                                     <dxe:ButtonInfo GlyphKind="Cancel" Command="{Binding RemovePartnerCommand}"
-                                  Visibility="{Binding HasSaveAccess, Converter={dxmvvm:BooleanToVisibilityConverter}}"/>
+                        Visibility="{Binding HasSaveAccess, Converter={dxmvvm:BooleanToVisibilityConverter}}"/>
                                     <dxe:ButtonInfo GlyphKind="Regular" Command="{Binding SelectPartnerCommand}"
-                                  Visibility="{Binding HasSaveAccess, Converter={dxmvvm:BooleanToVisibilityConverter}}"/>
+                        Visibility="{Binding HasSaveAccess, Converter={dxmvvm:BooleanToVisibilityConverter}}"/>
                                 </dxg:LookUpEdit>
                             </dxlc:LayoutItem>
                             <dxlc:LayoutItem Label="{Localize Office}">

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -45,7 +46,7 @@ public static class StockRepriceEndpoints
 
             var allDates = priceDates.Union(rateDates)
                 .OrderByDescending(d => d)
-                .Select(d => d.ToLocalTime())
+                .Select(d => d.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"))
                 .ToList();
 
             return Results.Json(allDates, jsonOptions);
@@ -62,30 +63,41 @@ public static class StockRepriceEndpoints
 
     private static (DateTime from, DateTime till) ParseDates(HttpRequest req)
     {
-        // Безопасные границы для PostgreSQL timestamptz
-        DateTime fUtc = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-        DateTime tUtc = new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc);
-
         string? fromStr = req.Query["from"].FirstOrDefault();
-        if (!string.IsNullOrEmpty(fromStr) && DateTime.TryParse(fromStr.Replace(" ", "+"), out var pf))
-        {
-            if (pf.Year > 2000)
-                fUtc = pf.ToUniversalTime();
-        }
-
         string? tillStr = req.Query["till"].FirstOrDefault();
-        if (!string.IsNullOrEmpty(tillStr) && DateTime.TryParse(tillStr.Replace(" ", "+"), out var pt))
+
+        DateTime from = ParseSafeDate(fromStr, isTill: false);
+        DateTime till = ParseSafeDate(tillStr, isTill: true);
+        return (from, till);
+    }
+
+    private static DateTime ParseSafeDate(string? raw, bool isTill)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+
+        raw = raw.Replace(" ", "+").Trim();
+        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
         {
-            if (pt.Year < 2099)
+            var res = dto.UtcDateTime;
+            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
             {
-                if (pt.TimeOfDay == TimeSpan.Zero)
-                    tUtc = pt.Date.AddDays(1).AddTicks(-1).ToUniversalTime();
-                else
-                    tUtc = pt.ToUniversalTime();
+                res = res.Date.AddDays(1).AddTicks(-1);
             }
+            return res;
         }
 
-        return (fUtc, tUtc);
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            var res = dt.ToUniversalTime();
+            if (isTill && dt.TimeOfDay == TimeSpan.Zero)
+            {
+                res = res.Date.AddDays(1).AddTicks(-1);
+            }
+            return res;
+        }
+
+        return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
     }
 
     private static async Task<List<StockRepriceEffectDto>> CalculateEffectsAsync(HttpRequest req, MermerDbContext db, CancellationToken ct)
@@ -234,7 +246,6 @@ public static class StockRepriceEndpoints
                                      .FirstOrDefault();
             if (prevP == null) continue;
 
-            // Если CurrencyId равен null, считаем валюту базовой USD (курс 1.0)
             decimal r1 = prevP.CurrencyId.HasValue ? GetRateValue(prevP.CurrencyId.Value, nextP.ValidFrom) : 1.0m;
             decimal r2 = nextP.CurrencyId.HasValue ? GetRateValue(nextP.CurrencyId.Value, nextP.ValidFrom) : 1.0m;
 
@@ -254,7 +265,7 @@ public static class StockRepriceEndpoints
                     StockCode = stock?.Code ?? "",
                     StockName = stock?.Name ?? "",
                     PriceChange = diff,
-                    ChangeDate = nextP.ValidFrom.ToLocalTime(), // ИСПРАВЛЕНО
+                    ChangeDate = DateTime.SpecifyKind(nextP.ValidFrom, DateTimeKind.Utc),
                     ChangeReason = 0,
                     WarehouseId = w.ToString(),
                     Balance = bal
@@ -277,7 +288,7 @@ public static class StockRepriceEndpoints
                     StockCode = stock?.Code ?? "",
                     StockName = stock?.Name ?? "",
                     PriceChange = rcEvt.PriceChange,
-                    ChangeDate = rcEvt.Date.ToLocalTime(), // ИСПРАВЛЕНО
+                    ChangeDate = DateTime.SpecifyKind(rcEvt.Date, DateTimeKind.Utc),
                     ChangeReason = 1,
                     WarehouseId = w.ToString(),
                     Balance = bal
@@ -311,7 +322,7 @@ public static class StockRepriceEndpoints
         public string StockCode { get; set; } = string.Empty;
         public string StockName { get; set; } = string.Empty;
         public decimal PriceChange { get; set; }
-        public DateTime ChangeDate { get; set; } // ВАЖНО: DateTime для совместимости с клиентом!
+        public DateTime ChangeDate { get; set; }
         public int ChangeReason { get; set; }
         public string WarehouseId { get; set; } = string.Empty;
         public decimal Balance { get; set; }

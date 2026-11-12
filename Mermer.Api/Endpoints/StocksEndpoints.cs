@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -61,7 +62,6 @@ public static class StocksEndpoints
                     .FirstOrDefault();
 
                 var defaultUnit = s.Units?.FirstOrDefault(u => u.IsDefault) ?? s.Units?.FirstOrDefault();
-
                 string? currencyId = currentPrice?.CurrencyId?.ToString() ?? defaultCurrencyId;
 
                 return new
@@ -249,17 +249,15 @@ public static class StocksEndpoints
         .WithName("StocksFacets");
 
         // 6. ЖУРНАЛ ДВИЖЕНИЯ ТОВАРОВ (ПОДСЧЕТ КОЛИЧЕСТВА)
-        group.MapGet("/actions/count", async (DateTime? from, DateTime? till, string? stockId, bool? completed, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/actions/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTimeOffset startDate = from.HasValue && from.Value.Year > 2000
-                ? new DateTimeOffset(from.Value.ToUniversalTime())
-                : DateTimeOffset.MinValue;
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+            string? stockId = req.Query["stockId"].FirstOrDefault();
+            bool? completed = bool.TryParse(req.Query["completed"], out var compVal) ? compVal : null;
 
-            DateTimeOffset endDate = till.HasValue && till.Value.Year < 2099
-                ? (till.Value.TimeOfDay == TimeSpan.Zero
-                    ? new DateTimeOffset(till.Value.Date.AddDays(1).AddTicks(-1).ToUniversalTime())
-                    : new DateTimeOffset(till.Value.ToUniversalTime()))
-                : DateTimeOffset.MaxValue;
+            DateTimeOffset startDate = !string.IsNullOrEmpty(fromStr) ? ParseSafeFilterOffset(fromStr, isTill: false) : DateTimeOffset.MinValue;
+            DateTimeOffset endDate = !string.IsNullOrEmpty(tillStr) ? ParseSafeFilterOffset(tillStr, isTill: true) : DateTimeOffset.MaxValue;
 
             var whIds = req.Query["warehouseId"]
                 .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
@@ -305,20 +303,18 @@ public static class StocksEndpoints
         .WithName("StockActionsCount");
 
         // ЖУРНАЛ ДВИЖЕНИЯ ТОВАРОВ (СПИСОК)
-        group.MapGet("/actions", async (DateTime? from, DateTime? till, string? stockId, bool? completed, int? limit, int? offset, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/actions", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 100000) : 100000;
-            int skip = offset.GetValueOrDefault(0);
+            int take = int.TryParse(req.Query["limit"], out var lVal) ? Math.Clamp(lVal, 1, 100000) : 100000;
+            int skip = int.TryParse(req.Query["offset"], out var oVal) ? Math.Max(0, oVal) : 0;
 
-            DateTimeOffset startDate = from.HasValue && from.Value.Year > 2000
-                ? new DateTimeOffset(from.Value.ToUniversalTime())
-                : DateTimeOffset.MinValue;
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+            string? stockId = req.Query["stockId"].FirstOrDefault();
+            bool? completed = bool.TryParse(req.Query["completed"], out var compVal) ? compVal : null;
 
-            DateTimeOffset endDate = till.HasValue && till.Value.Year < 2099
-                ? (till.Value.TimeOfDay == TimeSpan.Zero
-                    ? new DateTimeOffset(till.Value.Date.AddDays(1).AddTicks(-1).ToUniversalTime())
-                    : new DateTimeOffset(till.Value.ToUniversalTime()))
-                : DateTimeOffset.MaxValue;
+            DateTimeOffset startDate = !string.IsNullOrEmpty(fromStr) ? ParseSafeFilterOffset(fromStr, isTill: false) : DateTimeOffset.MinValue;
+            DateTimeOffset endDate = !string.IsNullOrEmpty(tillStr) ? ParseSafeFilterOffset(tillStr, isTill: true) : DateTimeOffset.MaxValue;
 
             var whIds = req.Query["warehouseId"]
                 .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
@@ -468,71 +464,71 @@ public static class StocksEndpoints
 
                     UNION ALL
 
-                   -- 4. Накладные
-                SELECT 
-                    i.id AS "TransactionId",
-                    i.code AS "TransactionCode",
-                    i.date AS "TransactionDate",
-                    COALESCE(i.invoice_type, 'Invoice') AS "TransactionType",
-                    '00000000-0000-0000-0000-000000000000' AS "TransactionUserId",
-                    COALESCE(i.user_name, 'admin') AS "TransactionUserName",
-                    COALESCE(i.user_name, 'admin') AS "Author",
-                    COALESCE(i.user_name, 'admin') AS "UserName",
-                    i.is_completed AS "TransactionIsCompleted",
-                    false AS "TransactionIsDisabled",
-                    (i.depository_id IS NOT NULL) AS "TransactionIsCash",
-                    COALESCE(i.tags, ARRAY[]::text[]) AS "TransactionTags",
-                    COALESCE(i.group_name, '') AS "TransactionGroup",
-                    l.id::text AS "ActionId",
-                    i.warehouse_id::text AS "ActionWarehouseId",
-                    COALESCE(p.name, '') AS "ActionRelatedObjectName",
-                    l.stock_id::text AS "ActionStockId",
-                    l.stock_id::text AS "StockId",
-                    COALESCE(stk.code, '') AS "StockCode",
-                    COALESCE(stk.name, '') AS "StockName",
-                    COALESCE(stk.type, '') AS "StockType",
-                    COALESCE(stk.group_name, '') AS "StockGroup",
-                    COALESCE(stk.tags, ARRAY[]::text[]) AS "StockTags",
-                    COALESCE(lp.price, l.price)::numeric(18,4) AS "RecommendedPrice",
-                    (l.price * CASE 
-                        WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
-                        ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
-                    END)::numeric(18,4) AS "ActionPrice",
-                    CASE WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN l.quantity ELSE 0 END AS "ActionIncome",
-                    CASE WHEN i.invoice_type NOT IN ('Purchase', 'SalesReturn') THEN l.quantity ELSE 0 END AS "ActionExpense",
-                    CASE WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN l.quantity ELSE -l.quantity END AS "ActionEffect",
-                    (l.quantity * (l.price * CASE 
-                        WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
-                        ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
-                    END))::numeric(18,4) AS "GrandTotal",
-                    (l.quantity * COALESCE(lp.price, l.price))::numeric(18,4) AS "RecommendedTotal",
-                    (l.quantity * (l.price * CASE 
-                        WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
-                        ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
-                    END))::numeric(18,4) AS "GrandTotalInCustomCurrency"
-                FROM invoice_lines l
-                JOIN invoices i ON i.id = l.invoice_id
-                LEFT JOIN partners p ON p.id = i.partner_id
-                LEFT JOIN stocks stk ON stk.id = l.stock_id
-                LEFT JOIN LATERAL (
-                    SELECT r.multiplier, r.divider 
-                    FROM currency_rates r 
-                    WHERE r.currency_id = i.display_currency_id 
-                      AND r.valid_from <= i.date 
-                    ORDER BY r.valid_from DESC LIMIT 1
-                ) cr ON true
-                LEFT JOIN LATERAL (
-                    SELECT sp.price 
-                    FROM stock_prices sp 
-                    WHERE sp.stock_id = l.stock_id 
-                    ORDER BY (sp.valid_from <= i.date) DESC, sp.valid_from DESC 
-                    LIMIT 1
-                ) lp ON true
-                WHERE i.is_disabled = false
-                  AND i.date >= @start AND i.date <= @end
-                  AND (@stockGuid IS NULL OR l.stock_id = @stockGuid)
-                  AND (@comp IS NULL OR i.is_completed = @comp)
-                  AND (cardinality(@whs) = 0 OR i.warehouse_id = ANY(@whs))
+                    -- 4. Накладные
+                    SELECT 
+                        i.id AS "TransactionId",
+                        i.code AS "TransactionCode",
+                        i.date AS "TransactionDate",
+                        COALESCE(i.invoice_type, 'Invoice') AS "TransactionType",
+                        '00000000-0000-0000-0000-000000000000' AS "TransactionUserId",
+                        COALESCE(i.user_name, 'admin') AS "TransactionUserName",
+                        COALESCE(i.user_name, 'admin') AS "Author",
+                        COALESCE(i.user_name, 'admin') AS "UserName",
+                        i.is_completed AS "TransactionIsCompleted",
+                        false AS "TransactionIsDisabled",
+                        (i.depository_id IS NOT NULL) AS "TransactionIsCash",
+                        COALESCE(i.tags, ARRAY[]::text[]) AS "TransactionTags",
+                        COALESCE(i.group_name, '') AS "TransactionGroup",
+                        l.id::text AS "ActionId",
+                        i.warehouse_id::text AS "ActionWarehouseId",
+                        COALESCE(p.name, '') AS "ActionRelatedObjectName",
+                        l.stock_id::text AS "ActionStockId",
+                        l.stock_id::text AS "StockId",
+                        COALESCE(stk.code, '') AS "StockCode",
+                        COALESCE(stk.name, '') AS "StockName",
+                        COALESCE(stk.type, '') AS "StockType",
+                        COALESCE(stk.group_name, '') AS "StockGroup",
+                        COALESCE(stk.tags, ARRAY[]::text[]) AS "StockTags",
+                        COALESCE(lp.price, l.price)::numeric(18,4) AS "RecommendedPrice",
+                        (l.price * CASE 
+                            WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
+                            ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                        END)::numeric(18,4) AS "ActionPrice",
+                        CASE WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN l.quantity ELSE 0 END AS "ActionIncome",
+                        CASE WHEN i.invoice_type NOT IN ('Purchase', 'SalesReturn') THEN l.quantity ELSE 0 END AS "ActionExpense",
+                        CASE WHEN i.invoice_type IN ('Purchase', 'SalesReturn') THEN l.quantity ELSE -l.quantity END AS "ActionEffect",
+                        (l.quantity * (l.price * CASE 
+                            WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
+                            ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                        END))::numeric(18,4) AS "GrandTotal",
+                        (l.quantity * COALESCE(lp.price, l.price))::numeric(18,4) AS "RecommendedTotal",
+                        (l.quantity * (l.price * CASE 
+                            WHEN i.display_currency_id IS NULL OR i.display_currency_id = (SELECT id FROM def_cur) THEN 1.0
+                            ELSE COALESCE(cr.multiplier / NULLIF(cr.divider, 0), 1.0)
+                        END))::numeric(18,4) AS "GrandTotalInCustomCurrency"
+                    FROM invoice_lines l
+                    JOIN invoices i ON i.id = l.invoice_id
+                    LEFT JOIN partners p ON p.id = i.partner_id
+                    LEFT JOIN stocks stk ON stk.id = l.stock_id
+                    LEFT JOIN LATERAL (
+                        SELECT r.multiplier, r.divider 
+                        FROM currency_rates r 
+                        WHERE r.currency_id = i.display_currency_id 
+                          AND r.valid_from <= i.date 
+                        ORDER BY r.valid_from DESC LIMIT 1
+                    ) cr ON true
+                    LEFT JOIN LATERAL (
+                        SELECT sp.price 
+                        FROM stock_prices sp 
+                        WHERE sp.stock_id = l.stock_id 
+                        ORDER BY (sp.valid_from <= i.date) DESC, sp.valid_from DESC 
+                        LIMIT 1
+                    ) lp ON true
+                    WHERE i.is_disabled = false
+                      AND i.date >= @start AND i.date <= @end
+                      AND (@stockGuid IS NULL OR l.stock_id = @stockGuid)
+                      AND (@comp IS NULL OR i.is_completed = @comp)
+                      AND (cardinality(@whs) = 0 OR i.warehouse_id = ANY(@whs))
                 )
                 SELECT * 
                 FROM raw_actions
@@ -547,12 +543,11 @@ public static class StocksEndpoints
                 new { start = startDate, end = endDate, stockGuid = filterStockGuid, comp = completed, whs = whIds, defCurId = defaultCurrencyId, take, skip },
                 cancellationToken: ct));
 
-            // ИСПРАВЛЕНО: Явное приведение даты к локальному времени вместо сырого UTC
             var results = rawResults.Select(r => new
             {
                 TransactionId = (Guid)r.TransactionId,
                 TransactionCode = (string)r.TransactionCode,
-                TransactionDate = ((DateTime)r.TransactionDate).ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                TransactionDate = ((DateTimeOffset)r.TransactionDate).ToString("yyyy-MM-ddTHH:mm:ss"), // Без искажения
                 TransactionType = (string)r.TransactionType,
                 TransactionUserId = (string)r.TransactionUserId,
                 TransactionUserName = (string)r.TransactionUserName,
@@ -608,6 +603,11 @@ public static class StocksEndpoints
             string description = GetStringProp(root, "description", "Description") ?? string.Empty;
             bool isDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
 
+            // Получаем активный client_id тенанта
+            string tenantId = !string.IsNullOrWhiteSpace(MermerDbContext.CurrentClientId) && MermerDbContext.CurrentClientId != "default"
+                ? MermerDbContext.CurrentClientId
+                : "default";
+
             decimal? limitMin = null;
             if (TryGetPropCaseInsensitive(root, "limitMin", out var lmProp) || TryGetPropCaseInsensitive(root, "LimitMin", out lmProp))
             {
@@ -656,8 +656,10 @@ public static class StocksEndpoints
 
                     DateTime validFrom = DateTime.UtcNow.Date;
                     string? vfStr = GetStringProp(pJson, "validFrom", "ValidFrom");
-                    if (!string.IsNullOrEmpty(vfStr) && DateTime.TryParse(vfStr, out var parsedVf))
-                        validFrom = parsedVf.ToUniversalTime();
+                    if (!string.IsNullOrEmpty(vfStr) && DateTime.TryParse(vfStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedVf))
+                    {
+                        validFrom = DateTime.SpecifyKind(parsedVf.Date, DateTimeKind.Utc);
+                    }
 
                     string? pIdStr = GetStringProp(pJson, "id", "Id");
                     Guid pId = Guid.TryParse(pIdStr, out var parsedPId) && parsedPId != Guid.Empty ? parsedPId : Guid.NewGuid();
@@ -763,16 +765,16 @@ public static class StocksEndpoints
                 {
                     await Dapper.SqlMapper.ExecuteAsync(conn,
                         @"UPDATE stock_units 
-                          SET name = @Name, multiplier = @Multiplier, divider = @Divider, is_default = @IsDefault 
+                          SET name = @Name, multiplier = @Multiplier, divider = @Divider, is_default = @IsDefault, client_id = @ClientId 
                           WHERE id = @Id",
-                        new { inUnit.Name, inUnit.Multiplier, inUnit.Divider, inUnit.IsDefault, match.Id });
+                        new { inUnit.Name, inUnit.Multiplier, inUnit.Divider, inUnit.IsDefault, ClientId = tenantId, match.Id });
                 }
                 else
                 {
                     await Dapper.SqlMapper.ExecuteAsync(conn,
-                        @"INSERT INTO stock_units (id, stock_id, name, multiplier, divider, is_default)
-                          VALUES (@Id, @stockId, @Name, @Multiplier, @Divider, @IsDefault)",
-                        new { inUnit.Id, stockId, inUnit.Name, inUnit.Multiplier, inUnit.Divider, inUnit.IsDefault });
+                        @"INSERT INTO stock_units (id, stock_id, name, multiplier, divider, is_default, client_id)
+                          VALUES (@Id, @stockId, @Name, @Multiplier, @Divider, @IsDefault, @ClientId)",
+                        new { inUnit.Id, stockId, inUnit.Name, inUnit.Multiplier, inUnit.Divider, inUnit.IsDefault, ClientId = tenantId });
                 }
             }
 
@@ -789,16 +791,16 @@ public static class StocksEndpoints
                 {
                     await Dapper.SqlMapper.ExecuteAsync(conn,
                         @"UPDATE stock_prices 
-                          SET price = @Price, currency_id = @CurrencyId, price_group = @Group, valid_from = @ValidFrom 
+                          SET price = @Price, currency_id = @CurrencyId, price_group = @Group, valid_from = @ValidFrom, client_id = @ClientId 
                           WHERE id = @Id",
-                        new { inPrice.Price, inPrice.CurrencyId, inPrice.Group, inPrice.ValidFrom, match.Id });
+                        new { inPrice.Price, inPrice.CurrencyId, inPrice.Group, inPrice.ValidFrom, ClientId = tenantId, match.Id });
                 }
                 else
                 {
                     await Dapper.SqlMapper.ExecuteAsync(conn,
-                        @"INSERT INTO stock_prices (id, stock_id, price, currency_id, price_group, valid_from, created_at)
-                          VALUES (@Id, @stockId, @Price, @CurrencyId, @Group, @ValidFrom, NOW())",
-                        new { inPrice.Id, stockId, inPrice.Price, inPrice.CurrencyId, inPrice.Group, inPrice.ValidFrom });
+                        @"INSERT INTO stock_prices (id, stock_id, price, currency_id, price_group, valid_from, client_id, created_at)
+                          VALUES (@Id, @stockId, @Price, @CurrencyId, @Group, @ValidFrom, @ClientId, NOW())",
+                        new { inPrice.Id, stockId, inPrice.Price, inPrice.CurrencyId, inPrice.Group, inPrice.ValidFrom, ClientId = tenantId });
                 }
             }
 
@@ -910,10 +912,139 @@ public static class StocksEndpoints
         })
         .WithName("StocksMerge");
 
+        // ПОЛУЧЕНИЕ ПОСЛЕДНИХ ЦЕН ЗАКУПКИ
+        group.MapPost("/last-purchase-prices", async (HttpRequest request, MermerDbContext db, CancellationToken ct) =>
+        {
+            using var reader = new StreamReader(request.Body);
+            var body = await reader.ReadToEndAsync(ct);
+            if (string.IsNullOrEmpty(body)) return Results.Ok(Array.Empty<object>());
+
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+
+            string? warehouseIdStr = null;
+            if (root.TryGetProperty("warehouseId", out var whProp) || root.TryGetProperty("WarehouseId", out whProp))
+                warehouseIdStr = whProp.GetString();
+
+            var stockGuids = new List<Guid>();
+            if ((root.TryGetProperty("stockIds", out var idsProp) || root.TryGetProperty("StockIds", out idsProp))
+                && idsProp.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in idsProp.EnumerateArray())
+                {
+                    if (Guid.TryParse(item.GetString(), out var g))
+                        stockGuids.Add(g);
+                }
+            }
+
+            if (!stockGuids.Any()) return Results.Ok(Array.Empty<object>());
+
+            Guid? warehouseGuid = Guid.TryParse(warehouseIdStr, out var wG) ? wG : null;
+
+            var connStr = db.Database.GetConnectionString();
+            await using var conn = new Npgsql.NpgsqlConnection(connStr);
+
+            const string sql = """
+        SELECT DISTINCT ON (il.stock_id)
+            il.stock_id::text AS "StockId",
+            il.price AS "Price",
+            COALESCE(il.currency_id, i.display_currency_id)::text AS "CurrencyId"
+        FROM invoice_lines il
+        JOIN invoices i ON i.id = il.invoice_id
+        WHERE il.stock_id = ANY(@stockGuids)
+          AND i.is_completed = true
+          AND i.is_disabled = false
+          AND i.invoice_type = 'Purchase'
+          AND (@warehouseGuid::uuid IS NULL OR i.warehouse_id = @warehouseGuid)
+        ORDER BY il.stock_id, i.date DESC, il.sort_order DESC;
+    """;
+
+            var results = await Dapper.SqlMapper.QueryAsync(conn, new Dapper.CommandDefinition(
+                sql,
+                new { stockGuids = stockGuids.ToArray(), warehouseGuid },
+                cancellationToken: ct));
+
+            return Results.Json(results, jsonOptions);
+        });
+
+        // ПОЛУЧЕНИЕ ПОСЛЕДНИХ ЦЕН ЗАКУПКИ (GET из Query String)
+        group.MapGet("/last-purchase-prices", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        {
+            string? warehouseIdStr = req.Query["warehouseId"].FirstOrDefault();
+            Guid? warehouseGuid = Guid.TryParse(warehouseIdStr, out var wG) ? wG : null;
+
+            var stockGuids = new List<Guid>();
+
+            // Разбираем stockIds (могут приходить как множественные параметры, так и через запятую: id1,id2,id3)
+            foreach (var rawVal in req.Query["stockIds"])
+            {
+                if (string.IsNullOrWhiteSpace(rawVal)) continue;
+                var parts = rawVal.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                foreach (var p in parts)
+                {
+                    if (Guid.TryParse(p, out var g))
+                        stockGuids.Add(g);
+                }
+            }
+
+            if (!stockGuids.Any()) return Results.Ok(Array.Empty<object>());
+
+            var connStr = db.Database.GetConnectionString();
+            await using var conn = new Npgsql.NpgsqlConnection(connStr);
+
+            const string sql = """
+        SELECT DISTINCT ON (il.stock_id)
+            il.stock_id::text AS "StockId",
+            il.price AS "Price",
+            COALESCE(il.currency_id, i.display_currency_id)::text AS "CurrencyId"
+        FROM invoice_lines il
+        JOIN invoices i ON i.id = il.invoice_id
+        WHERE il.stock_id = ANY(@stockGuids)
+          AND i.is_completed = true
+          AND i.is_disabled = false
+          AND i.invoice_type = 'Purchase'
+          AND (@warehouseGuid::uuid IS NULL OR i.warehouse_id = @warehouseGuid)
+        ORDER BY il.stock_id, i.date DESC, il.sort_order DESC;
+    """;
+
+            var results = await Dapper.SqlMapper.QueryAsync(conn, new Dapper.CommandDefinition(
+                sql,
+                new { stockGuids = stockGuids.Distinct().ToArray(), warehouseGuid },
+                cancellationToken: ct));
+
+            return Results.Json(results, jsonOptions);
+        })
+        .WithName("StocksGetLastPurchasePrices");
+
         return app;
     }
 
     #region Helpers
+    private static DateTimeOffset ParseSafeFilterOffset(string raw, bool isTill = false)
+    {
+        raw = raw.Replace(" ", "+").Trim();
+        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
+        {
+            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
+            {
+                return new DateTimeOffset(dto.Year, dto.Month, dto.Day, 23, 59, 59, dto.Offset);
+            }
+            return dto;
+        }
+
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            var offset = DateTimeOffset.Now.Offset;
+            if (isTill && dt.TimeOfDay == TimeSpan.Zero)
+            {
+                return new DateTimeOffset(dt.Year, dt.Month, dt.Day, 23, 59, 59, offset);
+            }
+            return new DateTimeOffset(dt, offset);
+        }
+
+        return isTill ? DateTimeOffset.UtcNow.AddYears(10) : DateTimeOffset.UtcNow.AddYears(-10);
+    }
+
     private static List<string> ExtractArrayProp(JsonElement root, params string[] propNames)
     {
         var list = new List<string>();
@@ -930,24 +1061,6 @@ public static class StocksEndpoints
                             var s = item.GetString();
                             if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
                         }
-                        else if (item.ValueKind == JsonValueKind.Object)
-                        {
-                            if (item.TryGetProperty("Text", out var t) || item.TryGetProperty("Value", out t) || item.TryGetProperty("Name", out t))
-                            {
-                                var s = t.GetString();
-                                if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
-                            }
-                        }
-                    }
-                }
-                else if (prop.ValueKind == JsonValueKind.String)
-                {
-                    var raw = prop.GetString();
-                    if (!string.IsNullOrWhiteSpace(raw))
-                    {
-                        list.AddRange(raw.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
-                                         .Select(x => x.Trim())
-                                         .Where(x => !string.IsNullOrWhiteSpace(x)));
                     }
                 }
                 break;

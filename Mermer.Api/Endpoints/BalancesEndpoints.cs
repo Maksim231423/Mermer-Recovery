@@ -1,13 +1,15 @@
-﻿using Mermer.Data.Postgres.Abstractions;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using Mermer.Data.Postgres.Abstractions;
 
 namespace Mermer.Api.Endpoints;
 
-/// <summary>
-/// Stock balance endpoints. Point-in-time balances are recomputed from
-/// invoice_lines (not stock_balances) for historical accuracy, and the
-/// "by date and warehouses" report supports price-group selection
-/// (retail / wholesale / custom) and display currency.
-/// </summary>
 public static class BalancesEndpoints
 {
     public static IEndpointRouteBuilder MapBalancesEndpoints(this IEndpointRouteBuilder app)
@@ -15,24 +17,19 @@ public static class BalancesEndpoints
         var group = app.MapGroup("/api/balances").WithTags("Balances");
 
         group.MapGet("/by-date", async (
-             DateTime date,
-             string? warehouseIds,
-             string? displayCurrencyId,
-             string? stockIds,
-             string? priceGroup,
-             IStockBalancesRepository repo,
-             CancellationToken ct) =>
+            DateTime date,
+            string? warehouseIds,
+            string? displayCurrencyId,
+            string? stockIds,
+            string? priceGroup,
+            IStockBalancesRepository repo,
+            CancellationToken ct) =>
         {
             var warehouses = SplitCsv(warehouseIds);
             var stocks = SplitCsv(stockIds);
 
-            // Если время не указано, берем срез на конец дня
-            DateTime safeDate = date.TimeOfDay == TimeSpan.Zero && date.Kind != DateTimeKind.Utc
-                ? date.Date.AddDays(1).AddTicks(-1).ToUniversalTime()
-                : (date.Kind == DateTimeKind.Utc ? date : date.ToUniversalTime());
-
             var report = await repo.GetByDateAndWarehousesAsync(
-                safeDate,
+                date,
                 warehouses,
                 displayCurrencyId,
                 stocks,
@@ -41,7 +38,7 @@ public static class BalancesEndpoints
 
             return Results.Ok(report);
         })
-         .WithName("BalancesByDate")
+        .WithName("BalancesByDate")
         .WithSummary(
             "Aggregated balance report at a point in time. " +
             "Supports price group (retail / wholesale / custom) and display currency.");
@@ -92,12 +89,7 @@ public static class BalancesEndpoints
             if (warehouses.Length == 0)
                 return Results.BadRequest(new { error = "Provide at least one warehouse id in 'warehouseIds' (csv)." });
 
-            var fromUtc = dateFrom.Kind == DateTimeKind.Utc ? dateFrom : dateFrom.ToUniversalTime();
-            var tillUtc = dateTill.TimeOfDay == TimeSpan.Zero && dateTill.Kind != DateTimeKind.Utc
-                ? dateTill.Date.AddDays(1).AddTicks(-1).ToUniversalTime()
-                : (dateTill.Kind == DateTimeKind.Utc ? dateTill : dateTill.ToUniversalTime());
-
-            var rows = await repo.GetByTypeAsync(warehouses, stockId, fromUtc, tillUtc, aggregate ?? false, ct);
+            var rows = await repo.GetByTypeAsync(warehouses, stockId, dateFrom, dateTill, aggregate ?? false, ct);
             return Results.Ok(rows);
         })
         .WithName("BalancesByType")

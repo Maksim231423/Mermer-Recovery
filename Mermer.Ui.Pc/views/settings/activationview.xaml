@@ -98,7 +98,7 @@
                     </dxlc:LayoutGroup>
 
                     <!-- 3. SYNCHRONIZATION LICENSE -->
-                    <dxlc:LayoutGroup Orientation="Vertical" Header="Sync License Info">
+                    <dxlc:LayoutGroup Orientation="Vertical" Header="Sync License Info" IsEnabled="{Binding IsVdsEnabled}">
                         <dxlc:LayoutGroup Visibility="{Binding SyncActivationStatus.IsActive, Converter={dx:BooleanToVisibilityConverter}}">
                             <TextBlock FontSize="24" Foreground="Green" Text="Synchronization is activated"/>
                         </dxlc:LayoutGroup>

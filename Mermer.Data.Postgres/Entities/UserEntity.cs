@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
 namespace Mermer.Data.Postgres.Entities;
@@ -7,6 +8,7 @@ namespace Mermer.Data.Postgres.Entities;
 [Table("users")]
 public class UserEntity
 {
+    [Key]
     [Column("id")]
     public Guid Id { get; set; }
 
@@ -25,7 +27,6 @@ public class UserEntity
     [Column("description")]
     public string? Description { get; set; }
 
-    // Список ID ролей, назначенных пользователю
     [Column("roles")]
     public List<string> Roles { get; set; } = new();
 

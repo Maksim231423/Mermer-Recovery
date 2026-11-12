@@ -22,23 +22,15 @@ public static class AggregatedReportsEndpoints
         group.MapGet("/", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             DateTime dateFrom = DateTime.UtcNow.AddMonths(-1);
-            DateTime dateTill = DateTime.UtcNow.AddDays(1);
+            DateTime dateTill = DateTime.UtcNow;
 
             string? fromStr = req.Query["dateFrom"].FirstOrDefault();
             if (!string.IsNullOrEmpty(fromStr) && DateTime.TryParse(fromStr.Replace(" ", "+"), out var pf))
-            {
-                dateFrom = pf.Kind == DateTimeKind.Utc ? pf : pf.ToUniversalTime();
-            }
+                dateFrom = pf.ToUniversalTime();
 
             string? tillStr = req.Query["dateTill"].FirstOrDefault();
             if (!string.IsNullOrEmpty(tillStr) && DateTime.TryParse(tillStr.Replace(" ", "+"), out var pt))
-            {
-                var utcTill = pt.Kind == DateTimeKind.Utc ? pt : pt.ToUniversalTime();
-                // Если передана дата без времени (полночь), расширяем фильтр до конца дня
-                dateTill = pt.TimeOfDay == TimeSpan.Zero && pt.Kind != DateTimeKind.Utc
-                    ? utcTill.AddDays(1)
-                    : utcTill;
-            }
+                dateTill = pt.ToUniversalTime();
 
             var officeIds = req.Query["officeId"]
                 .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)

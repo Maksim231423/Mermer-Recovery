@@ -57,5 +57,11 @@ public class StockRevisionEntity
     [Column("updated_at")]
     public DateTimeOffset UpdatedAt { get; set; }
 
+    [ForeignKey(nameof(WarehouseId))]
+    public WarehouseEntity? Warehouse { get; set; }
+
+    [ForeignKey(nameof(UserId))]
+    public UserEntity? User { get; set; }
+
     public ICollection<StockRevisionLineEntity> Lines { get; set; } = new List<StockRevisionLineEntity>();
 }

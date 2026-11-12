@@ -1,13 +1,14 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
+﻿using Mermer.Data.Postgres;
+using Mermer.Data.Postgres.Entities;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
-using Mermer.Data.Postgres;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Mermer.Api.Endpoints;
 
@@ -53,34 +54,34 @@ public static class WarehouseEndpoints
             }
             else
             {
-                // Подстановка дефолтного офиса предприятия
                 var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled, ct);
                 officeId = defOffice?.Id;
             }
 
             if (existing is null)
             {
-                var newEntity = Activator.CreateInstance(db.Warehouses.EntityType.ClrType);
-                var entry = db.Entry(newEntity);
+                var newEntity = new WarehouseEntity
+                {
+                    Id = id,
+                    Name = dto.Name ?? string.Empty,
+                    OfficeId = officeId,
+                    Description = dto.Description ?? string.Empty,
+                    Tags = dto.Tags,
+                    IsDisabled = dto.IsDisabled,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    UpdatedAt = DateTimeOffset.UtcNow
+                };
 
-                entry.Property("Id").CurrentValue = id;
-                entry.Property("Name").CurrentValue = dto.Name ?? "";
-                if (entry.Metadata.FindProperty("OfficeId") != null) entry.Property("OfficeId").CurrentValue = officeId;
-                if (entry.Metadata.FindProperty("Description") != null) entry.Property("Description").CurrentValue = dto.Description ?? "";
-                if (entry.Metadata.FindProperty("Tags") != null) entry.Property("Tags").CurrentValue = dto.Tags;
-                entry.Property("IsDisabled").CurrentValue = dto.IsDisabled;
-
-                db.Add(newEntity);
+                db.Warehouses.Add(newEntity);
             }
             else
             {
-                var entry = db.Entry(existing);
-
-                existing.Name = dto.Name ?? "";
-                if (entry.Metadata.FindProperty("OfficeId") != null) entry.Property("OfficeId").CurrentValue = officeId;
-                if (entry.Metadata.FindProperty("Description") != null) entry.Property("Description").CurrentValue = dto.Description ?? "";
-                if (entry.Metadata.FindProperty("Tags") != null) entry.Property("Tags").CurrentValue = dto.Tags;
+                existing.Name = dto.Name ?? string.Empty;
+                existing.OfficeId = officeId;
+                existing.Description = dto.Description ?? string.Empty;
+                existing.Tags = dto.Tags;
                 existing.IsDisabled = dto.IsDisabled;
+                existing.UpdatedAt = DateTimeOffset.UtcNow;
             }
 
             await db.SaveChangesAsync(ct);

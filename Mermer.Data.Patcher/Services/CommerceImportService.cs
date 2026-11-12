@@ -1,12 +1,13 @@
-﻿using System;
+﻿using Mermer.Data.Postgres;
+using Mermer.Data.Postgres.Entities;
+using Microsoft.EntityFrameworkCore;
+using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
-using Microsoft.EntityFrameworkCore;
-using Mermer.Data.Postgres;
-using Mermer.Data.Postgres.Entities;
 
 namespace Mermer.Data.Patcher.Services;
 
@@ -21,7 +22,7 @@ public class CommerceImportService
 
     public async Task MigrateInvoicesAsync(string jsonFilePath)
     {
-        Console.WriteLine("Начинаем импорт документов Invoice (Накладные/Счета) и их зависимостей...");
+        Console.WriteLine("Начинаем умную агрегацию накладных (Invoice)...");
 
         var validUsers = (await _dbContext.Users.Select(x => x.Id).ToListAsync()).ToHashSet();
         var validOffices = (await _dbContext.Offices.Select(x => x.Id).ToListAsync()).ToHashSet();
@@ -32,281 +33,232 @@ public class CommerceImportService
         var validStocks = (await _dbContext.Stocks.Select(x => x.Id).ToListAsync()).ToHashSet();
         var validUnits = (await _dbContext.StockUnits.Select(x => x.Id).ToListAsync()).ToHashSet();
 
-        // Загружаем уже существующие ID из БД для предотвращения дубликатов при дополнении
         var existingInvoiceIds = (await _dbContext.Invoices.Select(x => x.Id).ToListAsync()).ToHashSet();
         var existingLineIds = (await _dbContext.InvoiceLines.Select(x => x.Id).ToListAsync()).ToHashSet();
+
+        var invoiceMap = new Dictionary<Guid, InvoiceEntity>();
+        var linesMap = new Dictionary<Guid, InvoiceLineEntity>();
+        var paymentsMap = new Dictionary<Guid, InvoicePaymentEntity>();
+        var curConvMap = new Dictionary<Guid, InvoiceCurrencyConvertionEntity>();
+        var stockUnitConvMap = new Dictionary<Guid, InvoiceStockUnitConvertionEntity>();
+        var discountsMap = new Dictionary<Guid, InvoiceDiscountEntity>();
+        var overheadsMap = new Dictionary<Guid, InvoiceOverheadEntity>();
 
         using var stream = File.OpenRead(jsonFilePath);
         using var reader = new StreamReader(stream);
 
-        var invoicesBatch = new List<InvoiceEntity>();
-        var linesBatch = new List<InvoiceLineEntity>();
-        var paymentsBatch = new List<InvoicePaymentEntity>();
-        var currencyConvBatch = new List<InvoiceCurrencyConvertionEntity>();
-        var stockUnitConvBatch = new List<InvoiceStockUnitConvertionEntity>();
-        var discountsBatch = new List<InvoiceDiscountEntity>();
-        var overheadsBatch = new List<InvoiceOverheadEntity>();
-
-        var processedInvoiceIds = new HashSet<Guid>();
-        var processedLineIds = new HashSet<Guid>();
-        var processedOtherIds = new HashSet<Guid>();
-
         string? line;
-        int totalInvoices = 0;
-        int skippedInvoices = 0;
+        int linesRead = 0;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
+            linesRead++;
 
             using var doc = JsonDocument.Parse(line);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object) continue;
 
-            if (IsTargetDocType(root, "Invoice"))
+            if (!IsDocType(root, "Invoice")) continue;
+
+            var docBody = GetDocBody(root);
+            if (!TryGetGuidAnywhere(root, docBody, "id", out var invoiceId)) continue;
+            if (existingInvoiceIds.Contains(invoiceId)) continue;
+
+            if (!invoiceMap.TryGetValue(invoiceId, out var invoice))
             {
-                var targetContainer = GetTargetContainer(root);
-                if (targetContainer.ValueKind != JsonValueKind.Object) continue;
-
-                if (!TryGetGuidProperty(root, targetContainer, "id", out var invoiceId)) continue;
-
-                // Пропускаем, если документ уже есть в базе или уже обработан в рамках текущей сессии
-                if (existingInvoiceIds.Contains(invoiceId) || !processedInvoiceIds.Add(invoiceId))
-                {
-                    skippedInvoices++;
-                    continue;
-                }
-
-                var invoice = new InvoiceEntity
+                invoice = new InvoiceEntity
                 {
                     Id = invoiceId,
-                    Code = GetStringProperty(targetContainer, "code"),
-                    InvoiceType = GetStringProperty(targetContainer, "type") ?? "Sales",
-                    UserName = GetStringProperty(targetContainer, "userName"),
-                    StockPriceGroup = GetStringProperty(targetContainer, "stockPriceGroup"),
-                    DebitCreditLeftAmount = GetBoolProperty(targetContainer, "debitCreditLeftAmount"),
-                    IsCompleted = GetBoolProperty(targetContainer, "isCompleted"),
-                    IsDisabled = GetBoolProperty(targetContainer, "isDisabled"),
-                    Group = GetStringProperty(targetContainer, "group"),
-                    Description = GetStringProperty(targetContainer, "description"),
-                    Tags = GetStringArrayProperty(targetContainer, "tags"),
+                    InvoiceType = "Sales",
+                    Date = DateTimeOffset.UtcNow,
                     CreatedAt = DateTimeOffset.UtcNow,
                     UpdatedAt = DateTimeOffset.UtcNow
                 };
+                invoiceMap[invoiceId] = invoice;
+            }
 
-                if (targetContainer.TryGetProperty("date", out var dateProp) &&
-                    dateProp.ValueKind == JsonValueKind.String &&
-                    DateTimeOffset.TryParse(dateProp.GetString(), out var dateVal))
-                {
-                    invoice.Date = dateVal.ToUniversalTime();
-                }
-                else
-                {
-                    invoice.Date = DateTimeOffset.UtcNow;
-                }
+            // Дополняем реквизиты шапки из каждого встреченного патча
+            if (TryGetString(docBody, "code", out var code) && !string.IsNullOrWhiteSpace(code)) invoice.Code = code;
+            if (TryGetString(docBody, "type", out var type) && !string.IsNullOrWhiteSpace(type)) invoice.InvoiceType = type;
+            if (TryGetString(docBody, "userName", out var uName)) invoice.UserName = uName;
+            if (TryGetString(docBody, "stockPriceGroup", out var spg)) invoice.StockPriceGroup = spg;
+            if (TryGetString(docBody, "group", out var grp)) invoice.Group = grp;
+            if (TryGetString(docBody, "description", out var desc)) invoice.Description = desc;
+            if (TryGetBool(docBody, "debitCreditLeftAmount", out var dcl)) invoice.DebitCreditLeftAmount = dcl;
+            if (TryGetBool(docBody, "isCompleted", out var ic)) invoice.IsCompleted = ic;
+            if (TryGetBool(docBody, "isDisabled", out var idis)) invoice.IsDisabled = idis;
+            if (TryGetArray(docBody, "tags", out var tags)) invoice.Tags = tags;
 
-                if (targetContainer.TryGetProperty("dueDate", out var dueDateProp) &&
-                    dueDateProp.ValueKind == JsonValueKind.String &&
-                    DateTimeOffset.TryParse(dueDateProp.GetString(), out var dueDateVal))
-                {
-                    invoice.DueDate = dueDateVal.ToUniversalTime();
-                }
+            if (TryGetDateTime(docBody, "date", out var dt)) invoice.Date = dt;
+            if (TryGetDateTime(docBody, "dueDate", out var ddt)) invoice.DueDate = ddt;
 
-                invoice.UserId = GetValidId(targetContainer, "userId", validUsers);
-                invoice.OfficeId = GetValidId(targetContainer, "officeId", validOffices);
-                invoice.WarehouseId = GetValidId(targetContainer, "warehouseId", validWarehouses);
-                invoice.DepositoryId = GetValidId(targetContainer, "depositoryId", validDepositories);
-                invoice.PartnerId = GetValidId(targetContainer, "partnerId", validPartners);
-                invoice.DisplayCurrencyId = GetValidId(targetContainer, "displayCurrencyId", validCurrencies);
+            if (TryGetValidGuid(docBody, "userId", validUsers, out var uid)) invoice.UserId = uid;
+            if (TryGetValidGuid(docBody, "officeId", validOffices, out var oid)) invoice.OfficeId = oid;
+            if (TryGetValidGuid(docBody, "warehouseId", validWarehouses, out var wid)) invoice.WarehouseId = wid;
+            if (TryGetValidGuid(docBody, "depositoryId", validDepositories, out var depid)) invoice.DepositoryId = depid;
+            if (TryGetValidGuid(docBody, "partnerId", validPartners, out var pid)) invoice.PartnerId = pid;
+            if (TryGetValidGuid(docBody, "displayCurrencyId", validCurrencies, out var dcid)) invoice.DisplayCurrencyId = dcid;
 
-                invoicesBatch.Add(invoice);
+            // Извлечение строк накладной
+            if (TryGetSubList(root, docBody, "lines", out var linesArray))
+            {
+                int sort = linesMap.Values.Count(x => x.InvoiceId == invoiceId);
+                foreach (var el in linesArray.EnumerateArray())
+                {
+                    var lObj = GetElementBody(el);
+                    if (!TryGetGuidAnywhere(el, lObj, "id", out var lineId)) lineId = Guid.NewGuid();
+                    if (existingLineIds.Contains(lineId)) continue;
 
-                // Строки накладной
-                JsonElement linesArray = default;
-                if (targetContainer.TryGetProperty("lines", out var lArr) && lArr.ValueKind == JsonValueKind.Array)
-                {
-                    linesArray = lArr;
-                }
-                else if (root.TryGetProperty("patch", out var pObj) && pObj.ValueKind == JsonValueKind.Object &&
-                         pObj.TryGetProperty("subListPatches", out var slObj) && slObj.ValueKind == JsonValueKind.Object &&
-                         slObj.TryGetProperty("lines", out var slLines) && slLines.ValueKind == JsonValueKind.Array)
-                {
-                    linesArray = slLines;
-                }
-
-                if (linesArray.ValueKind == JsonValueKind.Array)
-                {
-                    int sortOrder = 0;
-                    foreach (var elem in linesArray.EnumerateArray())
+                    if (!linesMap.TryGetValue(lineId, out var lineEntity))
                     {
-                        if (elem.ValueKind != JsonValueKind.Object) continue;
-
-                        JsonElement lineObj = elem;
-                        if (elem.TryGetProperty("propertyPatches", out var pProps) && pProps.ValueKind == JsonValueKind.Object)
-                            lineObj = pProps;
-
-                        if (!TryGetGuidProperty(elem, lineObj, "id", out var lineId)) lineId = Guid.NewGuid();
-                        if (existingLineIds.Contains(lineId) || !processedLineIds.Add(lineId)) continue;
-
-                        linesBatch.Add(new InvoiceLineEntity
+                        lineEntity = new InvoiceLineEntity
                         {
                             Id = lineId,
                             InvoiceId = invoiceId,
-                            SourceId = GetGuidOrNull(lineObj, "sourceId"),
-                            StockId = GetValidId(lineObj, "stockId", validStocks),
-                            UnitId = GetValidId(lineObj, "unitId", validUnits),
-                            CurrencyId = GetValidId(lineObj, "currencyId", validCurrencies),
-                            Quantity = GetDecimalProperty(lineObj, "quantity") ?? 0m,
-                            Price = GetDecimalProperty(lineObj, "price") ?? 0m,
-                            SortOrder = sortOrder++
-                        });
+                            SortOrder = sort++
+                        };
+                        linesMap[lineId] = lineEntity;
                     }
-                }
 
-                // Платежи (payments)
-                if (targetContainer.TryGetProperty("payments", out var paymentsArray) && paymentsArray.ValueKind == JsonValueKind.Array)
+                    if (TryGetGuid(lObj, "sourceId", out var srcId)) lineEntity.SourceId = srcId;
+                    if (TryGetValidGuid(lObj, "stockId", validStocks, out var stId)) lineEntity.StockId = stId;
+                    if (TryGetValidGuid(lObj, "unitId", validUnits, out var unId)) lineEntity.UnitId = unId;
+                    if (TryGetValidGuid(lObj, "currencyId", validCurrencies, out var cId)) lineEntity.CurrencyId = cId;
+                    if (TryGetDecimal(lObj, "quantity", out var qty)) lineEntity.Quantity = qty;
+                    if (TryGetDecimal(lObj, "price", out var prc)) lineEntity.Price = prc;
+                }
+            }
+
+            // Извлечение оплат
+            if (TryGetSubList(root, docBody, "payments", out var payArray))
+            {
+                foreach (var el in payArray.EnumerateArray())
                 {
-                    foreach (var elem in paymentsArray.EnumerateArray())
+                    var pObj = GetElementBody(el);
+                    if (!TryGetValidGuid(pObj, "currencyId", validCurrencies, out var curId)) continue;
+                    if (!TryGetGuidAnywhere(el, pObj, "id", out var payId)) payId = Guid.NewGuid();
+
+                    paymentsMap[payId] = new InvoicePaymentEntity
                     {
-                        if (elem.ValueKind != JsonValueKind.Object) continue;
-                        var currencyId = GetValidId(elem, "currencyId", validCurrencies);
-                        if (currencyId == null) continue;
-
-                        var id = GetGuidOrNull(elem, "id") ?? Guid.NewGuid();
-                        if (!processedOtherIds.Add(id)) continue;
-
-                        paymentsBatch.Add(new InvoicePaymentEntity
-                        {
-                            Id = id,
-                            InvoiceId = invoiceId,
-                            Amount = GetDecimalProperty(elem, "amount") ?? 0m,
-                            CurrencyId = currencyId.Value
-                        });
-                    }
+                        Id = payId,
+                        InvoiceId = invoiceId,
+                        Amount = TryGetDecimal(pObj, "amount", out var a) ? a : 0m,
+                        CurrencyId = curId.Value
+                    };
                 }
+            }
 
-                // Валютные конвертации (currencyConvertions)
-                if (targetContainer.TryGetProperty("currencyConvertions", out var curConvArray) && curConvArray.ValueKind == JsonValueKind.Array)
+            // Конвертации валют и единиц
+            if (TryGetSubList(root, docBody, "currencyConvertions", out var ccArray))
+            {
+                foreach (var el in ccArray.EnumerateArray())
                 {
-                    foreach (var elem in curConvArray.EnumerateArray())
+                    var cObj = GetElementBody(el);
+                    if (!TryGetValidGuid(cObj, "currencyId", validCurrencies, out var curId)) continue;
+                    if (!TryGetGuidAnywhere(el, cObj, "id", out var ccId)) ccId = Guid.NewGuid();
+
+                    curConvMap[ccId] = new InvoiceCurrencyConvertionEntity
                     {
-                        if (elem.ValueKind != JsonValueKind.Object) continue;
-                        var currencyId = GetValidId(elem, "currencyId", validCurrencies);
-                        if (currencyId == null) continue;
-
-                        var id = GetGuidOrNull(elem, "id") ?? Guid.NewGuid();
-                        if (!processedOtherIds.Add(id)) continue;
-
-                        currencyConvBatch.Add(new InvoiceCurrencyConvertionEntity
-                        {
-                            Id = id,
-                            InvoiceId = invoiceId,
-                            CurrencyId = currencyId.Value,
-                            Multiplier = GetDecimalProperty(elem, "multiplier") ?? 1m,
-                            Divider = GetDecimalProperty(elem, "divider") ?? 1m
-                        });
-                    }
+                        Id = ccId,
+                        InvoiceId = invoiceId,
+                        CurrencyId = curId.Value,
+                        Multiplier = TryGetDecimal(cObj, "multiplier", out var m) ? m : 1m,
+                        Divider = TryGetDecimal(cObj, "divider", out var d) ? d : 1m
+                    };
                 }
+            }
 
-                // Конвертации единиц измерения (stockUnitConvertions)
-                if (targetContainer.TryGetProperty("stockUnitConvertions", out var suConvArray) && suConvArray.ValueKind == JsonValueKind.Array)
+            if (TryGetSubList(root, docBody, "stockUnitConvertions", out var suArray))
+            {
+                foreach (var el in suArray.EnumerateArray())
                 {
-                    foreach (var elem in suConvArray.EnumerateArray())
+                    var uObj = GetElementBody(el);
+                    if (!TryGetValidGuid(uObj, "stockId", validStocks, out var sId) ||
+                        !TryGetValidGuid(uObj, "unitId", validUnits, out var uId)) continue;
+                    if (!TryGetGuidAnywhere(el, uObj, "id", out var suId)) suId = Guid.NewGuid();
+
+                    stockUnitConvMap[suId] = new InvoiceStockUnitConvertionEntity
                     {
-                        if (elem.ValueKind != JsonValueKind.Object) continue;
-                        var stockId = GetValidId(elem, "stockId", validStocks);
-                        var unitId = GetValidId(elem, "unitId", validUnits);
-                        if (stockId == null || unitId == null) continue;
-
-                        var id = GetGuidOrNull(elem, "id") ?? Guid.NewGuid();
-                        if (!processedOtherIds.Add(id)) continue;
-
-                        stockUnitConvBatch.Add(new InvoiceStockUnitConvertionEntity
-                        {
-                            Id = id,
-                            InvoiceId = invoiceId,
-                            StockId = stockId.Value,
-                            UnitId = unitId.Value,
-                            Multiplier = GetDecimalProperty(elem, "multiplier") ?? 1m,
-                            Divider = GetDecimalProperty(elem, "divider") ?? 1m
-                        });
-                    }
+                        Id = suId,
+                        InvoiceId = invoiceId,
+                        StockId = sId.Value,
+                        UnitId = uId.Value,
+                        Multiplier = TryGetDecimal(uObj, "multiplier", out var m) ? m : 1m,
+                        Divider = TryGetDecimal(uObj, "divider", out var d) ? d : 1m
+                    };
                 }
+            }
 
-                // Скидки (discounts)
-                if (targetContainer.TryGetProperty("discounts", out var discountsArray) && discountsArray.ValueKind == JsonValueKind.Array)
+            // Скидки и накладные расходы
+            if (TryGetSubList(root, docBody, "discounts", out var discArray))
+            {
+                int sort = 0;
+                foreach (var el in discArray.EnumerateArray())
                 {
-                    int sortOrder = 0;
-                    foreach (var elem in discountsArray.EnumerateArray())
+                    var dObj = GetElementBody(el);
+                    if (!TryGetGuidAnywhere(el, dObj, "id", out var discId)) discId = Guid.NewGuid();
+
+                    discountsMap[discId] = new InvoiceDiscountEntity
                     {
-                        if (elem.ValueKind != JsonValueKind.Object) continue;
-                        var id = GetGuidOrNull(elem, "id") ?? Guid.NewGuid();
-                        if (!processedOtherIds.Add(id)) continue;
-
-                        discountsBatch.Add(new InvoiceDiscountEntity
-                        {
-                            Id = id,
-                            InvoiceId = invoiceId,
-                            DiscountType = GetStringProperty(elem, "type") ?? "Flat",
-                            Amount = GetDecimalProperty(elem, "amount") ?? 0m,
-                            Description = GetStringProperty(elem, "description"),
-                            SortOrder = sortOrder++
-                        });
-                    }
+                        Id = discId,
+                        InvoiceId = invoiceId,
+                        DiscountType = TryGetString(dObj, "type", out var t) ? t! : "Flat",
+                        Amount = TryGetDecimal(dObj, "amount", out var a) ? a : 0m,
+                        Description = TryGetString(dObj, "description", out var ds) ? ds : null,
+                        SortOrder = sort++
+                    };
                 }
+            }
 
-                // Накладные расходы (overheads)
-                if (targetContainer.TryGetProperty("overheads", out var overheadsArray) && overheadsArray.ValueKind == JsonValueKind.Array)
+            if (TryGetSubList(root, docBody, "overheads", out var ovhArray))
+            {
+                int sort = 0;
+                foreach (var el in ovhArray.EnumerateArray())
                 {
-                    int sortOrder = 0;
-                    foreach (var elem in overheadsArray.EnumerateArray())
+                    var oObj = GetElementBody(el);
+                    if (!TryGetGuidAnywhere(el, oObj, "id", out var ovhId)) ovhId = Guid.NewGuid();
+
+                    TryGetValidGuid(oObj, "currencyId", validCurrencies, out var cId);
+
+                    overheadsMap[ovhId] = new InvoiceOverheadEntity
                     {
-                        if (elem.ValueKind != JsonValueKind.Object) continue;
-                        var id = GetGuidOrNull(elem, "id") ?? Guid.NewGuid();
-                        if (!processedOtherIds.Add(id)) continue;
-
-                        overheadsBatch.Add(new InvoiceOverheadEntity
-                        {
-                            Id = id,
-                            InvoiceId = invoiceId,
-                            Amount = GetDecimalProperty(elem, "amount") ?? 0m,
-                            CurrencyId = GetValidId(elem, "currencyId", validCurrencies),
-                            Description = GetStringProperty(elem, "description"),
-                            SortOrder = sortOrder++
-                        });
-                    }
-                }
-
-                if (invoicesBatch.Count >= 500)
-                {
-                    await SaveCommerceBatchAsync(invoicesBatch, linesBatch, paymentsBatch, currencyConvBatch, stockUnitConvBatch, discountsBatch, overheadsBatch);
-                    totalInvoices += invoicesBatch.Count;
-
-                    invoicesBatch.Clear();
-                    linesBatch.Clear();
-                    paymentsBatch.Clear();
-                    currencyConvBatch.Clear();
-                    stockUnitConvBatch.Clear();
-                    discountsBatch.Clear();
-                    overheadsBatch.Clear();
-
-                    Console.WriteLine($"Сохранено документов: {totalInvoices}...");
+                        Id = ovhId,
+                        InvoiceId = invoiceId,
+                        Amount = TryGetDecimal(oObj, "amount", out var a) ? a : 0m,
+                        CurrencyId = cId,
+                        Description = TryGetString(oObj, "description", out var ds) ? ds : null,
+                        SortOrder = sort++
+                    };
                 }
             }
         }
 
-        if (invoicesBatch.Any())
-        {
-            await SaveCommerceBatchAsync(invoicesBatch, linesBatch, paymentsBatch, currencyConvBatch, stockUnitConvBatch, discountsBatch, overheadsBatch);
-            totalInvoices += invoicesBatch.Count;
-        }
+        // Фильтрация мусорных документов: оставляем только те, у которых есть строки либо оплаты
+        var invoiceIdsWithLines = linesMap.Values.Select(x => x.InvoiceId).ToHashSet();
+        var invoiceIdsWithPayments = paymentsMap.Values.Select(x => x.InvoiceId).ToHashSet();
 
-        Console.WriteLine($"Готово! Импортировано новых Invoice: {totalInvoices} (пропущено существующих: {skippedInvoices}).");
+        var validInvoices = invoiceMap.Values
+            .Where(inv => invoiceIdsWithLines.Contains(inv.Id) || invoiceIdsWithPayments.Contains(inv.Id))
+            .ToList();
+
+        int skippedEmpty = invoiceMap.Count - validInvoices.Count;
+        Console.WriteLine($"Собрано накладных: {validInvoices.Count} (отсеяно пустых черновиков без строк: {skippedEmpty}). Строк: {linesMap.Count}");
+
+        await BatchInsertAsync(_dbContext.Invoices, validInvoices);
+        await BatchInsertAsync(_dbContext.InvoiceLines, linesMap.Values.Where(l => invoiceIdsWithLines.Contains(l.InvoiceId)).ToList());
+        await BatchInsertAsync(_dbContext.Set<InvoicePaymentEntity>(), paymentsMap.Values.ToList());
+        await BatchInsertAsync(_dbContext.Set<InvoiceCurrencyConvertionEntity>(), curConvMap.Values.ToList());
+        await BatchInsertAsync(_dbContext.Set<InvoiceStockUnitConvertionEntity>(), stockUnitConvMap.Values.ToList());
+        await BatchInsertAsync(_dbContext.Set<InvoiceDiscountEntity>(), discountsMap.Values.ToList());
+        await BatchInsertAsync(_dbContext.Set<InvoiceOverheadEntity>(), overheadsMap.Values.ToList());
+
+        Console.WriteLine("Импорт Invoice успешно завершен!");
     }
 
     public async Task MigrateStockSlipsAsync(string jsonFilePath)
     {
-        Console.WriteLine("Начинаем импорт документов StockSlip (Складские ордера) и их строк...");
+        Console.WriteLine("Начинаем умную агрегацию складских ордеров (StockSlip)...");
 
         var validUsers = (await _dbContext.Users.Select(x => x.Id).ToListAsync()).ToHashSet();
         var validWarehouses = (await _dbContext.Warehouses.Select(x => x.Id).ToListAsync()).ToHashSet();
@@ -316,133 +268,93 @@ public class CommerceImportService
         var existingSlipIds = (await _dbContext.StockSlips.Select(x => x.Id).ToListAsync()).ToHashSet();
         var existingLineIds = (await _dbContext.StockSlipLines.Select(x => x.Id).ToListAsync()).ToHashSet();
 
+        var slipMap = new Dictionary<Guid, StockSlipEntity>();
+        var linesMap = new Dictionary<Guid, StockSlipLineEntity>();
+
         using var stream = File.OpenRead(jsonFilePath);
         using var reader = new StreamReader(stream);
 
-        var stockSlipsBatch = new List<StockSlipEntity>();
-        var linesBatch = new List<StockSlipLineEntity>();
-        var processedSlipIds = new HashSet<Guid>();
-        var processedLineIds = new HashSet<Guid>();
-
         string? line;
-        int totalSlips = 0;
-        int skippedSlips = 0;
-
         while ((line = await reader.ReadLineAsync()) != null)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
-
             using var doc = JsonDocument.Parse(line);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object) continue;
 
-            if (IsTargetDocType(root, "StockSlip"))
+            if (!IsDocType(root, "StockSlip")) continue;
+
+            var docBody = GetDocBody(root);
+            if (!TryGetGuidAnywhere(root, docBody, "id", out var slipId)) continue;
+            if (existingSlipIds.Contains(slipId)) continue;
+
+            if (!slipMap.TryGetValue(slipId, out var slip))
             {
-                var targetContainer = GetTargetContainer(root);
-                if (targetContainer.ValueKind != JsonValueKind.Object) continue;
-
-                if (!TryGetGuidProperty(root, targetContainer, "id", out var slipId)) continue;
-                if (existingSlipIds.Contains(slipId) || !processedSlipIds.Add(slipId))
-                {
-                    skippedSlips++;
-                    continue;
-                }
-
-                var slip = new StockSlipEntity
+                slip = new StockSlipEntity
                 {
                     Id = slipId,
-                    Code = GetStringProperty(targetContainer, "code"),
-                    SlipType = GetStringProperty(targetContainer, "type") ?? "StockOpening",
-                    IsCompleted = GetBoolProperty(targetContainer, "isCompleted"),
-                    IsStockIncome = GetBoolProperty(targetContainer, "isStockIncome"),
-                    DisplayTotal = GetDecimalProperty(targetContainer, "displayTotal") ?? 0m,
-                    Description = GetStringProperty(targetContainer, "description"),
-                    Tags = GetStringArrayProperty(targetContainer, "tags"),
+                    SlipType = "StockOpening",
+                    Date = DateTimeOffset.UtcNow,
                     CreatedAt = DateTimeOffset.UtcNow,
                     UpdatedAt = DateTimeOffset.UtcNow
                 };
+                slipMap[slipId] = slip;
+            }
 
-                if (targetContainer.TryGetProperty("date", out var dateProp) &&
-                    dateProp.ValueKind == JsonValueKind.String &&
-                    DateTimeOffset.TryParse(dateProp.GetString(), out var dateVal))
-                {
-                    slip.Date = dateVal.ToUniversalTime();
-                }
-                else
-                {
-                    slip.Date = DateTimeOffset.UtcNow;
-                }
+            if (TryGetString(docBody, "code", out var code) && !string.IsNullOrWhiteSpace(code)) slip.Code = code;
+            if (TryGetString(docBody, "type", out var type) && !string.IsNullOrWhiteSpace(type)) slip.SlipType = type;
+            if (TryGetBool(docBody, "isCompleted", out var ic)) slip.IsCompleted = ic;
+            if (TryGetBool(docBody, "isStockIncome", out var isi)) slip.IsStockIncome = isi;
+            if (TryGetDecimal(docBody, "displayTotal", out var dt)) slip.DisplayTotal = dt;
+            if (TryGetString(docBody, "description", out var desc)) slip.Description = desc;
+            if (TryGetArray(docBody, "tags", out var tags)) slip.Tags = tags;
+            if (TryGetDateTime(docBody, "date", out var dateVal)) slip.Date = dateVal;
 
-                slip.UserId = GetValidId(targetContainer, "userId", validUsers);
-                slip.WarehouseId = GetValidId(targetContainer, "warehouseId", validWarehouses);
+            if (TryGetValidGuid(docBody, "userId", validUsers, out var uid)) slip.UserId = uid;
+            if (TryGetValidGuid(docBody, "warehouseId", validWarehouses, out var wid)) slip.WarehouseId = wid;
 
-                stockSlipsBatch.Add(slip);
+            if (TryGetSubList(root, docBody, "lines", out var linesArray))
+            {
+                int sort = linesMap.Values.Count(x => x.StockSlipId == slipId);
+                foreach (var el in linesArray.EnumerateArray())
+                {
+                    var lObj = GetElementBody(el);
+                    if (!TryGetGuidAnywhere(el, lObj, "id", out var lineId)) lineId = Guid.NewGuid();
+                    if (existingLineIds.Contains(lineId)) continue;
 
-                JsonElement linesArray = default;
-                if (targetContainer.TryGetProperty("lines", out var lArr) && lArr.ValueKind == JsonValueKind.Array)
-                {
-                    linesArray = lArr;
-                }
-                else if (root.TryGetProperty("patch", out var pObj) && pObj.ValueKind == JsonValueKind.Object &&
-                         pObj.TryGetProperty("subListPatches", out var slObj) && slObj.ValueKind == JsonValueKind.Object &&
-                         slObj.TryGetProperty("lines", out var slLines) && slLines.ValueKind == JsonValueKind.Array)
-                {
-                    linesArray = slLines;
-                }
-
-                if (linesArray.ValueKind == JsonValueKind.Array)
-                {
-                    int sortOrder = 0;
-                    foreach (var elem in linesArray.EnumerateArray())
+                    if (!linesMap.TryGetValue(lineId, out var lineEntity))
                     {
-                        if (elem.ValueKind != JsonValueKind.Object) continue;
-
-                        JsonElement lineObj = elem;
-                        if (elem.TryGetProperty("propertyPatches", out var pProps) && pProps.ValueKind == JsonValueKind.Object)
-                            lineObj = pProps;
-
-                        if (!TryGetGuidProperty(elem, lineObj, "id", out var lineId)) lineId = Guid.NewGuid();
-                        if (existingLineIds.Contains(lineId) || !processedLineIds.Add(lineId)) continue;
-
-                        linesBatch.Add(new StockSlipLineEntity
+                        lineEntity = new StockSlipLineEntity
                         {
                             Id = lineId,
                             StockSlipId = slipId,
-                            StockId = GetValidId(lineObj, "stockId", validStocks),
-                            UnitId = GetValidId(lineObj, "unitId", validUnits),
-                            Quantity = GetDecimalProperty(lineObj, "quantity") ?? 0m,
-                            ActionQuantity = GetDecimalProperty(lineObj, "actionQuantity") ?? 0m,
-                            Price = GetDecimalProperty(lineObj, "price") ?? 0m,
-                            ActionTotal = GetDecimalProperty(lineObj, "actionTotal") ?? 0m,
-                            SortOrder = sortOrder++
-                        });
+                            SortOrder = sort++
+                        };
+                        linesMap[lineId] = lineEntity;
                     }
-                }
 
-                if (stockSlipsBatch.Count >= 500)
-                {
-                    await SaveStockSlipsBatchAsync(stockSlipsBatch, linesBatch);
-                    totalSlips += stockSlipsBatch.Count;
-
-                    stockSlipsBatch.Clear();
-                    linesBatch.Clear();
-                    Console.WriteLine($"Сохранено складских документов: {totalSlips}...");
+                    if (TryGetValidGuid(lObj, "stockId", validStocks, out var sId)) lineEntity.StockId = sId;
+                    if (TryGetValidGuid(lObj, "unitId", validUnits, out var uId)) lineEntity.UnitId = uId;
+                    if (TryGetDecimal(lObj, "quantity", out var q)) lineEntity.Quantity = q;
+                    if (TryGetDecimal(lObj, "actionQuantity", out var aq)) lineEntity.ActionQuantity = aq;
+                    if (TryGetDecimal(lObj, "price", out var p)) lineEntity.Price = p;
+                    if (TryGetDecimal(lObj, "actionTotal", out var at)) lineEntity.ActionTotal = at;
                 }
             }
         }
 
-        if (stockSlipsBatch.Any())
-        {
-            await SaveStockSlipsBatchAsync(stockSlipsBatch, linesBatch);
-            totalSlips += stockSlipsBatch.Count;
-        }
+        var validSlipIds = linesMap.Values.Select(x => x.StockSlipId).ToHashSet();
+        var validSlips = slipMap.Values.Where(s => validSlipIds.Contains(s.Id) || s.DisplayTotal > 0).ToList();
 
-        Console.WriteLine($"Готово! Импортировано новых StockSlip: {totalSlips} (пропущено: {skippedSlips}).");
+        await BatchInsertAsync(_dbContext.StockSlips, validSlips);
+        await BatchInsertAsync(_dbContext.StockSlipLines, linesMap.Values.Where(l => validSlipIds.Contains(l.StockSlipId)).ToList());
+
+        Console.WriteLine($"Готово! Импортировано StockSlip: {validSlips.Count}, Строк: {linesMap.Count}");
     }
 
     public async Task MigrateStockTransfersAsync(string jsonFilePath)
     {
-        Console.WriteLine("Начинаем импорт документов StockTransfer (Перемещения со склада на склад)...");
+        Console.WriteLine("Начинаем умную агрегацию перемещений (StockTransfer)...");
 
         var validWarehouses = (await _dbContext.Warehouses.Select(x => x.Id).ToListAsync()).ToHashSet();
         var validStocks = (await _dbContext.Stocks.Select(x => x.Id).ToListAsync()).ToHashSet();
@@ -452,260 +364,274 @@ public class CommerceImportService
         var existingTransferIds = (await _dbContext.StockTransfers.Select(x => x.Id).ToListAsync()).ToHashSet();
         var existingLineIds = (await _dbContext.StockTransferLines.Select(x => x.Id).ToListAsync()).ToHashSet();
 
+        var transferMap = new Dictionary<Guid, StockTransferEntity>();
+        var linesMap = new Dictionary<Guid, StockTransferLineEntity>();
+
         using var stream = File.OpenRead(jsonFilePath);
         using var reader = new StreamReader(stream);
 
-        var transfersBatch = new List<StockTransferEntity>();
-        var linesBatch = new List<StockTransferLineEntity>();
-
-        var processedTransferIds = new HashSet<Guid>();
-        var processedLineIds = new HashSet<Guid>();
         string? line;
-        int totalTransfers = 0;
-        int skippedTransfers = 0;
-
         while ((line = await reader.ReadLineAsync()) != null)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
-
             using var doc = JsonDocument.Parse(line);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object) continue;
 
-            if (IsTargetDocType(root, "StockTransfer"))
+            if (!IsDocType(root, "StockTransfer")) continue;
+
+            var docBody = GetDocBody(root);
+            if (!TryGetGuidAnywhere(root, docBody, "id", out var trId)) continue;
+            if (existingTransferIds.Contains(trId)) continue;
+
+            if (!transferMap.TryGetValue(trId, out var transfer))
             {
-                var c = GetTargetContainer(root);
-                if (c.ValueKind != JsonValueKind.Object) continue;
-
-                if (!TryGetGuidProperty(root, c, "id", out var transferId) ||
-                    existingTransferIds.Contains(transferId) ||
-                    !processedTransferIds.Add(transferId))
+                transfer = new StockTransferEntity
                 {
-                    skippedTransfers++;
-                    continue;
-                }
-
-                var transfer = new StockTransferEntity
-                {
-                    Id = transferId,
-                    Code = GetStringProperty(c, "code"),
-                    WarehouseId = GetValidId(c, "warehouseId", validWarehouses),
-                    DestinationWarehouseId = GetValidId(c, "destinationWarehouseId", validWarehouses),
-                    DisplayCurrencyId = GetValidId(c, "displayCurrencyId", validCurrencies),
-                    IsCompleted = GetBoolProperty(c, "isCompleted"),
-                    IsDisabled = GetBoolProperty(c, "isDisabled"),
-                    UserName = GetStringProperty(c, "userName"),
-                    GroupName = GetStringProperty(c, "group") ?? GetStringProperty(c, "groupName"),
-                    Description = GetStringProperty(c, "description"),
-                    Tags = GetStringArrayProperty(c, "tags"),
-                    ActionTotal = GetDecimalProperty(c, "actionTotal") ?? 0m,
-                    ActionReceivedTotal = GetDecimalProperty(c, "actionReceivedTotal") ?? 0m,
+                    Id = trId,
+                    Date = DateTimeOffset.UtcNow,
                     CreatedAt = DateTimeOffset.UtcNow,
                     UpdatedAt = DateTimeOffset.UtcNow
                 };
+                transferMap[trId] = transfer;
+            }
 
-                if (c.TryGetProperty("date", out var dP) &&
-                    dP.ValueKind == JsonValueKind.String &&
-                    DateTimeOffset.TryParse(dP.GetString(), out var dV))
-                {
-                    transfer.Date = dV.ToUniversalTime();
-                }
-                else
-                {
-                    transfer.Date = DateTimeOffset.UtcNow;
-                }
+            if (TryGetString(docBody, "code", out var code) && !string.IsNullOrWhiteSpace(code)) transfer.Code = code;
+            if (TryGetString(docBody, "userName", out var uName)) transfer.UserName = uName;
+            if (TryGetString(docBody, "group", out var grp) || TryGetString(docBody, "groupName", out grp)) transfer.GroupName = grp;
+            if (TryGetString(docBody, "description", out var desc)) transfer.Description = desc;
+            if (TryGetBool(docBody, "isCompleted", out var ic)) transfer.IsCompleted = ic;
+            if (TryGetBool(docBody, "isDisabled", out var idis)) transfer.IsDisabled = idis;
+            if (TryGetArray(docBody, "tags", out var tags)) transfer.Tags = tags;
+            if (TryGetDateTime(docBody, "date", out var dt)) transfer.Date = dt;
+            if (TryGetDecimal(docBody, "actionTotal", out var at)) transfer.ActionTotal = at;
+            if (TryGetDecimal(docBody, "actionReceivedTotal", out var art)) transfer.ActionReceivedTotal = art;
 
-                transfersBatch.Add(transfer);
+            if (TryGetValidGuid(docBody, "warehouseId", validWarehouses, out var wid)) transfer.WarehouseId = wid;
+            if (TryGetValidGuid(docBody, "destinationWarehouseId", validWarehouses, out var dwid)) transfer.DestinationWarehouseId = dwid;
+            if (TryGetValidGuid(docBody, "displayCurrencyId", validCurrencies, out var dcid)) transfer.DisplayCurrencyId = dcid;
 
-                JsonElement linesArray = default;
-                if (c.TryGetProperty("lines", out var lArr) && lArr.ValueKind == JsonValueKind.Array)
+            if (TryGetSubList(root, docBody, "lines", out var linesArray))
+            {
+                int sort = linesMap.Values.Count(x => x.StockTransferId == trId);
+                foreach (var el in linesArray.EnumerateArray())
                 {
-                    linesArray = lArr;
-                }
-                else if (root.TryGetProperty("patch", out var pObj) && pObj.ValueKind == JsonValueKind.Object &&
-                         pObj.TryGetProperty("subListPatches", out var slObj) && slObj.ValueKind == JsonValueKind.Object &&
-                         slObj.TryGetProperty("lines", out var slLines) && slLines.ValueKind == JsonValueKind.Array)
-                {
-                    linesArray = slLines;
-                }
+                    var lObj = GetElementBody(el);
+                    if (!TryGetGuidAnywhere(el, lObj, "id", out var lineId)) lineId = Guid.NewGuid();
+                    if (existingLineIds.Contains(lineId)) continue;
 
-                if (linesArray.ValueKind == JsonValueKind.Array)
-                {
-                    int sortOrder = 0;
-                    foreach (var elem in linesArray.EnumerateArray())
+                    if (!linesMap.TryGetValue(lineId, out var lineEntity))
                     {
-                        if (elem.ValueKind != JsonValueKind.Object) continue;
-
-                        JsonElement lineObj = elem;
-                        if (elem.TryGetProperty("propertyPatches", out var pProps) && pProps.ValueKind == JsonValueKind.Object)
-                            lineObj = pProps;
-
-                        if (!TryGetGuidProperty(elem, lineObj, "id", out var lineId)) lineId = Guid.NewGuid();
-                        if (existingLineIds.Contains(lineId) || !processedLineIds.Add(lineId)) continue;
-
-                        linesBatch.Add(new StockTransferLineEntity
+                        lineEntity = new StockTransferLineEntity
                         {
                             Id = lineId,
-                            StockTransferId = transferId,
-                            StockId = GetValidId(lineObj, "stockId", validStocks),
-                            UnitId = GetValidId(lineObj, "unitId", validUnits),
-                            ReceivedUnitId = GetValidId(lineObj, "receivedUnitId", validUnits) ?? GetValidId(lineObj, "unitId", validUnits),
-                            Quantity = GetDecimalProperty(lineObj, "quantity") ?? 0m,
-                            ReceivedQuantity = GetDecimalProperty(lineObj, "receivedQuantity") ?? GetDecimalProperty(lineObj, "quantity") ?? 0m,
-                            Price = GetDecimalProperty(lineObj, "price") ?? 0m,
-                            ActionTotal = GetDecimalProperty(lineObj, "actionTotal") ?? 0m,
-                            ActionReceivedTotal = GetDecimalProperty(lineObj, "actionReceivedTotal") ?? 0m,
-                            SortOrder = sortOrder++
-                        });
+                            StockTransferId = trId,
+                            SortOrder = sort++
+                        };
+                        linesMap[lineId] = lineEntity;
                     }
-                }
 
-                if (transfersBatch.Count >= 500)
-                {
-                    await _dbContext.Set<StockTransferEntity>().AddRangeAsync(transfersBatch);
-                    await _dbContext.Set<StockTransferLineEntity>().AddRangeAsync(linesBatch);
-                    await _dbContext.SaveChangesAsync();
-                    _dbContext.ChangeTracker.Clear();
+                    if (TryGetValidGuid(lObj, "stockId", validStocks, out var sId)) lineEntity.StockId = sId;
+                    if (TryGetValidGuid(lObj, "unitId", validUnits, out var uId)) lineEntity.UnitId = uId;
+                    if (TryGetValidGuid(lObj, "receivedUnitId", validUnits, out var ruId)) lineEntity.ReceivedUnitId = ruId;
+                    else if (lineEntity.UnitId.HasValue) lineEntity.ReceivedUnitId = lineEntity.UnitId;
 
-                    totalTransfers += transfersBatch.Count;
-                    transfersBatch.Clear();
-                    linesBatch.Clear();
+                    if (TryGetDecimal(lObj, "quantity", out var q)) lineEntity.Quantity = q;
+                    if (TryGetDecimal(lObj, "receivedQuantity", out var rq)) lineEntity.ReceivedQuantity = rq;
+                    else if (lineEntity.Quantity > 0) lineEntity.ReceivedQuantity = lineEntity.Quantity;
+
+                    if (TryGetDecimal(lObj, "price", out var p)) lineEntity.Price = p;
+                    if (TryGetDecimal(lObj, "actionTotal", out var lat)) lineEntity.ActionTotal = lat;
+                    if (TryGetDecimal(lObj, "actionReceivedTotal", out var lart)) lineEntity.ActionReceivedTotal = lart;
                 }
             }
         }
 
-        if (transfersBatch.Any())
+        var validTrIds = linesMap.Values.Select(x => x.StockTransferId).ToHashSet();
+        var validTransfers = transferMap.Values.Where(t => validTrIds.Contains(t.Id) || t.ActionTotal > 0).ToList();
+
+        await BatchInsertAsync(_dbContext.StockTransfers, validTransfers);
+        await BatchInsertAsync(_dbContext.StockTransferLines, linesMap.Values.Where(l => validTrIds.Contains(l.StockTransferId)).ToList());
+
+        Console.WriteLine($"Готово! Импортировано StockTransfer: {validTransfers.Count}, Строк: {linesMap.Count}");
+    }
+
+    private async Task BatchInsertAsync<T>(DbSet<T> dbSet, List<T> items) where T : class
+    {
+        const int batchSize = 1000;
+        for (int i = 0; i < items.Count; i += batchSize)
         {
-            await _dbContext.Set<StockTransferEntity>().AddRangeAsync(transfersBatch);
-            await _dbContext.Set<StockTransferLineEntity>().AddRangeAsync(linesBatch);
+            await dbSet.AddRangeAsync(items.Skip(i).Take(batchSize));
             await _dbContext.SaveChangesAsync();
             _dbContext.ChangeTracker.Clear();
-            totalTransfers += transfersBatch.Count;
         }
-
-        Console.WriteLine($"Готово! Импортировано новых StockTransfer: {totalTransfers} (пропущено: {skippedTransfers}).");
     }
 
-    private async Task SaveStockSlipsBatchAsync(List<StockSlipEntity> slips, List<StockSlipLineEntity> lines)
+    #region Хелперы регистронезависимого разбора
+    private static bool IsDocType(JsonElement root, string targetDocType)
     {
-        if (slips.Any()) await _dbContext.Set<StockSlipEntity>().AddRangeAsync(slips);
-        if (lines.Any()) await _dbContext.Set<StockSlipLineEntity>().AddRangeAsync(lines);
-        await _dbContext.SaveChangesAsync();
-        _dbContext.ChangeTracker.Clear();
-    }
+        if (TryGetPropCaseInsensitive(root, "docType", out var dt) && dt.ValueKind == JsonValueKind.String)
+            return string.Equals(dt.GetString(), targetDocType, StringComparison.OrdinalIgnoreCase);
 
-    private async Task SaveCommerceBatchAsync(
-        List<InvoiceEntity> invoices,
-        List<InvoiceLineEntity> lines,
-        List<InvoicePaymentEntity> payments,
-        List<InvoiceCurrencyConvertionEntity> currencyConvs,
-        List<InvoiceStockUnitConvertionEntity> stockUnitConvs,
-        List<InvoiceDiscountEntity> discounts,
-        List<InvoiceOverheadEntity> overheads)
-    {
-        if (invoices.Any()) await _dbContext.Set<InvoiceEntity>().AddRangeAsync(invoices);
-        if (lines.Any()) await _dbContext.Set<InvoiceLineEntity>().AddRangeAsync(lines);
-        if (payments.Any()) await _dbContext.Set<InvoicePaymentEntity>().AddRangeAsync(payments);
-        if (currencyConvs.Any()) await _dbContext.Set<InvoiceCurrencyConvertionEntity>().AddRangeAsync(currencyConvs);
-        if (stockUnitConvs.Any()) await _dbContext.Set<InvoiceStockUnitConvertionEntity>().AddRangeAsync(stockUnitConvs);
-        if (discounts.Any()) await _dbContext.Set<InvoiceDiscountEntity>().AddRangeAsync(discounts);
-        if (overheads.Any()) await _dbContext.Set<InvoiceOverheadEntity>().AddRangeAsync(overheads);
+        if (TryGetPropCaseInsensitive(root, "patch", out var patch) && patch.ValueKind == JsonValueKind.Object &&
+            TryGetPropCaseInsensitive(patch, "docType", out var pdt) && pdt.ValueKind == JsonValueKind.String)
+            return string.Equals(pdt.GetString(), targetDocType, StringComparison.OrdinalIgnoreCase);
 
-        await _dbContext.SaveChangesAsync();
-        _dbContext.ChangeTracker.Clear();
-    }
-
-    #region Вспомогательные методы
-    private Guid? GetValidId(JsonElement container, string propertyName, HashSet<Guid> validIds)
-    {
-        if (container.ValueKind == JsonValueKind.Object &&
-            container.TryGetProperty(propertyName, out var prop) &&
-            prop.ValueKind == JsonValueKind.String)
-        {
-            if (Guid.TryParse(prop.GetString(), out var id) && validIds.Contains(id))
-                return id;
-        }
-        return null;
-    }
-
-    private Guid? GetGuidOrNull(JsonElement container, string propertyName)
-    {
-        if (container.ValueKind == JsonValueKind.Object &&
-            container.TryGetProperty(propertyName, out var prop) &&
-            prop.ValueKind == JsonValueKind.String)
-        {
-            if (Guid.TryParse(prop.GetString(), out var id))
-                return id;
-        }
-        return null;
-    }
-
-    private static bool IsTargetDocType(JsonElement root, string targetDocType)
-    {
-        if (root.ValueKind != JsonValueKind.Object) return false;
-        if (root.TryGetProperty("docType", out var dt) && dt.ValueKind == JsonValueKind.String)
-            return dt.GetString() == targetDocType;
-        if (root.TryGetProperty("patch", out var patch) && patch.ValueKind == JsonValueKind.Object &&
-            patch.TryGetProperty("docType", out var pdt) && pdt.ValueKind == JsonValueKind.String)
-            return pdt.GetString() == targetDocType;
         return false;
     }
 
-    private static JsonElement GetTargetContainer(JsonElement root)
+    private static JsonElement GetDocBody(JsonElement root)
     {
-        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("patch", out var patch) && patch.ValueKind == JsonValueKind.Object)
+        if (TryGetPropCaseInsensitive(root, "patch", out var patch) && patch.ValueKind == JsonValueKind.Object)
         {
-            if (patch.TryGetProperty("propertyPatches", out var props) && props.ValueKind == JsonValueKind.Object)
+            if (TryGetPropCaseInsensitive(patch, "propertyPatches", out var props) && props.ValueKind == JsonValueKind.Object)
                 return props;
             return patch;
         }
         return root;
     }
 
-    private static bool TryGetGuidProperty(JsonElement root, JsonElement container, string propertyName, out Guid result)
+    private static JsonElement GetElementBody(JsonElement elem)
     {
-        result = Guid.Empty;
-        if (container.ValueKind == JsonValueKind.Object && container.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.String)
-            return Guid.TryParse(prop.GetString(), out result);
-        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("patch", out var patch) && patch.ValueKind == JsonValueKind.Object &&
-            patch.TryGetProperty(propertyName, out var patchProp) && patchProp.ValueKind == JsonValueKind.String)
-            return Guid.TryParse(patchProp.GetString(), out result);
-        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty(propertyName, out var rootProp) && rootProp.ValueKind == JsonValueKind.String)
-            return Guid.TryParse(rootProp.GetString(), out result);
+        if (elem.ValueKind == JsonValueKind.Object && TryGetPropCaseInsensitive(elem, "propertyPatches", out var pp) && pp.ValueKind == JsonValueKind.Object)
+            return pp;
+        return elem;
+    }
+
+    private static bool TryGetPropertyCaseInsensitive(JsonElement el, string name, out JsonElement val)
+    {
+        return TryGetPropCaseInsensitive(el, name, out val);
+    }
+
+    private static bool TryGetPropCaseInsensitive(JsonElement el, string name, out JsonElement val)
+    {
+        if (el.ValueKind != JsonValueKind.Object)
+        {
+            val = default;
+            return false;
+        }
+        if (el.TryGetProperty(name, out val)) return true;
+        foreach (var p in el.EnumerateObject())
+        {
+            if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                val = p.Value;
+                return true;
+            }
+        }
+        val = default;
         return false;
     }
 
-    private static string? GetStringProperty(JsonElement container, string propertyName)
+    private static bool TryGetPropAnywhere(JsonElement body, string name, out JsonElement val)
     {
-        if (container.ValueKind == JsonValueKind.Object && container.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.String)
-            return prop.GetString();
-        return null;
-    }
-
-    private static string[]? GetStringArrayProperty(JsonElement container, string propertyName)
-    {
-        if (container.ValueKind == JsonValueKind.Object && container.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.Array)
-            return prop.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToArray();
-        return null;
-    }
-
-    private static decimal? GetDecimalProperty(JsonElement container, string propertyName)
-    {
-        if (container.ValueKind == JsonValueKind.Object && container.TryGetProperty(propertyName, out var prop))
+        if (TryGetPropCaseInsensitive(body, name, out val)) return true;
+        if (TryGetPropCaseInsensitive(body, "propertyPatches", out var pp) && pp.ValueKind == JsonValueKind.Object)
         {
-            if (prop.ValueKind == JsonValueKind.Number) return prop.GetDecimal();
-            if (prop.ValueKind == JsonValueKind.String && decimal.TryParse(prop.GetString(), out var val)) return val;
+            if (TryGetPropCaseInsensitive(pp, name, out val)) return true;
         }
-        return null;
+        return false;
     }
 
-    private static bool GetBoolProperty(JsonElement container, string propertyName)
+    private static bool TryGetGuidAnywhere(JsonElement root, JsonElement body, string name, out Guid res)
     {
-        if (container.ValueKind == JsonValueKind.Object && container.TryGetProperty(propertyName, out var prop))
+        res = Guid.Empty;
+        if (TryGetPropAnywhere(body, name, out var val) && val.ValueKind == JsonValueKind.String && Guid.TryParse(val.GetString(), out res))
+            return true;
+        if (TryGetPropAnywhere(root, name, out var rVal) && rVal.ValueKind == JsonValueKind.String && Guid.TryParse(rVal.GetString(), out res))
+            return true;
+        return false;
+    }
+
+    private static bool TryGetGuid(JsonElement body, string name, out Guid res)
+    {
+        res = Guid.Empty;
+        return TryGetPropAnywhere(body, name, out var v) && v.ValueKind == JsonValueKind.String && Guid.TryParse(v.GetString(), out res);
+    }
+
+    private static bool TryGetValidGuid(JsonElement body, string name, HashSet<Guid> validIds, out Guid? res)
+    {
+        res = null;
+        if (TryGetGuid(body, name, out var g) && validIds.Contains(g))
         {
-            if (prop.ValueKind == JsonValueKind.True) return true;
-            if (prop.ValueKind == JsonValueKind.False) return false;
+            res = g;
+            return true;
         }
+        return false;
+    }
+
+    private static bool TryGetString(JsonElement body, string name, out string? res)
+    {
+        res = null;
+        if (TryGetPropAnywhere(body, name, out var v) && v.ValueKind == JsonValueKind.String)
+        {
+            res = v.GetString();
+            return true;
+        }
+        return false;
+    }
+
+    private static bool TryGetDecimal(JsonElement body, string name, out decimal res)
+    {
+        res = 0m;
+        if (TryGetPropAnywhere(body, name, out var v))
+        {
+            if (v.ValueKind == JsonValueKind.Number) { res = v.GetDecimal(); return true; }
+            if (v.ValueKind == JsonValueKind.String && decimal.TryParse(v.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var d))
+            {
+                res = d;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool TryGetBool(JsonElement body, string name, out bool res)
+    {
+        res = false;
+        if (TryGetPropAnywhere(body, name, out var v))
+        {
+            if (v.ValueKind == JsonValueKind.True) { res = true; return true; }
+            if (v.ValueKind == JsonValueKind.False) { res = false; return true; }
+        }
+        return false;
+    }
+
+    private static bool TryGetDateTime(JsonElement body, string name, out DateTimeOffset res)
+    {
+        res = default;
+        if (TryGetPropAnywhere(body, name, out var v) && v.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(v.GetString(), out var dt))
+        {
+            res = dt.ToUniversalTime();
+            return true;
+        }
+        return false;
+    }
+
+    private static bool TryGetArray(JsonElement body, string name, out string[]? res)
+    {
+        res = null;
+        if (TryGetPropAnywhere(body, name, out var v) && v.ValueKind == JsonValueKind.Array)
+        {
+            res = v.EnumerateArray()
+                   .Where(x => x.ValueKind == JsonValueKind.String)
+                   .Select(x => x.GetString()!)
+                   .ToArray();
+            return true;
+        }
+        return false;
+    }
+
+    private static bool TryGetSubList(JsonElement root, JsonElement body, string listName, out JsonElement array)
+    {
+        array = default;
+        if (TryGetPropCaseInsensitive(body, listName, out array) && array.ValueKind == JsonValueKind.Array) return true;
+        if (TryGetPropCaseInsensitive(body, "subListPatches", out var slp) && slp.ValueKind == JsonValueKind.Object &&
+            TryGetPropCaseInsensitive(slp, listName, out array) && array.ValueKind == JsonValueKind.Array) return true;
+        if (TryGetPropCaseInsensitive(root, "patch", out var pObj) && pObj.ValueKind == JsonValueKind.Object &&
+            TryGetPropCaseInsensitive(pObj, "subListPatches", out var rSlp) && rSlp.ValueKind == JsonValueKind.Object &&
+            TryGetPropCaseInsensitive(rSlp, listName, out array) && array.ValueKind == JsonValueKind.Array) return true;
+        if (TryGetPropCaseInsensitive(root, listName, out array) && array.ValueKind == JsonValueKind.Array) return true;
         return false;
     }
     #endregion

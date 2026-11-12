@@ -1,10 +1,4 @@
-﻿// Decompiled with JetBrains decompiler
-// Type: Mermer.Ui.Core.ViewModels.FundsManagement.FundsBalancesListViewModel
-// Assembly: Mermer.Ui.Core, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
-// MVID: DC92D011-8413-44AC-9F10-F866D891CF66
-// Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.Ui.Core.dll
-
-using Mermer.Common.Settings;
+﻿using Mermer.Common.Settings;
 using Mermer.Enterprise.Models;
 using Mermer.FundsManagement.Models;
 using Mermer.FundsManagement.Models.Extenders;
@@ -47,21 +41,27 @@ public class FundsBalancesListViewModel :
     }
 
     public Reference<Currency> Currencies { get; private set; }
+
     public FundsBalancesListViewModel(
-    IMvxMessenger messenger,
-    IConfigurator configurator,
-    Reference<Depository> depositories,
-    Reference<Currency> currencies, // ДОБАВЛЕНО
-    IFundsBalancesRepository repository,
-    IMvxNavigationService navigationService,
-    IUserInteractionService userInteractionService)
-    : base(messenger, navigationService, userInteractionService)
+        IMvxMessenger messenger,
+        IConfigurator configurator,
+        Reference<Depository> depositories,
+        Reference<Currency> currencies,
+        IFundsBalancesRepository repository,
+        IMvxNavigationService navigationService,
+        IUserInteractionService userInteractionService)
+        : base(messenger, navigationService, userInteractionService)
     {
         this._configurator = configurator;
         this._repository = repository;
         this.Depositories = depositories;
+        this.Currencies = currencies;
 
-        this.Currencies = currencies; // ДОБАВЛЕНО
+        // Фильтруем удаленные валюты сразу при создании ViewModel
+        if (this.Currencies != null)
+        {
+            this.Currencies.Filter = c => !c.IsDisabled;
+        }
     }
 
     public virtual string DepositoryId
@@ -79,6 +79,12 @@ public class FundsBalancesListViewModel :
 
     protected override async Task PreLoad()
     {
+        // Гарантируем фильтрацию активных валют перед загрузкой
+        if (this.Currencies != null)
+        {
+            this.Currencies.Filter = c => !c.IsDisabled;
+        }
+
         if (!this._loaded && string.IsNullOrEmpty(this.DepositoryId))
             this.DepositoryId = (await this._configurator.GetConfigAsync<AppSettings>()).DefaultDepositoryId;
 
@@ -87,14 +93,12 @@ public class FundsBalancesListViewModel :
         await Task.WhenAll(
             base.PreLoad(),
             this.Depositories.Initialize(),
-            this.Currencies.Initialize() // ДОБАВЛЕНО
+            this.Currencies.Initialize()
         );
 
-        // ДОБАВЛЕНО: Дефолтная валюта
-        if (string.IsNullOrEmpty(CurrencyId))
-        {
-            CurrencyId = Currencies.List.FirstOrDefault(x => x.IsDefault)?.Id;
-        }
+        // ИСПРАВЛЕНО: Валюта по умолчанию НЕ устанавливается (всегда null),
+        // даже если в настройках программы задан DefaultCurrencyId.
+        this.CurrencyId = null;
     }
 
     private void ApplyCustomCurrencyRate() => this.List = this.ApplyCustomCurrencyRate(this.List);
@@ -103,12 +107,18 @@ public class FundsBalancesListViewModel :
     {
         if (list == null) return list;
 
-        Decimal rate = 0M;
-        Currency currency = this.Currencies?.List?.SingleOrDefault(x => x.Id == this._currencyId);
-        CurrencyRate rate1 = currency != null ? currency.GetRate() : null;
+        decimal rate = 0M;
 
-        if (rate1 != null)
-            rate = rate1.Divider / rate1.Multiplier;
+        if (!string.IsNullOrEmpty(this._currencyId))
+        {
+            Currency currency = this.Currencies?.List?.SingleOrDefault(x => x.Id == this._currencyId);
+            CurrencyRate rate1 = currency?.GetRate();
+
+            if (rate1 != null && rate1.Multiplier != 0M)
+            {
+                rate = rate1.Divider / rate1.Multiplier;
+            }
+        }
 
         return list.Select(item =>
         {
@@ -148,9 +158,9 @@ public class FundsBalancesListViewModel :
         return this.NavigationService.Navigate<FundsActionsListViewModel, FundsActionsFilter>(new FundsActionsFilter()
         {
             DepositoryIds = new string[1]
-          {
-        this.SelectedItem.DepositoryId
-          },
+            {
+                this.SelectedItem.DepositoryId
+            },
             DateFrom = this.DateFilterFrom,
             DateTill = this.DateFilterTill
         });
@@ -178,14 +188,11 @@ public class FundsBalancesListViewModel :
       DateTime from,
       DateTime till)
     {
-        // Возвращаем выражение, которое всегда истинно, чтобы фильтрация не падала
         return x => true;
     }
 
     protected override async Task<int> CountListAsync(params Expression<Func<FundsBalanceByTypeWithBalance, bool>>[] predicates)
     {
-        // Если DepositoryId пустой, передаем null или пустую строку в репозиторий,
-        // чтобы он достал балансы по ВСЕМ кассам, а не искал кассу с именем "null"
         var depId = string.IsNullOrEmpty(this.DepositoryId) ? null : this.DepositoryId;
         var result = await this._repository.GetByTypeAsync(depId, null, null);
         return result != null ? result.Count() : 0;

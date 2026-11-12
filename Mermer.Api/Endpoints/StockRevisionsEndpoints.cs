@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -22,31 +23,25 @@ public static class StockRevisionsEndpoints
         var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
 
         // 1. СПИСОК ИНВЕНТАРИЗАЦИЙ
-        group.MapGet("/", async (DateTime? from, DateTime? till, int? limit, int? offset, bool? includeDisabled, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 10000) : 5000;
-            int skip = offset.GetValueOrDefault(0);
+            int take = int.TryParse(req.Query["limit"], out var lVal) ? Math.Clamp(lVal, 1, 10000) : 5000;
+            int skip = int.TryParse(req.Query["offset"], out var oVal) ? Math.Max(0, oVal) : 0;
 
-            var query = db.StockRevisions.AsNoTracking();
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
 
-            if (includeDisabled.HasValue && !includeDisabled.Value)
-            {
-                query = query.Where(r => !r.IsDisabled);
-            }
-            else
-            {
-                query = query.Where(r => !r.IsDisabled);
-            }
+            var query = db.StockRevisions.AsNoTracking().Where(r => !r.IsDisabled);
 
-            if (from.HasValue && from.Value.Year > 2000)
+            if (!string.IsNullOrEmpty(fromStr))
             {
-                var startDate = ParseSafeUtcOffset(from.Value);
+                var startDate = ParseSafeFilterOffset(fromStr, isTill: false);
                 query = query.Where(r => r.Date >= startDate);
             }
 
-            if (till.HasValue && till.Value.Year < 2099)
+            if (!string.IsNullOrEmpty(tillStr))
             {
-                var endDate = ParseSafeUtcOffset(till.Value, isTill: true);
+                var endDate = ParseSafeFilterOffset(tillStr, isTill: true);
                 query = query.Where(r => r.Date <= endDate);
             }
 
@@ -78,33 +73,35 @@ public static class StockRevisionsEndpoints
         });
 
         // 2. СЧЕТЧИК ИНВЕНТАРИЗАЦИЙ
-        group.MapGet("/count", async (DateTime? from, DateTime? till, bool? isCompleted, bool? isDisabled, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             var query = db.StockRevisions.AsNoTracking();
 
-            if (isDisabled.HasValue)
+            if (req.Query.ContainsKey("isDisabled") && bool.TryParse(req.Query["isDisabled"], out var disVal))
             {
-                query = query.Where(r => r.IsDisabled == isDisabled.Value);
+                query = query.Where(r => r.IsDisabled == disVal);
             }
             else
             {
                 query = query.Where(r => !r.IsDisabled);
             }
 
-            if (isCompleted.HasValue)
+            if (req.Query.ContainsKey("isCompleted") && bool.TryParse(req.Query["isCompleted"], out var compVal))
             {
-                query = query.Where(r => r.IsCompleted == isCompleted.Value);
+                query = query.Where(o => o.IsCompleted == compVal);
             }
 
-            if (from.HasValue && from.Value.Year > 2000)
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            if (!string.IsNullOrEmpty(fromStr))
             {
-                var startDate = new DateTimeOffset(from.Value.ToUniversalTime());
+                var startDate = ParseSafeFilterOffset(fromStr, isTill: false);
                 query = query.Where(r => r.Date >= startDate);
             }
 
-            if (till.HasValue && till.Value.Year < 2099)
+            string? tillStr = req.Query["till"].FirstOrDefault();
+            if (!string.IsNullOrEmpty(tillStr))
             {
-                var endDate = new DateTimeOffset(till.Value.ToUniversalTime());
+                var endDate = ParseSafeFilterOffset(tillStr, isTill: true);
                 query = query.Where(r => r.Date <= endDate);
             }
 
@@ -243,9 +240,6 @@ public static class StockRevisionsEndpoints
             string code = GetStringProp(root, "code", "Code") ?? $"REV-{DateTime.UtcNow:yyMMddHHmmss}";
             Guid? wId = Guid.TryParse(GetStringProp(root, "warehouseId", "WarehouseId"), out var wG) && wG != Guid.Empty ? wG : null;
 
-            // =========================================================================
-            // ПОДСТАНОВКА DEFAULT СКЛАДА (если склад не передан из UI)
-            // =========================================================================
             if (!wId.HasValue)
             {
                 var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled);
@@ -256,7 +250,6 @@ public static class StockRevisionsEndpoints
 
                 wId = defWh?.Id;
             }
-            // =========================================================================
 
             Guid? exceedSlipId = Guid.TryParse(GetStringProp(root, "exceedSlipId", "ExceedSlipId"), out var eG) && eG != Guid.Empty ? eG : null;
             Guid? deficitSlipId = Guid.TryParse(GetStringProp(root, "deficitSlipId", "DeficitSlipId"), out var dG) && dG != Guid.Empty ? dG : null;
@@ -269,16 +262,16 @@ public static class StockRevisionsEndpoints
 
             DateTimeOffset? finishDate = null;
             string? finishDateStr = GetStringProp(root, "finishDate", "FinishDate");
-            if (!string.IsNullOrEmpty(finishDateStr) && DateTimeOffset.TryParse(finishDateStr, out var parsedFinishDate))
-                finishDate = parsedFinishDate.ToUniversalTime();
+            if (!string.IsNullOrEmpty(finishDateStr))
+            {
+                finishDate = ParseCleanDateOffset(finishDateStr);
+            }
 
             DateTimeOffset date = DateTimeOffset.UtcNow;
             string? dateStr = GetStringProp(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr) && DateTimeOffset.TryParse(dateStr, out var parsedDate))
+            if (!string.IsNullOrEmpty(dateStr))
             {
-                date = parsedDate.Offset == TimeSpan.Zero && !dateStr.EndsWith("Z", StringComparison.OrdinalIgnoreCase)
-                    ? new DateTimeOffset(DateTime.SpecifyKind(parsedDate.DateTime, DateTimeKind.Local).ToUniversalTime())
-                    : parsedDate.ToUniversalTime();
+                date = ParseCleanDateOffset(dateStr);
             }
 
             var tagsList = ExtractTagsFromRawJson(root);
@@ -372,11 +365,12 @@ public static class StockRevisionsEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var todayUtc = DateTime.UtcNow.Date;
-                    var weekStart = todayUtc.AddDays(-7);
-                    var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+                    var now = DateTimeOffset.Now;
+                    var todayStart = new DateTimeOffset(now.Year, now.Month, now.Day, 0, 0, 0, now.Offset);
+                    var weekStart = todayStart.AddDays(-7);
+                    var monthStart = new DateTimeOffset(now.Year, now.Month, 1, 0, 0, 0, now.Offset);
 
-                    var countToday = await db.StockRevisions.CountAsync(r => !r.IsDisabled && r.Date >= todayUtc, ct);
+                    var countToday = await db.StockRevisions.CountAsync(r => !r.IsDisabled && r.Date >= todayStart, ct);
                     var countWeek = await db.StockRevisions.CountAsync(r => !r.IsDisabled && r.Date >= weekStart, ct);
                     var countMonth = await db.StockRevisions.CountAsync(r => !r.IsDisabled && r.Date >= monthStart, ct);
                     var countAll = await db.StockRevisions.CountAsync(r => !r.IsDisabled, ct);
@@ -402,18 +396,45 @@ public static class StockRevisionsEndpoints
     }
 
     #region Helpers
-    private static DateTimeOffset ParseSafeUtcOffset(DateTime dt, bool isTill = false)
+    private static DateTimeOffset ParseCleanDateOffset(string raw)
     {
-        if (dt == DateTime.MinValue) return new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc));
-        if (dt >= DateTime.MaxValue.AddDays(-2)) return new DateTimeOffset(new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc));
-
-        var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
-        if (isTill && dt.TimeOfDay == TimeSpan.Zero && dt.Kind != DateTimeKind.Utc)
+        raw = raw.Replace(" ", "+").Trim();
+        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
         {
-            utc = utc.Date.AddDays(1).AddTicks(-1);
+            return dto.ToUniversalTime();
         }
-        return new DateTimeOffset(utc);
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            return new DateTimeOffset(dt.ToUniversalTime());
+        }
+        return DateTimeOffset.UtcNow;
     }
+
+    private static DateTimeOffset ParseSafeFilterOffset(string raw, bool isTill = false)
+    {
+        raw = raw.Replace(" ", "+").Trim();
+        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
+        {
+            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
+            {
+                return new DateTimeOffset(dto.Year, dto.Month, dto.Day, 23, 59, 59, dto.Offset).ToUniversalTime();
+            }
+            return dto.ToUniversalTime();
+        }
+
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            var offset = DateTimeOffset.Now.Offset;
+            if (isTill && dt.TimeOfDay == TimeSpan.Zero)
+            {
+                return new DateTimeOffset(dt.Year, dt.Month, dt.Day, 23, 59, 59, offset).ToUniversalTime();
+            }
+            return new DateTimeOffset(dt, offset).ToUniversalTime();
+        }
+
+        return isTill ? DateTimeOffset.UtcNow.AddYears(10) : DateTimeOffset.UtcNow.AddYears(-10);
+    }
+
     private static List<string> ExtractTagsFromRawJson(JsonElement root)
     {
         var list = new List<string>();
@@ -433,28 +454,23 @@ public static class StockRevisionsEndpoints
                     var s = item.GetString();
                     if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
                 }
-                else if (item.ValueKind == JsonValueKind.Object)
-                {
-                    if (item.TryGetProperty("Text", out var t) || item.TryGetProperty("Value", out t) || item.TryGetProperty("Name", out t))
-                    {
-                        var s = t.GetString();
-                        if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
-                    }
-                }
             }
         }
-        else if (tagsProp.ValueKind == JsonValueKind.String)
-        {
-            var raw = tagsProp.GetString();
-            if (!string.IsNullOrWhiteSpace(raw))
-            {
-                list.AddRange(raw.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
-                                 .Select(x => x.Trim())
-                                 .Where(x => !string.IsNullOrWhiteSpace(x)));
-            }
-        }
-
         return list.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static bool TryGetPropCaseInsensitive(JsonElement el, string name, out JsonElement val)
+    {
+        foreach (var p in el.EnumerateObject())
+        {
+            if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                val = p.Value;
+                return true;
+            }
+        }
+        val = default;
+        return false;
     }
 
     private static string? GetStringProp(JsonElement el, params string[] names)
@@ -490,20 +506,6 @@ public static class StockRevisionsEndpoints
                 if (p.ValueKind == JsonValueKind.False) return false;
             }
         }
-        return false;
-    }
-
-    private static bool TryGetPropCaseInsensitive(JsonElement el, string name, out JsonElement val)
-    {
-        foreach (var p in el.EnumerateObject())
-        {
-            if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
-            {
-                val = p.Value;
-                return true;
-            }
-        }
-        val = default;
         return false;
     }
     #endregion

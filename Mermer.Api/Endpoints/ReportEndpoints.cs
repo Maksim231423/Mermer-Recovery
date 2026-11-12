@@ -33,10 +33,10 @@ public static class ReportEndpoints
             await using var conn = new NpgsqlConnection(connStr);
 
             const string sql = """
-                INSERT INTO report_layouts (id, name, layout, updated_at)
-                VALUES (@id, @name, @layout, NOW())
+                INSERT INTO report_layouts (id, name, layout, client_id, updated_at)
+                VALUES (@id, @name, @layout, @clientId, NOW())
                 ON CONFLICT (id) DO UPDATE 
-                SET layout = EXCLUDED.layout, updated_at = NOW();
+                SET layout = EXCLUDED.layout, client_id = EXCLUDED.client_id, updated_at = NOW();
                 """;
 
             await conn.ExecuteAsync(sql, new

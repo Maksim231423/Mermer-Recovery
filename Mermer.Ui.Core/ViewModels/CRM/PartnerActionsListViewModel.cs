@@ -141,10 +141,9 @@ public class PartnerActionsListViewModel :
             Currencies.Initialize()
         );
 
-        if (string.IsNullOrEmpty(CurrencyId))
-        {
-            CurrencyId = Currencies.List.FirstOrDefault(x => x.IsDefault)?.Id;
-        }
+        // ИСПРАВЛЕНО: Валюта изначально НЕ выбирается (всегда null),
+        // даже если в общих настройках программы задан DefaultCurrencyId.
+        CurrencyId = null;
     }
 
     protected override Task OnLoad()
@@ -232,12 +231,18 @@ public class PartnerActionsListViewModel :
     {
         if (list == null) return list;
 
-        Decimal rate = 0M;
-        Currency currency = this.Currencies.List.SingleOrDefault(x => x.Id == this._currencyId);
-        CurrencyRate rate1 = currency != null ? currency.GetRate() : null;
+        decimal rate = 0M;
 
-        if (rate1 != null)
-            rate = rate1.Divider / rate1.Multiplier;
+        if (!string.IsNullOrEmpty(this._currencyId))
+        {
+            Currency currency = this.Currencies?.List?.SingleOrDefault(x => x.Id == this._currencyId);
+            CurrencyRate rate1 = currency?.GetRate();
+
+            if (rate1 != null && rate1.Multiplier != 0M)
+            {
+                rate = rate1.Divider / rate1.Multiplier;
+            }
+        }
 
         return list.Select(item =>
         {

@@ -1,13 +1,14 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
+﻿using Mermer.Data.Postgres;
+using Mermer.Data.Postgres.Entities;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
-using Mermer.Data.Postgres;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Mermer.Api.Endpoints;
 
@@ -54,25 +55,28 @@ public static class OfficeEndpoints
 
             if (existing is null)
             {
-                var newEntity = Activator.CreateInstance(db.Offices.EntityType.ClrType);
-                var entry = db.Entry(newEntity);
+                var newEntity = new OfficeEntity
+                {
+                    Id = id,
+                    Name = dto.Name ?? string.Empty,
+                    Region = dto.Region ?? string.Empty,
+                    Description = dto.Description ?? string.Empty,
+                    Tags = dto.Tags,
+                    IsDisabled = dto.IsDisabled,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    UpdatedAt = DateTimeOffset.UtcNow
+                };
 
-                entry.Property("Id").CurrentValue = id;
-                entry.Property("Name").CurrentValue = dto.Name ?? "";
-                entry.Property("Region").CurrentValue = dto.Region ?? "";
-                entry.Property("Description").CurrentValue = dto.Description ?? "";
-                if (entry.Metadata.FindProperty("Tags") != null) entry.Property("Tags").CurrentValue = dto.Tags;
-                entry.Property("IsDisabled").CurrentValue = dto.IsDisabled;
-
-                db.Add(newEntity);
+                db.Offices.Add(newEntity);
             }
             else
             {
-                existing.Name = dto.Name ?? "";
-                existing.Region = dto.Region ?? "";
-                existing.Description = dto.Description ?? "";
+                existing.Name = dto.Name ?? string.Empty;
+                existing.Region = dto.Region ?? string.Empty;
+                existing.Description = dto.Description ?? string.Empty;
                 existing.Tags = dto.Tags;
                 existing.IsDisabled = dto.IsDisabled;
+                existing.UpdatedAt = DateTimeOffset.UtcNow;
             }
 
             await db.SaveChangesAsync(ct);

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -19,8 +20,14 @@ public interface ILicenseCryptoService
 
 public class LicenseCryptoService : ILicenseCryptoService
 {
-    // СЮДА ВСТАВЬТЕ СТРОКУ ИЗ СГЕНЕРИРОВАННОГО ecdsa_public_key.txt (88 символов)
+    // Открытый ключ ECDSA P-256 (88 символов)
     public const string PublicKeyBase64 = "8y3wtTS6b4HBcCzmzMhfYvQjLk/J2V6MvF4NcSVflqYajSBT1d5LcCRuPeb1VyJk4cPmYujs0F8a+SOlZmGyDw==";
+
+    // Идентификаторы модулей Mermer
+    public const string ClientModuleId = "dc60017b-9b20-46ca-8b2e-646de9965a9e";
+    public const string ServerModuleId = "9a953aa5-2fd9-418d-bcf7-fb5bd7d09553";
+    public const string SyncModuleId = "6b1495a1-60aa-4420-9c30-94718c121c26";
+    public const string MobileModuleId = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
 
     public bool TryValidateKey(string licenseKey, out SignedLicenseData? data, out string error)
     {
@@ -54,9 +61,9 @@ public class LicenseCryptoService : ILicenseCryptoService
             // 1. Проверяем цифровую подпись ECDSA P-256
             using var ecdsa = CreateEcdsaFromPublicKey(PublicKeyBase64);
             bool isVerified = ecdsa.VerifyData(
-            payloadBytes,
-            signatureBytes,
-            HashAlgorithmName.SHA256);
+                payloadBytes,
+                signatureBytes,
+                HashAlgorithmName.SHA256);
 
             if (!isVerified)
             {
@@ -73,13 +80,19 @@ public class LicenseCryptoService : ILicenseCryptoService
             string h = root.TryGetProperty("h", out var hProp) ? hProp.GetString() : "ANY";
             string c = root.TryGetProperty("c", out var cProp) ? cProp.GetString() : "";
 
-            if (!DateTime.TryParse(v, out var validTillDate))
+            // Строгий парсинг ISO yyyy-MM-dd в UTC без региональных сдвигов
+            DateTime validTillDate;
+            if (!DateTime.TryParseExact(v, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out validTillDate))
             {
-                error = "Invalid expiration date in license.";
-                return false;
+                if (!DateTime.TryParse(v, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out validTillDate))
+                {
+                    error = "Invalid expiration date in license.";
+                    return false;
+                }
             }
 
-            var validTillUtc = DateTime.SpecifyKind(validTillDate.AddDays(1).AddTicks(-1), DateTimeKind.Utc);
+            // Лицензия действует до конца указанного дня (23:59:59.999 UTC)
+            var validTillUtc = validTillDate.Date.AddDays(1).AddTicks(-1);
 
             if (validTillUtc < DateTime.UtcNow)
             {
@@ -87,13 +100,14 @@ public class LicenseCryptoService : ILicenseCryptoService
                 return false;
             }
 
-            // 3. Раскрываем короткие коды в полные GUID модулей Mermer
-            string fullModules = m switch
+            // 3. Раскрываем короткие коды в GUID модулей Mermer
+            string fullModules = m.ToLowerInvariant() switch
             {
-                "cs" => "dc60017b-9b20-46ca-8b2e-646de9965a9e,9a953aa5-2fd9-418d-bcf7-fb5bd7d09553", // Client + Server
-                "c" => "dc60017b-9b20-46ca-8b2e-646de9965a9e",                                         // Client
-                "sync" => "6b1495a1-60aa-4420-9c30-94718c121c26",                                         // Sync
-                _ => "all"
+                "cs" => $"{ClientModuleId},{ServerModuleId}",
+                "c" => ClientModuleId,
+                "sync" => SyncModuleId,
+                "mobile" => MobileModuleId,
+                _ => $"{ClientModuleId},{ServerModuleId},{SyncModuleId},{MobileModuleId}"
             };
 
             data = new SignedLicenseData(fullModules, validTillUtc, h, c);

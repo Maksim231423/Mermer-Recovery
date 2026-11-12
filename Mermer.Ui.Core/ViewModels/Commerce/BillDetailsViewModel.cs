@@ -19,6 +19,7 @@ using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
 using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Linq;
 using System.Threading.Tasks;
@@ -150,27 +151,79 @@ public class BillDetailsViewModel :
         if (string.IsNullOrEmpty(ItemId))
             Details.BillType = _newSlipType;
 
-        // --- ОЧИСТКА УДАЛЕННЫХ / ПУСТЫХ ВАЛЮТ ИЗ КОНВЕРСИЙ ---
-        if (Details?.CurrencyConvertions != null && Currencies?.List != null)
+        // 1. Гарантируем наличие актуальных курсов валют для пересчета
+        if (Details != null)
         {
-            var activeCurrencyIds = Currencies.List
-                .Where(c => !c.IsDisabled)
-                .Select(c => c.Id)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (Details.CurrencyConvertions == null)
+                Details.CurrencyConvertions = new WatchedObservableCollection<CurrencyConvertion>();
 
-            // Удаляем любые строки конверсий, у которых CurrencyId пустой, null или валюта отключена
+            var activeCurrencies = Currencies?.List?.Where(c => !c.IsDisabled).ToList() ?? new List<Currency>();
+            var activeIds = activeCurrencies.Select(c => c.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
             var toRemove = Details.CurrencyConvertions
-                .Where(c => string.IsNullOrEmpty(c.CurrencyId) || !activeCurrencyIds.Contains(c.CurrencyId))
+                .Where(c => string.IsNullOrEmpty(c.CurrencyId) || !activeIds.Contains(c.CurrencyId))
                 .ToList();
 
             foreach (var item in toRemove)
-            {
                 Details.CurrencyConvertions.Remove(item);
+
+            var docDate = Details.Date != default ? Details.Date.Date : DateTime.Today;
+
+            foreach (var curr in activeCurrencies)
+            {
+                CurrencyRate matchedRate = null;
+                if (curr.Rates != null && curr.Rates.Any())
+                {
+                    matchedRate = curr.Rates
+                        .Where(r => r.ValidFrom.Date <= docDate)
+                        .OrderByDescending(r => r.ValidFrom)
+                        .FirstOrDefault()
+                        ?? curr.Rates.OrderByDescending(r => r.ValidFrom).FirstOrDefault();
+                }
+
+                decimal mult = (matchedRate != null && matchedRate.Multiplier != 0m) ? matchedRate.Multiplier : 1m;
+                decimal div = (matchedRate != null && matchedRate.Divider != 0m) ? matchedRate.Divider : 1m;
+
+                var existingConv = Details.CurrencyConvertions.FirstOrDefault(c =>
+                    string.Equals(c.CurrencyId, curr.Id, StringComparison.OrdinalIgnoreCase));
+
+                if (existingConv == null)
+                {
+                    Details.CurrencyConvertions.Add(new CurrencyConvertion
+                    {
+                        CurrencyId = curr.Id,
+                        Multiplier = mult,
+                        Divider = div
+                    });
+                }
+                else if (existingConv.Multiplier == 1m && existingConv.Divider == 1m && (mult != 1m || div != 1m))
+                {
+                    existingConv.Multiplier = mult;
+                    existingConv.Divider = div;
+                }
             }
+
+            // Обновляем привязки конвертеров внутри строк
+            Details.UpdateCurrencyConvertion();
+            if (Details.Lines != null)
+            {
+                foreach (var line in Details.Lines)
+                {
+                    line.UpdateCurrencyConvertion();
+                }
+            }
+
+            // ПОДПИСЫВАЕМСЯ НА ДОБАВЛЕНИЕ НОВЫХ СТРОК В ТАБЛИЦУ
+            SubscribeLines();
         }
 
         UpdatePartnerBalance();
 
+        Details.RaisePropertyChanged("ActionTotal");
+        Details.RaisePropertyChanged("ActionDebitCreditTotal");
+        Details.RaisePropertyChanged("ActionDebitTotal");
+        Details.RaisePropertyChanged("ActionCreditTotal");
+        Details.RaisePropertyChanged("DisplayTotal");
         Details.RaisePropertyChanged("DisplayDebitCreditTotal");
         Details.RaisePropertyChanged("DisplayCreditTotal");
         Details.RaisePropertyChanged("DisplayDebitTotal");
@@ -195,11 +248,45 @@ public class BillDetailsViewModel :
         }
     }
 
+    private void SubscribeLines()
+    {
+        if (Details?.Lines != null)
+        {
+            Details.Lines.CollectionChanged -= Lines_CollectionChanged;
+            Details.Lines.CollectionChanged += Lines_CollectionChanged;
+
+            // Если документ новый и в таблице уже создана пустая строка — ставим ей валюту из шапки
+            if (string.IsNullOrEmpty(ItemId) && !string.IsNullOrEmpty(Details.DisplayCurrencyId))
+            {
+                foreach (var line in Details.Lines)
+                {
+                    line.CurrencyId = Details.DisplayCurrencyId;
+                    line.UpdateCurrencyConvertion();
+                }
+            }
+        }
+    }
+
+    private void Lines_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.Action == NotifyCollectionChangedAction.Add && e.NewItems != null)
+        {
+            foreach (var item in e.NewItems)
+            {
+                if (item is BillLine line && !string.IsNullOrEmpty(Details?.DisplayCurrencyId))
+                {
+                    // Новая строка всегда наследует валюту, выбранную в шапке документа
+                    line.CurrencyId = Details.DisplayCurrencyId;
+                    line.UpdateCurrencyConvertion();
+                }
+            }
+        }
+    }
+
     public override bool IsDirty
     {
         get
         {
-            // Если это новый документ, у которого нет строк и не выбран контрагент — он пустой
             if (string.IsNullOrEmpty(ItemId) &&
                 (Details?.Lines == null || Details.Lines.Count == 0) &&
                 string.IsNullOrEmpty(Details?.PartnerId))
@@ -239,6 +326,36 @@ public class BillDetailsViewModel :
     {
         base.Details_PropertyChanged(sender, e);
 
+        if (e.PropertyName == "Lines")
+        {
+            SubscribeLines();
+        }
+
+        if (e.PropertyName == "DisplayCurrencyId")
+        {
+            // При смене валюты в шапке нового документа автоматически переключаем валюту всех строк
+            if (Details.Lines != null)
+            {
+                foreach (var line in Details.Lines)
+                {
+                    if (string.IsNullOrEmpty(ItemId))
+                    {
+                        line.CurrencyId = Details.DisplayCurrencyId;
+                    }
+                    line.UpdateCurrencyConvertion();
+                }
+            }
+
+            Details.UpdateCurrencyConvertion();
+
+            Details.RaisePropertyChanged("ActionTotal");
+            Details.RaisePropertyChanged("DisplayTotal");
+            Details.RaisePropertyChanged("DisplayDebitCreditTotal");
+            Details.RaisePropertyChanged("DisplayDebitTotal");
+            Details.RaisePropertyChanged("DisplayCreditTotal");
+            RaisePropertyChanged(() => PartnerBalanceResult);
+        }
+
         if (e.PropertyName == "Date" || e.PropertyName == "PartnerId" || e.PropertyName == "DepositoryId" || e.PropertyName == "DisplayCurrencyId")
             UpdatePartnerBalance();
         else if (e.PropertyName == "DisplayDebitCreditTotal")
@@ -254,15 +371,12 @@ public class BillDetailsViewModel :
             if (x.IsDisabled && !string.Equals(x.Id, Details?.DepositoryId, StringComparison.OrdinalIgnoreCase))
                 return false;
 
-            // Если офис в документе не выбран — показываем все кассы
             if (string.IsNullOrWhiteSpace(Details?.OfficeId))
                 return true;
 
-            // Если касса общая (без привязки к конкретному офису) — показываем
             if (string.IsNullOrWhiteSpace(x.OfficeId))
                 return true;
 
-            // Иначе проверяем совпадение с выбранным офисом
             return string.Equals(x.OfficeId, Details.OfficeId, StringComparison.OrdinalIgnoreCase);
         };
 

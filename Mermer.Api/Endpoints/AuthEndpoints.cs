@@ -1,15 +1,16 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Security.Cryptography;
-using System.Text;
-using System.Threading.Tasks;
-using Mermer.Api.DTOs;
+﻿using Mermer.Api.DTOs;
+using Mermer.Api.Services;
 using Mermer.Data.Postgres;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading.Tasks;
 
 namespace Mermer.Api.Endpoints;
 
@@ -33,22 +34,31 @@ public static class AuthEndpoints
         var group = routes.MapGroup("/api/auth").WithTags("Auth");
 
         // 1. Авторизация
-        group.MapPost("/login", async (LoginRequestDto request, MermerDbContext db) =>
+        group.MapPost("/login", async (
+            LoginRequestDto request,
+            MermerDbContext db,
+            IServerLicenseValidationService licenseValidator) =>
         {
+            // Серверная лицензия обязательна всегда
+            bool isServerValid = await licenseValidator.IsServerLicenseValidAsync();
+            if (!isServerValid)
+            {
+                return Results.Problem(
+                    detail: "Server license is missing or expired.",
+                    statusCode: StatusCodes.Status403Forbidden);
+            }
+
             var username = (request.Username ?? string.Empty).Trim();
             var password = request.Password ?? string.Empty;
 
-            // Ищем пользователя в базе (регистронезависимо)
             var user = await db.Users
                 .FirstOrDefaultAsync(u => u.Username.ToLower() == username.ToLower() && !u.IsDisabled);
 
-            // Если пользователя нет или неверный пароль — возвращаем 401 Unauthorized
             if (user == null || !VerifyPassword(user.Password, password))
             {
                 return Results.Unauthorized();
             }
 
-            // Формируем список ролей пользователя
             var userRoles = user.Roles ?? new List<string>();
 
             var response = new UserSessionDto(
@@ -130,19 +140,15 @@ public static class AuthEndpoints
         if (string.IsNullOrEmpty(storedPassword) || string.IsNullOrEmpty(providedPassword))
             return false;
 
-        // 1. Прямое совпадение
         if (string.Equals(storedPassword, providedPassword, StringComparison.Ordinal))
             return true;
 
-        // 2. Стандартный SHA-256 (Base64)
         if (string.Equals(storedPassword, HashPasswordSha256Base64(providedPassword), StringComparison.Ordinal))
             return true;
 
-        // 3. SHA-256 (HEX)
         if (string.Equals(storedPassword, HashPasswordSha256Hex(providedPassword), StringComparison.OrdinalIgnoreCase))
             return true;
 
-        // 4. Легаси SHA-1 (Base64)
         if (string.Equals(storedPassword, HashPasswordSha1Base64(providedPassword), StringComparison.Ordinal))
             return true;
 

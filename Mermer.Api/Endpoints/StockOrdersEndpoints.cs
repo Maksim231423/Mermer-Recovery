@@ -1,16 +1,17 @@
-﻿using System;
+﻿using Mermer.Data.Postgres;
+using Mermer.Data.Postgres.Entities;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.EntityFrameworkCore;
+using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Routing;
-using Microsoft.EntityFrameworkCore;
-using Mermer.Data.Postgres;
-using Mermer.Data.Postgres.Entities;
 
 namespace Mermer.Api.Endpoints;
 
@@ -22,36 +23,41 @@ public static class StockOrdersEndpoints
         var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
 
         // 1. СПИСОК ЗАКАЗОВ
-        group.MapGet("/", async (DateTime? from, DateTime? till, string? warehouseId, string? partnerId, bool? isCompleted, bool? isDisabled, int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 10000) : 5000;
-            int skip = offset.GetValueOrDefault(0);
+            int take = int.TryParse(req.Query["limit"], out var lVal) ? Math.Clamp(lVal, 1, 10000) : 5000;
+            int skip = int.TryParse(req.Query["offset"], out var oVal) ? Math.Max(0, oVal) : 0;
+
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            string? tillStr = req.Query["till"].FirstOrDefault();
+            string? warehouseId = req.Query["warehouseId"].FirstOrDefault();
+            string? partnerId = req.Query["partnerId"].FirstOrDefault();
 
             var query = db.StockOrders.AsNoTracking();
 
-            if (isDisabled.HasValue)
+            if (req.Query.ContainsKey("isDisabled") && bool.TryParse(req.Query["isDisabled"], out var disVal))
             {
-                query = query.Where(o => o.IsDisabled == isDisabled.Value);
+                query = query.Where(o => o.IsDisabled == disVal);
             }
             else
             {
                 query = query.Where(o => !o.IsDisabled);
             }
 
-            if (isCompleted.HasValue)
+            if (req.Query.ContainsKey("isCompleted") && bool.TryParse(req.Query["isCompleted"], out var compVal))
             {
-                query = query.Where(o => o.IsCompleted == isCompleted.Value);
+                query = query.Where(o => o.IsCompleted == compVal);
             }
 
-            if (from.HasValue && from.Value.Year > 2000)
+            if (!string.IsNullOrEmpty(fromStr))
             {
-                var startDate = ParseSafeUtcOffset(from.Value);
+                var startDate = ParseSafeFilterOffset(fromStr, isTill: false);
                 query = query.Where(o => o.Date >= startDate);
             }
 
-            if (till.HasValue && till.Value.Year < 2099)
+            if (!string.IsNullOrEmpty(tillStr))
             {
-                var endDate = ParseSafeUtcOffset(till.Value, isTill: true);
+                var endDate = ParseSafeFilterOffset(tillStr, isTill: true);
                 query = query.Where(o => o.Date <= endDate);
             }
 
@@ -107,38 +113,41 @@ public static class StockOrdersEndpoints
         });
 
         // 2. СЧЕТЧИК ЗАКАЗОВ
-        group.MapGet("/count", async (DateTime? from, DateTime? till, bool? isCompleted, bool? isDisabled, string? userId, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
+        group.MapGet("/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             var query = db.StockOrders.AsNoTracking();
 
-            if (isDisabled.HasValue)
+            if (req.Query.ContainsKey("isDisabled") && bool.TryParse(req.Query["isDisabled"], out var disVal))
             {
-                query = query.Where(o => o.IsDisabled == isDisabled.Value);
+                query = query.Where(o => o.IsDisabled == disVal);
             }
             else
             {
                 query = query.Where(o => !o.IsDisabled);
             }
 
-            if (isCompleted.HasValue)
+            if (req.Query.ContainsKey("isCompleted") && bool.TryParse(req.Query["isCompleted"], out var compVal))
             {
-                query = query.Where(o => o.IsCompleted == isCompleted.Value);
+                query = query.Where(o => o.IsCompleted == compVal);
             }
 
+            string? userId = req.Query["userId"].FirstOrDefault();
             if (Guid.TryParse(userId, out var uG))
             {
                 query = query.Where(o => o.UserId == uG);
             }
 
-            if (from.HasValue && from.Value.Year > 2000)
+            string? fromStr = req.Query["from"].FirstOrDefault();
+            if (!string.IsNullOrEmpty(fromStr))
             {
-                var startDate = new DateTimeOffset(from.Value.ToUniversalTime());
+                var startDate = ParseSafeFilterOffset(fromStr, isTill: false);
                 query = query.Where(o => o.Date >= startDate);
             }
 
-            if (till.HasValue && till.Value.Year < 2099)
+            string? tillStr = req.Query["till"].FirstOrDefault();
+            if (!string.IsNullOrEmpty(tillStr))
             {
-                var endDate = new DateTimeOffset(till.Value.ToUniversalTime());
+                var endDate = ParseSafeFilterOffset(tillStr, isTill: true);
                 query = query.Where(o => o.Date <= endDate);
             }
 
@@ -234,11 +243,12 @@ public static class StockOrdersEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var todayUtc = DateTime.UtcNow.Date;
-                    var weekStart = todayUtc.AddDays(-7);
-                    var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+                    var now = DateTimeOffset.Now;
+                    var todayStart = new DateTimeOffset(now.Year, now.Month, now.Day, 0, 0, 0, now.Offset);
+                    var weekStart = todayStart.AddDays(-7);
+                    var monthStart = new DateTimeOffset(now.Year, now.Month, 1, 0, 0, 0, now.Offset);
 
-                    var countToday = await db.StockOrders.CountAsync(r => !r.IsDisabled && r.Date >= todayUtc, ct);
+                    var countToday = await db.StockOrders.CountAsync(r => !r.IsDisabled && r.Date >= todayStart, ct);
                     var countWeek = await db.StockOrders.CountAsync(r => !r.IsDisabled && r.Date >= weekStart, ct);
                     var countMonth = await db.StockOrders.CountAsync(r => !r.IsDisabled && r.Date >= monthStart, ct);
                     var countAll = await db.StockOrders.CountAsync(r => !r.IsDisabled, ct);
@@ -260,7 +270,7 @@ public static class StockOrdersEndpoints
             return Results.Json(result, jsonOptions);
         });
 
-        // 5. СОХРАНЕНИЕ (POST / PUT)
+        // 5. СОХРАНЕНИЕ
         Func<HttpRequest, MermerDbContext, Task<IResult>> saveOrderHandler = async (req, db) =>
         {
             using var reader = new StreamReader(req.Body);
@@ -278,9 +288,6 @@ public static class StockOrdersEndpoints
             string code = GetStringProp(root, "code", "Code") ?? $"ORD-{DateTime.UtcNow:yyMMddHHmmss}";
             Guid? wId = Guid.TryParse(GetStringProp(root, "warehouseId", "WarehouseId"), out var wG) && wG != Guid.Empty ? wG : null;
 
-            // =========================================================================
-            // ПОДСТАНОВКА DEFAULT СКЛАДА (если склад не передан из UI)
-            // =========================================================================
             if (!wId.HasValue)
             {
                 var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled);
@@ -291,7 +298,6 @@ public static class StockOrdersEndpoints
 
                 wId = defWh?.Id;
             }
-            // =========================================================================
 
             Guid? pId = Guid.TryParse(GetStringProp(root, "partnerId", "PartnerId"), out var pG) && pG != Guid.Empty ? pG : null;
             Guid? uId = Guid.TryParse(GetStringProp(root, "userId", "UserId"), out var uG) && uG != Guid.Empty ? uG : null;
@@ -301,14 +307,11 @@ public static class StockOrdersEndpoints
             bool isCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
             bool isDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
 
-            // БЕЗОПАСНЫЙ ПАРСИНГ ДАТЫ БЕЗ ДВОЙНОГО СДВИГА:
             DateTimeOffset date = DateTimeOffset.UtcNow;
             string? dateStr = GetStringProp(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr) && DateTimeOffset.TryParse(dateStr, out var pDate))
+            if (!string.IsNullOrEmpty(dateStr))
             {
-                date = pDate.Offset == TimeSpan.Zero && !dateStr.EndsWith("Z", StringComparison.OrdinalIgnoreCase)
-                    ? new DateTimeOffset(DateTime.SpecifyKind(pDate.DateTime, DateTimeKind.Local).ToUniversalTime())
-                    : pDate.ToUniversalTime();
+                date = ParseCleanDateOffset(dateStr);
             }
 
             var tagsList = ExtractTagsFromRawJson(root);
@@ -424,17 +427,43 @@ public static class StockOrdersEndpoints
     }
 
     #region Helpers
-    private static DateTimeOffset ParseSafeUtcOffset(DateTime dt, bool isTill = false)
+    private static DateTimeOffset ParseCleanDateOffset(string raw)
     {
-        if (dt == DateTime.MinValue) return new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc));
-        if (dt >= DateTime.MaxValue.AddDays(-2)) return new DateTimeOffset(new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Utc));
-
-        var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
-        if (isTill && dt.TimeOfDay == TimeSpan.Zero && dt.Kind != DateTimeKind.Utc)
+        raw = raw.Replace(" ", "+").Trim();
+        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
         {
-            utc = utc.Date.AddDays(1).AddTicks(-1);
+            return dto.ToUniversalTime();
         }
-        return new DateTimeOffset(utc);
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            return new DateTimeOffset(dt.ToUniversalTime());
+        }
+        return DateTimeOffset.UtcNow;
+    }
+
+    private static DateTimeOffset ParseSafeFilterOffset(string raw, bool isTill = false)
+    {
+        raw = raw.Replace(" ", "+").Trim();
+        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
+        {
+            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
+            {
+                return new DateTimeOffset(dto.Year, dto.Month, dto.Day, 23, 59, 59, dto.Offset).ToUniversalTime();
+            }
+            return dto.ToUniversalTime();
+        }
+
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        {
+            var offset = DateTimeOffset.Now.Offset;
+            if (isTill && dt.TimeOfDay == TimeSpan.Zero)
+            {
+                return new DateTimeOffset(dt.Year, dt.Month, dt.Day, 23, 59, 59, offset).ToUniversalTime();
+            }
+            return new DateTimeOffset(dt, offset).ToUniversalTime();
+        }
+
+        return isTill ? DateTimeOffset.UtcNow.AddYears(10) : DateTimeOffset.UtcNow.AddYears(-10);
     }
 
     private static List<string> ExtractTagsFromRawJson(JsonElement root)
@@ -511,7 +540,7 @@ public static class StockOrdersEndpoints
             if (TryGetPropCaseInsensitive(el, n, out var p))
             {
                 if (p.ValueKind == JsonValueKind.Number) return p.GetDecimal();
-                if (p.ValueKind == JsonValueKind.String && decimal.TryParse(p.GetString(), out var v)) return v;
+                if (p.ValueKind == JsonValueKind.String && decimal.TryParse(p.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var v)) return v;
             }
         }
         return 0m;
@@ -530,5 +559,4 @@ public static class StockOrdersEndpoints
         return false;
     }
     #endregion
-
 }

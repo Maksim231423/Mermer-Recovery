@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
 namespace Mermer.Data.Postgres.Entities;
@@ -7,17 +8,18 @@ namespace Mermer.Data.Postgres.Entities;
 [Table("partner_slips")]
 public class PartnerSlipEntity
 {
+    [Key]
     [Column("id")]
     public Guid Id { get; set; }
 
     [Column("code")]
-    public string Code { get; set; } = null!;
+    public string Code { get; set; } = string.Empty;
 
     [Column("date")]
     public DateTime Date { get; set; }
 
     [Column("slip_type")]
-    public string SlipType { get; set; } = null!;
+    public string SlipType { get; set; } = string.Empty;
 
     [Column("office_id")]
     public Guid? OfficeId { get; set; }
@@ -48,6 +50,12 @@ public class PartnerSlipEntity
 
     [Column("updated_at")]
     public DateTime UpdatedAt { get; set; }
+
+    [ForeignKey(nameof(OfficeId))]
+    public OfficeEntity? Office { get; set; }
+
+    [ForeignKey(nameof(UserId))]
+    public UserEntity? User { get; set; }
 
     public ICollection<PartnerSlipLineEntity> Lines { get; set; } = new List<PartnerSlipLineEntity>();
 }

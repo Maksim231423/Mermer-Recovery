@@ -1,4 +1,5 @@
 ﻿using System;
+using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 using System.Text.Json.Serialization; // <-- ДОБАВЛЕНО
 
@@ -7,6 +8,7 @@ namespace Mermer.Data.Postgres.Entities;
 [Table("partner_slip_lines")]
 public class PartnerSlipLineEntity
 {
+    [Key]
     [Column("id")]
     public Guid Id { get; set; }
 
@@ -28,10 +30,16 @@ public class PartnerSlipLineEntity
     [Column("credit_currency_id")]
     public Guid? CreditCurrencyId { get; set; }
 
-    // --- РАЗРЫВАЕМ БЕСКОНЕЧНЫЙ ЦИКЛ ДЛЯ API ---
+    [ForeignKey(nameof(PartnerSlipId))]
     [JsonIgnore]
-    public PartnerSlipEntity PartnerSlip { get; set; } = null!;
+    public PartnerSlipEntity? PartnerSlip { get; set; }
 
-    [JsonIgnore]
+    [ForeignKey(nameof(PartnerId))]
     public PartnerEntity? Partner { get; set; }
+
+    [ForeignKey(nameof(DebitCurrencyId))]
+    public CurrencyEntity? DebitCurrency { get; set; }
+
+    [ForeignKey(nameof(CreditCurrencyId))]
+    public CurrencyEntity? CreditCurrency { get; set; }
 }

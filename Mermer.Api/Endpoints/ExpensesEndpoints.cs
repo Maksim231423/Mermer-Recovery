@@ -20,7 +20,6 @@ public static class ExpensesEndpoints
     {
         var group = routes.MapGroup("/api/expenses").WithTags("Expenses");
 
-        // 1. Получение списка всех статей с пагинацией
         group.MapGet("/", async (int? limit, int? offset, MermerDbContext db, CancellationToken ct) =>
         {
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 500) : 200;
@@ -46,7 +45,6 @@ public static class ExpensesEndpoints
             return Results.Ok(result);
         });
 
-        // 2. Получение одной статьи по ID
         group.MapGet("/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
         {
             if (!Guid.TryParse(id, out var guidId))
@@ -67,7 +65,6 @@ public static class ExpensesEndpoints
             });
         });
 
-        // 3. Создание / сохранение новой статьи
         Func<HttpRequest, MermerDbContext, CancellationToken, Task<IResult>> saveExpenseHandler = async (request, db, ct) =>
         {
             using var reader = new StreamReader(request.Body);
@@ -146,7 +143,6 @@ public static class ExpensesEndpoints
         group.MapPost("/", saveExpenseHandler);
         group.MapPut("/{id}", saveExpenseHandler);
 
-        // 4. Удаление статьи
         group.MapDelete("/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
         {
             if (Guid.TryParse(id, out var guidId))
@@ -162,7 +158,6 @@ public static class ExpensesEndpoints
             return Results.NoContent();
         });
 
-        // 5. Фасеты для выпадающих списков (оптимизированный вариант)
         group.MapGet("/facets", async (HttpContext context, MermerDbContext db, CancellationToken ct) =>
         {
             var result = new Dictionary<string, Dictionary<string, int>>();

@@ -13,11 +13,11 @@
             <!-- Нижние кнопки управления -->
             <Border DockPanel.Dock="Bottom" Padding="0,20,30,25" Background="Transparent">
                 <StackPanel HorizontalAlignment="Right" Orientation="Horizontal"
-                    dx:ThemeManager.ThemeName="Office2013DarkGray;Touch">
+                            dx:ThemeManager.ThemeName="Office2013DarkGray;Touch">
                     <Button MinWidth="130" MinHeight="36" Margin="0,0,12,0" IsDefault="True"
-                  Content="Save" Command="{Binding SaveCommand}"/>
+                            Content="Save" Command="{Binding SaveCommand}"/>
                     <Button MinWidth="130" MinHeight="36" IsCancel="True"
-                  Content="Cancel" Command="{Binding CloseCommand}"/>
+                            Content="Cancel" Command="{Binding CloseCommand}"/>
                 </StackPanel>
             </Border>
 
@@ -27,29 +27,29 @@
 
                     <!-- Главный заголовок -->
                     <TextBlock Text="Connection &amp; Synchronization" 
-                       FontSize="22" 
-                       FontWeight="Bold" 
-                       Foreground="#0F172A" 
-                       Margin="0,0,0,4"/>
+                               FontSize="22" 
+                               FontWeight="Bold" 
+                               Foreground="#0F172A" 
+                               Margin="0,0,0,4"/>
 
                     <TextBlock Text="Configure local database API and cloud VDS synchronization parameters." 
-                     FontSize="13" 
-                     Foreground="#475569" 
-                     Margin="0,0,0,20"/>
+                               FontSize="13" 
+                               Foreground="#475569" 
+                               Margin="0,0,0,20"/>
 
                     <!-- СЕКЦИЯ 1: Локальная база / Сервер на кассе -->
                     <Border BorderBrush="#CBD5E1" BorderThickness="1" CornerRadius="4" Padding="16" Margin="0,0,0,16" Background="#F8FAFC">
                         <StackPanel Orientation="Vertical">
                             <TextBlock Text="1. Local Database Engine (Local API)" 
-                         FontSize="14" 
-                         FontWeight="Bold" 
-                         Foreground="#0F172A" 
-                         Margin="0,0,0,4"/>
+                                       FontSize="14" 
+                                       FontWeight="Bold" 
+                                       Foreground="#0F172A" 
+                                       Margin="0,0,0,4"/>
 
                             <TextBlock Text="Point to the local API service running on this terminal or main station." 
-                         FontSize="12" 
-                         Foreground="#64748B" 
-                         Margin="0,0,0,10"/>
+                                       FontSize="12" 
+                                       Foreground="#64748B" 
+                                       Margin="0,0,0,10"/>
 
                             <Grid Margin="0,0,0,8">
                                 <Grid.ColumnDefinitions>
@@ -58,17 +58,17 @@
                                 </Grid.ColumnDefinitions>
 
                                 <dxe:TextEdit Grid.Column="0"
-                              EditValue="{Binding ServiceAddress, UpdateSourceTrigger=PropertyChanged, Mode=TwoWay}"
-                              NullText="http://127.0.0.1:5050"
-                              Height="36"
-                              FontSize="13"
-                              Margin="0,0,10,0"/>
+                                              EditValue="{Binding ServiceAddress, UpdateSourceTrigger=PropertyChanged, Mode=TwoWay}"
+                                              NullText="http://127.0.0.1:5050"
+                                              Height="36"
+                                              FontSize="13"
+                                              Margin="0,0,10,0"/>
 
                                 <Button Grid.Column="1" 
-                        Content="Test Local" 
-                        MinWidth="110" 
-                        Height="36" 
-                        Command="{Binding TestLocalConnectionCommand}"/>
+                                        Content="Test Local" 
+                                        MinWidth="110" 
+                                        Height="36" 
+                                        Command="{Binding TestLocalConnectionCommand}"/>
                             </Grid>
                         </StackPanel>
                     </Border>
@@ -77,34 +77,60 @@
                     <Border BorderBrush="#CBD5E1" BorderThickness="1" CornerRadius="4" Padding="16" Margin="0,0,0,10" Background="#F8FAFC">
                         <StackPanel Orientation="Vertical">
                             <dxe:CheckEdit Content="Enable Cloud Synchronization (Remote VDS)" 
-                             IsChecked="{Binding IsSyncEnabled, Mode=TwoWay}"
-                             FontWeight="Bold"
-                             Foreground="#0F172A"
-                             Margin="0,0,0,6"/>
+                                           IsChecked="{Binding IsSyncEnabled, Mode=TwoWay}"
+                                           FontWeight="Bold"
+                                           Foreground="#0F172A"
+                                           Margin="0,0,0,6"/>
 
                             <TextBlock Text="When internet is available, local transactions are seamlessly synchronized to VDS." 
-                         FontSize="12" 
-                         Foreground="#64748B" 
-                         Margin="0,0,0,10"/>
+                                       FontSize="12" 
+                                       Foreground="#64748B" 
+                                       Margin="0,0,0,10"/>
 
-                            <Grid Margin="0,0,0,4" IsEnabled="{Binding IsSyncEnabled}">
+                            <Grid Margin="0,0,0,10" IsEnabled="{Binding IsSyncEnabled}">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
 
                                 <dxe:TextEdit Grid.Column="0"
-                              EditValue="{Binding VdsServerUrl, UpdateSourceTrigger=PropertyChanged, Mode=TwoWay}"
-                              NullText="https://vds.mermer-erp.com:5050"
-                              Height="36"
-                              FontSize="13"
-                              Margin="0,0,10,0"/>
+                                              EditValue="{Binding VdsServerUrl, UpdateSourceTrigger=PropertyChanged, Mode=TwoWay}"
+                                              NullText="http://localhost:5050"
+                                              Height="36"
+                                              FontSize="13"
+                                              Margin="0,0,10,0"/>
 
                                 <Button Grid.Column="1" 
-                        Content="Test VDS" 
-                        MinWidth="110" 
-                        Height="36" 
-                        Command="{Binding TestVdsConnectionCommand}"/>
+                                        Content="Test VDS" 
+                                        MinWidth="110" 
+                                        Height="36" 
+                                        Command="{Binding TestVdsConnectionCommand}"/>
+                            </Grid>
+
+                            <!-- ВЫБОР ИНТЕРВАЛА СИНХРОНИЗАЦИИ -->
+                            <Grid Margin="0,0,0,4" IsEnabled="{Binding IsSyncEnabled}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="120"/>
+                                </Grid.ColumnDefinitions>
+
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Text="Sync Interval (Seconds):" 
+                                               FontSize="13" 
+                                               FontWeight="SemiBold" 
+                                               Foreground="#334155"/>
+                                    <TextBlock Text="Time between automatic background sync cycles (min 5s)." 
+                                               FontSize="11" 
+                                               Foreground="#64748B"/>
+                                </StackPanel>
+
+                                <dxe:SpinEdit Grid.Column="1"
+                                              EditValue="{Binding SyncIntervalSeconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              MinValue="5"
+                                              MaxValue="3600"
+                                              IsFloatValue="False"
+                                              Height="36"
+                                              FontSize="13"/>
                             </Grid>
                         </StackPanel>
                     </Border>

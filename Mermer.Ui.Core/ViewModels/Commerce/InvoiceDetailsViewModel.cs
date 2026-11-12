@@ -44,6 +44,7 @@ public class InvoiceDetailsViewModel :
     private InvoiceType _newInvoiceType = InvoiceType.Sales;
     private PartnerBalanceResult _partnerBalanceToDate;
     private string[] _priceGroupNames;
+    private bool _isInitializing;
 
     public InvoiceDetailsViewModel(
         CopyCreate copyCreate,
@@ -90,7 +91,10 @@ public class InvoiceDetailsViewModel :
         set
         {
             base.Details = value;
-            UpdatePartnerBalance();
+            if (!_isInitializing)
+            {
+                UpdatePartnerBalance();
+            }
         }
     }
 
@@ -111,7 +115,7 @@ public class InvoiceDetailsViewModel :
             if (PartnerBalanceToDate == null) return null;
             return new PartnerBalanceResult
             {
-                Balance = PartnerBalanceToDate.Balance + Details.DisplayDebitCreditTotal
+                Balance = PartnerBalanceToDate.Balance + (Details?.DisplayDebitCreditTotal ?? 0m)
             };
         }
     }
@@ -124,11 +128,22 @@ public class InvoiceDetailsViewModel :
 
     public void Prepare(InvoiceType parameter) => _newInvoiceType = parameter;
 
-    protected override async Task LoadFacetsAsync()
+    protected override Task LoadFacetsAsync()
     {
-        await base.LoadFacetsAsync();
-        var facets = await _stocksRepository.GetFacets("PriceGroupNames");
-        PriceGroupNames = facets["PriceGroupNames"].Select(x => x.Key).ToArray();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var facets = await _stocksRepository.GetFacets("PriceGroupNames");
+                if (facets != null && facets.ContainsKey("PriceGroupNames"))
+                {
+                    InvokeOnMainThread(() => PriceGroupNames = facets["PriceGroupNames"].Select(x => x.Key).ToArray());
+                }
+            }
+            catch { }
+        });
+
+        return Task.CompletedTask;
     }
 
     protected override Task PreLoad()
@@ -145,59 +160,73 @@ public class InvoiceDetailsViewModel :
 
     protected override async Task OnLoad()
     {
-        await base.OnLoad();
-        if (!string.IsNullOrEmpty(ItemId)) return;
+        _isInitializing = true;
+        try
+        {
+            await base.OnLoad();
+            if (!string.IsNullOrEmpty(ItemId)) return;
 
-        Details.InvoiceType = _newInvoiceType;
-        Details.OfficeId = AppSettings.DefaultOfficeId;
-        Details.DepositoryId = AppSettings.DefaultDepositoryId;
-        Details.StockPriceGroup = AppSettings.DefaultStockPriceGroup;
-        Details.DueDate = DateTime.Now.AddDays(AppSettings.DefaultDueDateInDays).Date;
+            Details.InvoiceType = _newInvoiceType;
+            Details.OfficeId = AppSettings.DefaultOfficeId;
+            Details.DepositoryId = AppSettings.DefaultDepositoryId;
+            Details.StockPriceGroup = AppSettings.DefaultStockPriceGroup;
+            Details.DueDate = DateTime.Now.AddDays(AppSettings.DefaultDueDateInDays).Date;
+        }
+        finally
+        {
+            _isInitializing = false;
+        }
     }
 
     protected override async Task PostLoad()
     {
-        await base.PostLoad();
-
-        if (Details.Payments == null) Details.Payments = new WatchedObservableCollection<InvoicePayment>();
-        if (Details.Changes == null) Details.Changes = new WatchedObservableCollection<InvoicePayment>();
-        if (Details.Discounts == null) Details.Discounts = new WatchedObservableCollection<InvoiceDiscount>();
-
-        // --- ГАРАНТИРОВАННАЯ АКТУАЛИЗАЦИЯ КУРСОВ ВАЛЮТ ДЛЯ ПРОДАЖИ ---
-        if (string.IsNullOrEmpty(ItemId) || Details.CurrencyConvertions == null || !Details.CurrencyConvertions.Any())
+        _isInitializing = true;
+        try
         {
-            if (Details.CurrencyConvertions == null)
-                Details.CurrencyConvertions = new WatchedObservableCollection<CurrencyConvertion>();
+            await base.PostLoad();
 
-            IEnumerable<Currency> currenciesSource = Currencies?.List;
+            // 1. Быстрая инициализация коллекций без лишних пересозданий
+            Details.Payments ??= new WatchedObservableCollection<InvoicePayment>();
+            Details.Changes ??= new WatchedObservableCollection<InvoicePayment>();
+            Details.Discounts ??= new WatchedObservableCollection<InvoiceDiscount>();
+            Details.CurrencyConvertions ??= new WatchedObservableCollection<CurrencyConvertion>();
 
-            // Если в Reference курсы не загрузились — запрашиваем через стандартный IRepository<Currency>
-            if (currenciesSource == null || !currenciesSource.Any(c => c.Rates != null && c.Rates.Any(r => r.Multiplier != 1m || r.Divider != 1m)))
+            // 2. Параллельный прогрев кэша товаров для строк без UnitId
+            if (Details?.Lines != null && Details.Lines.Any())
             {
-                try
+                var linesWithoutUnit = Details.Lines
+                    .Where(l => string.IsNullOrEmpty(l.UnitId) && !string.IsNullOrEmpty(l.StockId))
+                    .ToList();
+
+                if (linesWithoutUnit.Any())
                 {
-                    if (MvvmCross.Platform.Mvx.CanResolve<IRepository<Currency>>())
+                    var distinctStockIds = linesWithoutUnit.Select(l => l.StockId).Distinct().ToList();
+                    await Task.WhenAll(distinctStockIds.Select(id => GetFromStocksCacheAsync(id)));
+
+                    foreach (var line in linesWithoutUnit)
                     {
-                        var repo = MvvmCross.Platform.Mvx.Resolve<IRepository<Currency>>();
-                        var fresh = await repo.GetAsync();
-                        if (fresh != null && fresh.Any())
-                        {
-                            currenciesSource = fresh;
-                        }
+                        var stock = await GetFromStocksCacheAsync(line.StockId);
+                        line.UnitId = stock?.UnitId
+                                   ?? stock?.Units?.FirstOrDefault(u => u.IsDefault)?.Id
+                                   ?? stock?.Units?.FirstOrDefault()?.Id;
                     }
                 }
-                catch { }
+
+                foreach (var line in Details.Lines)
+                {
+                    line.UpdateStockUnitConvertion();
+                    line.UpdateCurrencyConvertion();
+                }
             }
 
-            var activeCurrencies = currenciesSource?.Where(c => !c.IsDisabled).ToList();
-
+            // 3. Актуализация валютных конвертаций документа
+            var activeCurrencies = Currencies?.List?.Where(c => !c.IsDisabled).ToList();
             if (activeCurrencies != null && activeCurrencies.Any())
             {
                 var docDate = Details.Date != default ? Details.Date.Date : DateTime.Today;
 
                 foreach (var currency in activeCurrencies)
                 {
-                    // Ищем курс на дату документа или берем самый последний доступный курс
                     CurrencyRate matchedRate = null;
                     if (currency.Rates != null && currency.Rates.Any())
                     {
@@ -228,85 +257,63 @@ public class InvoiceDetailsViewModel :
                     }
                 }
 
-                // Удаляем отключенные и пустые валюты из списка конверсий
-                var activeIds = new HashSet<string>(activeCurrencies.Select(c => c.Id), StringComparer.OrdinalIgnoreCase);
-                var toRemove = Details.CurrencyConvertions.Where(c => string.IsNullOrEmpty(c.CurrencyId) || !activeIds.Contains(c.CurrencyId)).ToList();
-                foreach (var item in toRemove)
-                {
-                    Details.CurrencyConvertions.Remove(item);
-                }
-
                 Details.UpdateCurrencyConvertion();
-
             }
-        }
 
-        // 1. Принудительно актуализируем конвертацию каждой строки оплаты
-        if (Details.Payments != null)
-        {
-            foreach (var p in Details.Payments)
+            // 4. Актуализация конвертации строк оплаты
+            if (Details.Payments != null)
             {
-                p.UpdateCurrencyConvertion();
-                p.UpdateDisplayCurrencyId(false);
+                foreach (var p in Details.Payments)
+                {
+                    p.UpdateCurrencyConvertion();
+                    p.UpdateDisplayCurrencyId(false);
+                }
             }
-        }
 
-        if (Details.Changes != null)
-        {
-            foreach (var c in Details.Changes)
+            if (Details.Changes != null)
             {
-                c.UpdateCurrencyConvertion();
-                c.UpdateDisplayCurrencyId(false);
+                foreach (var c in Details.Changes)
+                {
+                    c.UpdateCurrencyConvertion();
+                    c.UpdateDisplayCurrencyId(false);
+                }
+            }
+
+            // 5. Пакетное обновление связанных свойств интерфейса
+            RaisePropertyChanged(() => Details);
+            RaisePropertyChanged(() => PartnerBalanceToDate);
+            RaisePropertyChanged(() => PartnerBalanceResult);
+            RaisePropertyChanged(() => CanCreateAggregatedStockOrder);
+            RaisePropertyChanged(() => CanShowNewPrices);
+
+            StockSearcher.PriceGroup = Details.StockPriceGroup;
+            StockSearcher.ShowLastPurchasePrice = AppSettings.ShowLastPurchasePriceOnSearch;
+            StockSearcher.WarehouseId = Details.WarehouseId;
+
+            Partners.Filter = x => !x.IsDisabled || x.Id == Details?.PartnerId;
+            Offices.Filter = x => !x.IsDisabled || x.Id == Details?.OfficeId;
+
+            UpdateFacilityFilters();
+
+            if (string.IsNullOrEmpty(ItemId) && (Details.Lines == null || Details.Lines.Count == 0))
+            {
+                this.IsDirty = false;
             }
         }
+        finally
+        {
+            _isInitializing = false;
+        }
 
-        RaisePropertyChanged(() => CanCreateAggregatedStockOrder);
-        RaisePropertyChanged(() => CanShowNewPrices);
-
-        // 2. Уведомляем модель о пересчете расчетных полей и статуса оплаты IsPayed
-        Details.RaisePropertyChanged("ActionTotal");
-        Details.RaisePropertyChanged("ActionGrandTotal");
-        Details.RaisePropertyChanged("ActionPaymentsTotal");
-        Details.RaisePropertyChanged("ActionChangesTotal");
-        Details.RaisePropertyChanged("ActionLeftTotal");
-        Details.RaisePropertyChanged("IsPayed");
-        Details.RaisePropertyChanged("IsCash");
-        Details.RaisePropertyChanged("IsDebitCredit");
-
-        // 3. Уведомляем UI о строковых/отображаемых значениях
-        Details.RaisePropertyChanged("DisplayDiscountsTotal");
-        Details.RaisePropertyChanged("DisplayGrandTotal");
-        Details.RaisePropertyChanged("DisplayPaymentsTotal");
-        Details.RaisePropertyChanged("DisplayChangesTotal");
-        Details.RaisePropertyChanged("DisplayLeftTotal");
-        Details.RaisePropertyChanged("DisplayDebitCreditTotal");
-        Details.RaisePropertyChanged("DisplayCreditTotal");
-        Details.RaisePropertyChanged("DisplayDebitTotal");
-
-        RaisePropertyChanged(() => PartnerBalanceToDate);
-        RaisePropertyChanged(() => PartnerBalanceResult);
-
-        StockSearcher.PriceGroup = Details.StockPriceGroup;
-
-        Partners.Filter = x => !x.IsDisabled || x.Id == Details?.PartnerId;
-        Offices.Filter = x => !x.IsDisabled || x.Id == Details?.OfficeId;
-
-        UpdateFacilityFilters();
-
-        // Запускаем расчет остатка партнера при загрузке окна
+        // 6. Запуск расчета сальдо строго один раз после полной готовности формы
         UpdatePartnerBalance();
-
-        if (string.IsNullOrEmpty(ItemId) && (Details.Lines == null || Details.Lines.Count == 0))
-        {
-            this.IsDirty = false;
-        }
     }
 
     protected override void Details_PropertyChanged(object sender, PropertyChangedEventArgs e)
     {
         base.Details_PropertyChanged(sender, e);
+        if (_isInitializing) return;
 
-        // Передаем бэкенду правильный системный ID валюты
         if (e.PropertyName == "DisplayCurrencyId")
         {
             StockSearcher.CurrencyId = Details.DisplayCurrencyId;
@@ -317,6 +324,12 @@ public class InvoiceDetailsViewModel :
                 StockSearcher.SearchText = "";
                 StockSearcher.SearchText = temp;
             }
+        }
+
+        if (e.PropertyName == "WarehouseId")
+        {
+            StockSearcher.WarehouseId = Details.WarehouseId;
+            UpdatePartnerBalance();
         }
 
         if (e.PropertyName == "Date" || e.PropertyName == "PartnerId" || e.PropertyName == "WarehouseId" || e.PropertyName == "DisplayCurrencyId")
@@ -344,15 +357,12 @@ public class InvoiceDetailsViewModel :
             if (x.IsDisabled && !string.Equals(x.Id, Details?.WarehouseId, StringComparison.OrdinalIgnoreCase))
                 return false;
 
-            // Если офис в документе не выбран — показываем все склады
             if (string.IsNullOrWhiteSpace(Details?.OfficeId))
                 return true;
 
-            // Если склад общий (нет привязки к офису) — показываем
             if (string.IsNullOrWhiteSpace(x.OfficeId))
                 return true;
 
-            // Иначе проверяем совпадение с выбранным офисом
             return string.Equals(x.OfficeId, Details.OfficeId, StringComparison.OrdinalIgnoreCase);
         };
 
@@ -361,70 +371,76 @@ public class InvoiceDetailsViewModel :
             if (x.IsDisabled && !string.Equals(x.Id, Details?.DepositoryId, StringComparison.OrdinalIgnoreCase))
                 return false;
 
-            // Если офис в документе не выбран — показываем все кассы
             if (string.IsNullOrWhiteSpace(Details?.OfficeId))
                 return true;
 
-            // Если касса общая — показываем
             if (string.IsNullOrWhiteSpace(x.OfficeId))
                 return true;
 
-            // Иначе проверяем совпадение с выбранным офисом
             return string.Equals(x.OfficeId, Details.OfficeId, StringComparison.OrdinalIgnoreCase);
         };
 
-        // Уведомляем интерфейс об обновлении списков
         Warehouses?.RaisePropertyChanged("List");
         Depositories?.RaisePropertyChanged("List");
     }
 
-    private async void UpdatePartnerBalance()
+    private void UpdatePartnerBalance()
     {
-        if (Details != null && !string.IsNullOrEmpty(Details.PartnerId) && !string.IsNullOrEmpty(Details.OfficeId))
+        if (Details == null || string.IsNullOrEmpty(Details.PartnerId) || string.IsNullOrEmpty(Details.OfficeId))
+        {
+            PartnerBalanceToDate = null;
+            return;
+        }
+
+        var officeId = Details.OfficeId;
+        var partnerId = Details.PartnerId;
+        var date = Details.Date;
+        var docId = Details.Id;
+        var displayCurrencyId = Details.DisplayCurrencyId;
+
+        Task.Run(async () =>
         {
             try
             {
-                var balanceToDateAsync = _partnerBalancesRepository != null
-                    ? await _partnerBalancesRepository.GetBalanceToDateAsync(Details.OfficeId, Details.PartnerId, Details.Date, Details.Id)
+                var balanceResult = _partnerBalancesRepository != null
+                    ? await _partnerBalancesRepository.GetBalanceToDateAsync(officeId, partnerId, date, docId)
                     : null;
 
-                decimal rawBalance = balanceToDateAsync?.Balance ?? 0m;
-
-                // Безопасное получение курса: если конвертации нет, берем 1:1
+                decimal rawBalance = balanceResult?.Balance ?? 0m;
                 decimal multiplier = 1m;
                 decimal divider = 1m;
 
-                if (!string.IsNullOrEmpty(Details.DisplayCurrencyId) && Details.CurrencyConvertions != null)
+                if (!string.IsNullOrEmpty(displayCurrencyId) && Details?.CurrencyConvertions != null)
                 {
-                    var conversion = Details.CurrencyConvertions.FirstOrDefault(x => x.CurrencyId == Details.DisplayCurrencyId);
-                    if (conversion != null)
+                    var conv = Details.CurrencyConvertions.FirstOrDefault(x => x.CurrencyId == displayCurrencyId);
+                    if (conv != null)
                     {
-                        multiplier = conversion.Multiplier != 0 ? conversion.Multiplier : 1m;
-                        divider = conversion.Divider != 0 ? conversion.Divider : 1m;
+                        multiplier = conv.Multiplier != 0 ? conv.Multiplier : 1m;
+                        divider = conv.Divider != 0 ? conv.Divider : 1m;
                     }
                 }
 
-                PartnerBalanceToDate = new PartnerBalanceResult
+                var finalBalance = rawBalance / multiplier * divider;
+
+                InvokeOnMainThread(() =>
                 {
-                    Balance = rawBalance / multiplier * divider
-                };
+                    PartnerBalanceToDate = new PartnerBalanceResult { Balance = finalBalance };
+                });
             }
             catch
             {
-                PartnerBalanceToDate = new PartnerBalanceResult { Balance = 0m };
+                InvokeOnMainThread(() =>
+                {
+                    PartnerBalanceToDate = new PartnerBalanceResult { Balance = 0m };
+                });
             }
-        }
-        else
-        {
-            PartnerBalanceToDate = null;
-        }
+        });
     }
 
     protected override async Task<bool> OnSaveAsync()
     {
         try
         {
-            // 1. Check required fields
             if (string.IsNullOrWhiteSpace(Details.OfficeId) || Details.OfficeId == Guid.Empty.ToString())
             {
                 throw new Exception("Office is not selected! Please select an office.");
@@ -440,11 +456,9 @@ public class InvoiceDetailsViewModel :
                 throw new Exception("Depository/Account is not selected! Please select a depository.");
             }
 
-            // Partner теперь НЕ обязателен. 
-            // Но если клиент не выбран, запрещено оформлять продажу в долг/кредит!
             if (string.IsNullOrWhiteSpace(Details.PartnerId) || Details.PartnerId == Guid.Empty.ToString())
             {
-                Details.PartnerId = null; // сбрасываем пустую строку/Guid.Empty в null
+                Details.PartnerId = null;
 
                 if (Details.DebitCreditLeftAmount || Details.DisplayLeftTotal > 0)
                 {
@@ -452,7 +466,6 @@ public class InvoiceDetailsViewModel :
                 }
             }
 
-            // 2. Payment verification
             if (Details.DisplayLeftTotal > 0 && !Details.DebitCreditLeftAmount)
             {
                 throw new Exception("Payment has not been fully received! Please enter the payment amount or check the 'Debit/Credit Left Amount' box.");
@@ -526,14 +539,12 @@ public class InvoiceDetailsViewModel :
             var result = await NavigationService.Navigate<InvoicePaymentDialogViewModel, IpdParams, IpdParams>(parameters);
             if (result == null) return;
 
-            // 1. Обновляем Скидки
             if (Details.DisplayDiscountsTotal != result.DiscountsTotal)
             {
                 Details.Discounts.Clear();
                 if (result.DiscountsTotal > 0M)
                 {
                     var currencyConvertion = Details.CurrencyConverter(Details.DisplayCurrencyId);
-
                     decimal baseDiscountAmount = result.DiscountsTotal * currencyConvertion.Multiplier / currencyConvertion.Divider;
 
                     Details.Discounts.Add(new InvoiceDiscount
@@ -544,18 +555,15 @@ public class InvoiceDetailsViewModel :
                 }
             }
 
-            // 2. Обновляем Оплату (без умножения на rate!)
             if (Details.DisplayPaymentsTotal != result.PaymentsTotal)
             {
                 Details.Payments.Clear();
                 if (result.PaymentsTotal > 0M)
                 {
-                    
                     Details.Payments.Add(new InvoicePayment { Amount = result.PaymentsTotal, CurrencyId = Details.DisplayCurrencyId });
                 }
             }
 
-            // 3. Обновляем остаток (без умножения на rate!)
             if (Details.DisplayChangesTotal != result.ChangesTotal)
             {
                 Details.Changes.Clear();
@@ -680,7 +688,6 @@ public class InvoiceDetailsViewModel :
 
     public override async Task<bool> OnCloseAsync()
     {
-        // 1. Если это совершенно новая накладная: нет добавленных товаров и не выбран контрагент — закрываем без лишних вопросов
         bool isBrandNewAndEmpty = string.IsNullOrEmpty(ItemId)
                                   && (Details?.Lines == null || Details.Lines.Count == 0)
                                   && string.IsNullOrEmpty(Details?.PartnerId);
@@ -693,14 +700,11 @@ public class InvoiceDetailsViewModel :
             return true;
         }
 
-        // 2. Если пользователь ввел изменения (выбрал товар, клиента или изменил поля) — проверяем подтверждение
         if (!this.CheckCanClose())
         {
-            // Пользователь нажал "No" или "Cancel" — отменяем закрытие
             return false;
         }
 
-        // Пользователь нажал "Yes" — сбрасываем флаг и закрываем окно
         this.IsDirty = false;
         await this.NavigationService.Close(this);
         BaseViewModel.RequestComponentCloseAction?.Invoke(this);

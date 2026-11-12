@@ -57,5 +57,14 @@ public class StockTransferEntity
     [Column("updated_at")]
     public DateTimeOffset UpdatedAt { get; set; }
 
+    [ForeignKey(nameof(WarehouseId))]
+    public WarehouseEntity? Warehouse { get; set; }
+
+    [ForeignKey(nameof(DestinationWarehouseId))]
+    public WarehouseEntity? DestinationWarehouse { get; set; }
+
+    [ForeignKey(nameof(DisplayCurrencyId))]
+    public CurrencyEntity? DisplayCurrency { get; set; }
+
     public ICollection<StockTransferLineEntity> Lines { get; set; } = new List<StockTransferLineEntity>();
 }

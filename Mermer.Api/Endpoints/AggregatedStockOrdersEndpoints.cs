@@ -26,8 +26,8 @@ public static class AggregatedStockOrdersEndpoints
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
             int skip = offset.GetValueOrDefault(0);
 
-            DateTimeOffset startDate = from.HasValue ? ParseSafeUtcOffset(from.Value) : DateTimeOffset.UtcNow.AddMonths(-1);
-            DateTimeOffset endDate = till.HasValue ? ParseSafeUtcOffset(till.Value, isTill: true) : DateTimeOffset.UtcNow.AddDays(1);
+            DateTimeOffset startDate = from.HasValue ? new DateTimeOffset(from.Value.ToUniversalTime()) : DateTimeOffset.UtcNow.AddMonths(-1);
+            DateTimeOffset endDate = till.HasValue ? new DateTimeOffset(till.Value.ToUniversalTime()) : DateTimeOffset.UtcNow;
 
             var query = db.AggregatedStockOrders
                 .AsNoTracking()
@@ -48,7 +48,7 @@ public static class AggregatedStockOrdersEndpoints
             {
                 Id = o.Id.ToString(),
                 Code = o.Code ?? "",
-                Date = o.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО
+                Date = o.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
                 WarehouseId = o.WarehouseId?.ToString(),
                 PartnerId = o.PartnerId?.ToString(),
                 UserId = o.UserId?.ToString(),
@@ -87,7 +87,7 @@ public static class AggregatedStockOrdersEndpoints
             {
                 Id = o.Id.ToString(),
                 Code = o.Code ?? "",
-                Date = o.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО
+                Date = o.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
                 WarehouseId = o.WarehouseId?.ToString(),
                 PartnerId = o.PartnerId?.ToString(),
                 UserId = o.UserId?.ToString(),
@@ -110,7 +110,7 @@ public static class AggregatedStockOrdersEndpoints
             });
         });
 
-        // 3. ФАСЕТЫ (без изменений)
+        // 3. ФАСЕТЫ
         group.MapGet("/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
             string? fields = ctx.Request.Query["fields"].ToString();
@@ -201,15 +201,10 @@ public static class AggregatedStockOrdersEndpoints
             bool isCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
             bool isDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
 
-            // ИСПРАВЛЕННЫЙ ПАРСИНГ ДАТЫ (Без двойного вычитания)
             DateTimeOffset date = DateTimeOffset.UtcNow;
             string? dateStr = GetStringProp(root, "date", "Date");
             if (!string.IsNullOrEmpty(dateStr) && DateTimeOffset.TryParse(dateStr, out var pDate))
-            {
-                date = pDate.Offset == TimeSpan.Zero && !dateStr.EndsWith("Z", StringComparison.OrdinalIgnoreCase)
-                    ? DateTime.SpecifyKind(pDate.DateTime, DateTimeKind.Local).ToUniversalTime()
-                    : pDate.ToUniversalTime();
-            }
+                date = pDate.ToUniversalTime();
 
             var tagsList = ExtractTagsFromRawJson(root);
 
@@ -289,7 +284,7 @@ public static class AggregatedStockOrdersEndpoints
         group.MapPost("/", saveAggregatedOrderHandler);
         group.MapPut("/{id}", saveAggregatedOrderHandler);
 
-        // 5. УДАЛЕНИЕ (без изменений)
+        // 5. УДАЛЕНИЕ
         group.MapDelete("/{id}", async (string id, MermerDbContext db) =>
         {
             if (Guid.TryParse(id, out var guid))
@@ -309,22 +304,10 @@ public static class AggregatedStockOrdersEndpoints
     }
 
     #region Helpers
-    private static DateTimeOffset ParseSafeUtcOffset(DateTime dt, bool isTill = false)
-    {
-        if (dt == DateTime.MinValue) return new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc));
-        if (dt >= DateTime.MaxValue.AddDays(-2)) return new DateTimeOffset(new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Utc));
-
-        var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
-        if (isTill && dt.TimeOfDay == TimeSpan.Zero && dt.Kind != DateTimeKind.Utc)
-        {
-            utc = utc.AddDays(1);
-        }
-        return new DateTimeOffset(utc);
-    }
-
     private static List<string> ExtractTagsFromRawJson(JsonElement root)
     {
         var list = new List<string>();
+
         if (!root.TryGetProperty("tags", out var tagsProp) &&
             !root.TryGetProperty("Tags", out tagsProp))
         {

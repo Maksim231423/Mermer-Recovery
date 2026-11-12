@@ -39,9 +39,9 @@ public static class InvoicesEndpoints
             {
                 Id = i.Id,
                 Code = i.Code,
-                Type = (int)i.InvoiceType, // Числовой enum предотвращает сбой десериализации
-                InvoiceType = (int)i.InvoiceType,
-                Date = i.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"), // ИСПРАВЛЕНО НА LOCAL TIME
+                Type = i.InvoiceType.ToString(),
+                InvoiceType = i.InvoiceType.ToString(),
+                Date = i.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
                 UserId = i.UserId,
                 UserName = i.UserName,
                 IsCash = true,
@@ -124,7 +124,6 @@ public static class InvoicesEndpoints
             var inv = await repo.GetAsync(id, ct);
             if (inv is null) return Results.NotFound();
 
-            // Приводим дату к Local Time перед возвратом
             inv.Date = inv.Date.ToLocalTime();
             return Results.Json(inv, jsonOptions);
         })
@@ -157,13 +156,8 @@ public static class InvoicesEndpoints
                 pgInvoice.Tags = extractedTags;
             }
 
-            // Обеспечиваем UTC при сохранении в базу
             pgInvoice.Date = EnsureUtc(pgInvoice.Date);
 
-            // =========================================================================
-            // ПОДСТАНОВКА ЗНАЧЕНИЙ ПО УМОЛЧАНИЮ (OFFICE, WAREHOUSE, DEPOSITORY, CURRENCY)
-            // =========================================================================
-            // 1. Дефолтный офис предприятия
             var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled, ct);
             Guid? defaultOfficeId = defOffice?.Id;
 
@@ -174,7 +168,6 @@ public static class InvoicesEndpoints
 
             Guid.TryParse(pgInvoice.OfficeId, out var currentOfficeGuid);
 
-            // 2. Дефолтный склад (приоритет складу выбранного/дефолтного офиса)
             if (string.IsNullOrWhiteSpace(pgInvoice.WarehouseId) || pgInvoice.WarehouseId == Guid.Empty.ToString())
             {
                 var defWh = (currentOfficeGuid != Guid.Empty
@@ -185,7 +178,6 @@ public static class InvoicesEndpoints
                 pgInvoice.WarehouseId = defWh?.Id.ToString();
             }
 
-            // 3. Дефолтная касса (приоритет кассе выбранного/дефолтного офиса)
             if (string.IsNullOrWhiteSpace(pgInvoice.DepositoryId) || pgInvoice.DepositoryId == Guid.Empty.ToString())
             {
                 var defDep = (currentOfficeGuid != Guid.Empty
@@ -196,7 +188,6 @@ public static class InvoicesEndpoints
                 pgInvoice.DepositoryId = defDep?.Id.ToString();
             }
 
-            // 4. Дефолтная валюта накладной
             if (string.IsNullOrWhiteSpace(pgInvoice.DisplayCurrencyId) || pgInvoice.DisplayCurrencyId == Guid.Empty.ToString())
             {
                 var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
@@ -205,14 +196,10 @@ public static class InvoicesEndpoints
                 pgInvoice.DisplayCurrencyId = defCur?.Id.ToString();
             }
 
-            // =========================================================================
-            // ЗАЩИТА ВНЕШНЕГО КЛЮЧА invoice_lines_unit_id_fkey
-            // =========================================================================
             if (pgInvoice.Lines != null && pgInvoice.Lines.Any())
             {
                 foreach (var line in pgInvoice.Lines)
                 {
-                    // 1. Пустой GUID переводим в null
                     if (string.IsNullOrWhiteSpace(line.UnitId) ||
                         line.UnitId == Guid.Empty.ToString() ||
                         !Guid.TryParse(line.UnitId, out var parsedUnitGuid))
@@ -221,12 +208,9 @@ public static class InvoicesEndpoints
                         continue;
                     }
 
-                    // 2. Проверяем, существует ли переданный UnitId в таблице stock_units
                     bool unitExists = await db.StockUnits.AsNoTracking().AnyAsync(u => u.Id == parsedUnitGuid, ct);
-
                     if (!unitExists)
                     {
-                        // 3. Если такого unit_id нет, пробуем подвязать дефолтную единицу этого товара
                         Guid? fallbackUnitId = null;
                         if (Guid.TryParse(line.StockId, out var parsedStockGuid))
                         {
@@ -242,7 +226,6 @@ public static class InvoicesEndpoints
                     }
                 }
             }
-            // =========================================================================
 
             var existing = await repo.GetAsync(pgInvoice.Id, ct);
 
@@ -320,8 +303,8 @@ public static class InvoicesEndpoints
 
     private static DateTime EnsureUtc(DateTime dt)
     {
-        if (dt == DateTime.MinValue) return DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-        if (dt == DateTime.MaxValue) return DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+        if (dt == DateTime.MinValue || dt.Year <= 2000) return DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+        if (dt == DateTime.MaxValue || dt.Year >= 2099) return DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
         return dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
     }
 
