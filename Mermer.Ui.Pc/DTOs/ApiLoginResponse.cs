@@ -11,4 +11,7 @@ public class ApiLoginResponse
     public List<string> Roles { get; set; } = new();
     public bool IsAdmin { get; set; }
     public string Token { get; set; } = string.Empty;
+
+    // Права на склады, кассы и офисы:
+    public Dictionary<string, int>? AccountPrivileges { get; set; } = new();
 }

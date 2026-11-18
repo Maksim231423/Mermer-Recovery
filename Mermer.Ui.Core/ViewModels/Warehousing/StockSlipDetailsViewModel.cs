@@ -1,4 +1,5 @@
-﻿using Mermer.Authorization.Services;
+﻿using Mermer.Authorization.Enums;
+using Mermer.Authorization.Services;
 using Mermer.Data.Authorizers;
 using Mermer.Data.Storage;
 using Mermer.Enterprise.Models;
@@ -88,6 +89,24 @@ public class StockSlipDetailsViewModel :
     {
         await base.PostLoad();
 
+        // ФИЛЬТРАЦИЯ СКЛАДОВ ПО ПРАВАМ ПОЛЬЗОВАТЕЛЯ
+        if (Warehouses != null)
+        {
+            if (!LoginService.Session.IsAdmin && LoginService.Session.Accounts != null)
+            {
+                var allowedWarehouseIds = LoginService.Session.Accounts
+                    .Where(a => a.Value.HasFlag(AccountAccessLevel.Operate) || a.Value.HasFlag(AccountAccessLevel.Read))
+                    .Select(a => a.Key)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                Warehouses.Filter = w => !w.IsDisabled && allowedWarehouseIds.Contains(w.Id);
+            }
+            else
+            {
+                Warehouses.Filter = w => !w.IsDisabled;
+            }
+        }
+
         if (string.IsNullOrEmpty(ItemId))
         {
             Details.SlipType = _newSlipType;
@@ -99,7 +118,6 @@ public class StockSlipDetailsViewModel :
             }
         }
 
-        // Передаем текущую валюту шапки в поисковик товаров
         if (StockSearcher != null && !string.IsNullOrEmpty(Details.DisplayCurrencyId))
         {
             var prop = StockSearcher.GetType().GetProperty("CurrencyId");

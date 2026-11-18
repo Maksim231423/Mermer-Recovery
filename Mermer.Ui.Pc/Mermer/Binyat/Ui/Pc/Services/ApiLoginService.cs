@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Mermer.Authorization.Enums;
 using Mermer.Authorization.Models;
 using Mermer.Core.Authorization.Services;
 using Mermer.Data.Storage;
@@ -42,12 +43,23 @@ namespace Mermer.Ui.Pc.Services
 
                 var userRoles = apiResponse.Roles ?? new List<string>();
 
+                // Преобразуем словарь account_privileges из API в словарь клиентских Enums
+                var accountPrivileges = new Dictionary<string, AccountAccessLevel>(StringComparer.OrdinalIgnoreCase);
+                if (apiResponse.AccountPrivileges != null)
+                {
+                    foreach (var kvp in apiResponse.AccountPrivileges)
+                    {
+                        accountPrivileges[kvp.Key] = (AccountAccessLevel)kvp.Value;
+                    }
+                }
+
                 return new User
                 {
                     Id = apiResponse.Id,
                     Username = apiResponse.Username,
                     IsAdmin = isAdmin,
-                    Roles = userRoles
+                    Roles = userRoles,
+                    AccountPrivileges = accountPrivileges // Передаем привилегии в базовый LoginService
                 };
             }
             catch (Exception ex)

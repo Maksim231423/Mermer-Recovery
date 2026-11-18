@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -14,6 +15,12 @@ namespace Mermer.Api.Endpoints;
 
 public static class UsersEndpoints
 {
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = null,
+        PropertyNameCaseInsensitive = true
+    };
+
     public static IEndpointRouteBuilder MapUsersEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/users").WithTags("Users");
@@ -23,20 +30,22 @@ public static class UsersEndpoints
         {
             var users = await db.Users
                 .AsNoTracking()
-                .Select(u => new UserDto
-                {
-                    Id = u.Id.ToString(),
-                    Username = u.Username,
-                    Password = null, // Не отдаем хэш клиенту
-                    IsAdmin = u.IsAdmin,
-                    IsDisabled = u.IsDisabled,
-                    Description = u.Description,
-                    Roles = u.Roles ?? new List<string>(),
-                    AccountPrivileges = new Dictionary<string, int>()
-                })
+                .OrderBy(u => u.Username)
                 .ToListAsync(ct);
 
-            return Results.Ok(users);
+            var result = users.Select(u => new UserDto
+            {
+                Id = u.Id.ToString(),
+                Username = u.Username,
+                Password = null, // Не передаем хэш клиенту
+                IsAdmin = u.IsAdmin,
+                IsDisabled = u.IsDisabled,
+                Description = u.Description ?? string.Empty,
+                Roles = u.Roles ?? new List<string>(),
+                AccountPrivileges = u.AccountPrivileges
+            });
+
+            return Results.Json(result, JsonOptions);
         });
 
         // 2. GET /api/users/{id}
@@ -48,17 +57,17 @@ public static class UsersEndpoints
             var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == gId, ct);
             if (user == null) return Results.NotFound();
 
-            return Results.Ok(new UserDto
+            return Results.Json(new UserDto
             {
                 Id = user.Id.ToString(),
                 Username = user.Username,
-                Password = null, // Не отдаем хэш клиенту
+                Password = null,
                 IsAdmin = user.IsAdmin,
                 IsDisabled = user.IsDisabled,
-                Description = user.Description,
+                Description = user.Description ?? string.Empty,
                 Roles = user.Roles ?? new List<string>(),
-                AccountPrivileges = new Dictionary<string, int>()
-            });
+                AccountPrivileges = user.AccountPrivileges
+            }, JsonOptions);
         });
 
         // 3. POST /api/users
@@ -73,13 +82,12 @@ public static class UsersEndpoints
             {
                 Id = userId,
                 Username = model.Username.Trim(),
-                Password = !string.IsNullOrWhiteSpace(model.Password)
-                    ? AuthEndpoints.HashPasswordSha256Base64(model.Password)
-                    : "0DPiKuNIrrVmD8IUCuw1hQxNqZc=", // пароль "admin" по умолчанию
+                Password = ProcessIncomingPassword(model.Password),
                 IsAdmin = model.IsAdmin,
                 IsDisabled = model.IsDisabled,
-                Description = model.Description,
+                Description = model.Description ?? string.Empty,
                 Roles = model.Roles ?? new List<string>(),
+                AccountPrivileges = model.AccountPrivileges ?? new Dictionary<string, int>(),
                 CreatedAt = DateTimeOffset.UtcNow,
                 UpdatedAt = DateTimeOffset.UtcNow
             };
@@ -89,7 +97,7 @@ public static class UsersEndpoints
 
             model.Id = entity.Id.ToString();
             model.Password = null;
-            return Results.Ok(model);
+            return Results.Json(model, JsonOptions);
         });
 
         // 4. PUT /api/users/{id} (Upsert)
@@ -107,20 +115,7 @@ public static class UsersEndpoints
                 return Results.BadRequest(new { message = $"Имя пользователя '{newUsername}' уже занято." });
             }
 
-            string passwordToSave = null;
-            if (!string.IsNullOrWhiteSpace(model.Password))
-            {
-                // Если клиент уже прислал Base64 SHA-1/SHA-256 (обычно 28 или 44 символа с '=')
-                if (model.Password.EndsWith("=") && (model.Password.Length == 28 || model.Password.Length == 44))
-                {
-                    passwordToSave = model.Password;
-                }
-                else
-                {
-                    // Иначе хэшируем как SHA-1 Base64 (родной формат Couchbase/Binyat)
-                    passwordToSave = AuthEndpoints.HashPasswordSha1Base64(model.Password);
-                }
-            }
+            string? passwordToSave = ProcessIncomingPassword(model.Password);
 
             if (entity is null)
             {
@@ -128,11 +123,12 @@ public static class UsersEndpoints
                 {
                     Id = gId,
                     Username = newUsername,
-                    Password = passwordToSave ?? "0DPiKuNIrrVmD8IUCuw1hQxNqZc=", // "admin"
+                    Password = passwordToSave ?? string.Empty,
                     IsAdmin = model.IsAdmin,
                     IsDisabled = model.IsDisabled,
-                    Description = model.Description,
+                    Description = model.Description ?? string.Empty,
                     Roles = model.Roles ?? new List<string>(),
+                    AccountPrivileges = model.AccountPrivileges ?? new Dictionary<string, int>(),
                     CreatedAt = DateTimeOffset.UtcNow,
                     UpdatedAt = DateTimeOffset.UtcNow
                 };
@@ -146,10 +142,12 @@ public static class UsersEndpoints
 
                 entity.IsAdmin = model.IsAdmin;
                 entity.IsDisabled = model.IsDisabled;
-                entity.Description = model.Description;
+                entity.Description = model.Description ?? string.Empty;
                 entity.Roles = model.Roles ?? new List<string>();
+                entity.AccountPrivileges = model.AccountPrivileges ?? new Dictionary<string, int>();
                 entity.UpdatedAt = DateTimeOffset.UtcNow;
 
+                // Перезаписываем пароль, только если передан новый непустой пароль
                 if (!string.IsNullOrEmpty(passwordToSave))
                 {
                     entity.Password = passwordToSave;
@@ -160,7 +158,7 @@ public static class UsersEndpoints
 
             model.Id = entity.Id.ToString();
             model.Password = null;
-            return Results.Ok(model);
+            return Results.Json(model, JsonOptions);
         });
 
         // 5. DELETE /api/users/{id}
@@ -173,11 +171,27 @@ public static class UsersEndpoints
             if (entity == null) return Results.NotFound();
 
             entity.IsDisabled = true;
+            entity.UpdatedAt = DateTimeOffset.UtcNow;
             await db.SaveChangesAsync(ct);
-            return Results.Ok(new { success = true });
+            return Results.NoContent();
         });
 
         return app;
+    }
+
+    private static string ProcessIncomingPassword(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return string.Empty;
+
+        // Если клиент уже прислал Base64-хэш (SHA-1 = 28 символов или SHA-256 = 44 символа со знаком '=')
+        if (raw.EndsWith("=") && (raw.Length == 28 || raw.Length == 44))
+        {
+            return raw;
+        }
+
+        // Если пароль передан открытым текстом — хэшируем в SHA-1 Base64 (родной формат Couchbase/Mermer)
+        return AuthEndpoints.HashPasswordSha1Base64(raw);
     }
 
     public class UserDto

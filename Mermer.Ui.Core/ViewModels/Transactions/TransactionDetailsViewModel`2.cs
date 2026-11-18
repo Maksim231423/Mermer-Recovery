@@ -1,7 +1,9 @@
 ﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
+using Mermer.Authorization.Enums;
 using Mermer.Authorization.Services;
 using Mermer.Common.Settings;
+using Mermer.Enterprise.Models;
 using Mermer.FundsManagement.Models;
 using Mermer.FundsManagement.Models.Extenders;
 using Mermer.Transactions.Models;
@@ -9,6 +11,7 @@ using Mermer.Transactions.Models.Authorizers;
 using Mermer.Transactions.Services;
 using Mermer.Ui.Core.Helpers;
 using Mermer.Ui.Core.ViewModels.Common;
+using Mermer.Warehousing.Models;
 using Mermer.Data;
 using Mermer.Data.Authorizers;
 using Mermer.Data.Storage;
@@ -35,6 +38,7 @@ public class TransactionDetailsViewModel<T, TLine> : TransactionDetailsViewModel
     private string[] _tagNames;
     private TLine _selectedLine;
     private string _initialDisplayCurrencyId;
+
     public TransactionDetailsViewModel(
       IConfigurator configurator,
       IRepository<T> repository,
@@ -109,8 +113,8 @@ public class TransactionDetailsViewModel<T, TLine> : TransactionDetailsViewModel
             return;
         string[] strArray = new string[2]
         {
-      "GroupNames",
-      "TagNames"
+            "GroupNames",
+            "TagNames"
         };
         Dictionary<string, Dictionary<string, int>> facets = await repository.GetFacets(strArray);
         detailsViewModel.GroupNames = facets["GroupNames"].Select<KeyValuePair<string, int>, string>((Func<KeyValuePair<string, int>, string>)(x => x.Key)).ToArray<string>();
@@ -127,19 +131,19 @@ public class TransactionDetailsViewModel<T, TLine> : TransactionDetailsViewModel
     {
         await base.PostLoad();
 
+        // ── АВТОМАТИЧЕСКАЯ ФИЛЬТРАЦИЯ СКЛАДОВ, КАСС И ОФИСОВ ДЛЯ ВСЕХ ОКОН ──
+        ApplyAccountSecurityFilters();
+
         Details.CurrencyConverterRequested += CurrencyConverter;
         Details.AmountFormatterRequested += AmountFormatter;
         Details.DefaultCurrencyIdRequested += DefaultCurrencyIdProvider;
         Details.RaiseChangeEvents = false;
 
-        // Назначаем дефолтную валюту только при создании нового документа 
-        // либо если у существующего документа она пустая:
         if (string.IsNullOrEmpty(this.ItemId) || string.IsNullOrEmpty(Details.DisplayCurrencyId))
         {
             Details.DisplayCurrencyId = DefaultCurrencyIdProvider();
         }
 
-        // Запоминаем оригинальную валюту создания документа из базы
         this._initialDisplayCurrencyId = Details.DisplayCurrencyId;
 
         Details.PropertyChanged += Details_PropertyChanged;
@@ -150,7 +154,6 @@ public class TransactionDetailsViewModel<T, TLine> : TransactionDetailsViewModel
         if (Details.CurrencyConvertions == null)
             Details.CurrencyConvertions = new WatchedObservableCollection<CurrencyConvertion>();
 
-        // --- ПРИНУДИТЕЛЬНО ЗАПОЛНЯЕМ ВСЕ ВАЛЮТЫ И ИХ РЕАЛЬНЫЕ КУРСЫ ---
         if (this.Currencies?.List != null)
         {
             foreach (var currency in this.Currencies.List)
@@ -194,15 +197,48 @@ public class TransactionDetailsViewModel<T, TLine> : TransactionDetailsViewModel
         IEnumerable<string> usedCurrencyIds = Details.Lines.Select(x => x.CurrencyId).Distinct();
         Currencies.Filter = x => !x.IsDisabled || usedCurrencyIds.Contains(x.Id);
 
-        // ВАЖНО: Включаем обратно генерацию событий после завершения загрузки!
         Details.RaiseChangeEvents = true;
+    }
+
+    private void ApplyAccountSecurityFilters()
+    {
+        if (this.LoginService?.Session == null || this.LoginService.Session.IsAdmin)
+            return;
+
+        var accounts = this.LoginService.Session.Accounts;
+        if (accounts == null) return;
+
+        var allowedAccountIds = accounts
+            .Where(a => a.Value.HasFlag(AccountAccessLevel.Operate) || a.Value.HasFlag(AccountAccessLevel.Read))
+            .Select(a => a.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // 1. Склады (Warehouses)
+        var whProp = this.GetType().GetProperty("Warehouses");
+        if (whProp?.GetValue(this) is Reference<Warehouse> whRef)
+        {
+            whRef.Filter = w => !w.IsDisabled && allowedAccountIds.Contains(w.Id);
+        }
+
+        // 2. Кассы (Depositories)
+        var depProp = this.GetType().GetProperty("Depositories");
+        if (depProp?.GetValue(this) is Reference<Depository> depRef)
+        {
+            depRef.Filter = d => !d.IsDisabled && allowedAccountIds.Contains(d.Id);
+        }
+
+        // 3. Офисы (Offices)
+        var offProp = this.GetType().GetProperty("Offices");
+        if (offProp?.GetValue(this) is Reference<Office> offRef)
+        {
+            offRef.Filter = o => !o.IsDisabled && allowedAccountIds.Contains(o.Id);
+        }
     }
 
     protected override Task<bool> OnSaveAsync()
     {
         this.Details.PropertyChanged -= new PropertyChangedEventHandler(this.Details_PropertyChanged);
 
-        // Если документ уже существовал, перед отправкой на сервер возвращаем его оригинальную валюту
         if (!string.IsNullOrEmpty(this.ItemId) && !string.IsNullOrEmpty(this._initialDisplayCurrencyId))
         {
             this.Details.DisplayCurrencyId = this._initialDisplayCurrencyId;
@@ -215,7 +251,6 @@ public class TransactionDetailsViewModel<T, TLine> : TransactionDetailsViewModel
     {
         if (e.PropertyName == "DisplayCurrencyId" && !this.IsBusy)
         {
-            // Принудительно запускаем пересчет отображения строк и итогов
             this.Details.UpdateDisplayCurrencyId(true);
 
             if (this.Details.LinesCount > 0)
@@ -241,23 +276,17 @@ public class TransactionDetailsViewModel<T, TLine> : TransactionDetailsViewModel
     protected CurrencyConvertion CurrencyConverter(string currencyId)
     {
         Reference<Currency> currencies = this.Currencies;
-        Currency currency1;
-        if (currencies == null)
-        {
-            currency1 = (Currency)null;
-        }
-        else
-        {
-            IEnumerable<Currency> list = currencies.List;
-            currency1 = list != null ? list.SingleOrDefault<Currency>((Func<Currency, bool>)(x => x.Id == currencyId)) : (Currency)null;
-        }
-        Currency currency2 = currency1;
-        CurrencyRate rate = currency2 != null ? currency2.GetRate(new DateTime?(this.Details.Date)) : (CurrencyRate)null;
+        Currency currency1 = currencies?.List != null
+            ? currencies.List.SingleOrDefault(x => x.Id == currencyId)
+            : null;
+
+        CurrencyRate rate = currency1 != null ? currency1.GetRate(new DateTime?(this.Details.Date)) : null;
         if (rate == null)
-            return (CurrencyConvertion)null;
-        return new CurrencyConvertion()
+            return null;
+
+        return new CurrencyConvertion
         {
-            CurrencyId = currency2.Id,
+            CurrencyId = currency1.Id,
             Multiplier = rate.Multiplier != 0 ? rate.Multiplier : 1m,
             Divider = rate.Divider != 0 ? rate.Divider : 1m
         };
@@ -266,30 +295,18 @@ public class TransactionDetailsViewModel<T, TLine> : TransactionDetailsViewModel
     protected string AmountFormatter(Decimal amount, string currencyId)
     {
         Reference<Currency> currencies = this.Currencies;
-        Currency currency1;
-        if (currencies == null)
-        {
-            currency1 = (Currency)null;
-        }
-        else
-        {
-            IEnumerable<Currency> list = currencies.List;
-            currency1 = list != null ? list.SingleOrDefault<Currency>((Func<Currency, bool>)(x => x.Id == currencyId)) : (Currency)null;
-        }
-        Currency currency2 = currency1;
-        return currency2 == null ? (string)null : string.Format("{0:#,##0.00} {1}", (object)amount, (object)currency2.Name);
+        Currency currency1 = currencies?.List != null
+            ? currencies.List.SingleOrDefault(x => x.Id == currencyId)
+            : null;
+
+        return currency1 == null ? null : string.Format("{0:#,##0.00} {1}", amount, currency1.Name);
     }
 
     private string DefaultCurrencyIdProvider()
     {
         if (!string.IsNullOrEmpty(this.AppSettings?.DefaultCurrencyId))
             return this.AppSettings.DefaultCurrencyId;
-        Reference<Currency> currencies = this.Currencies;
-        if (currencies == null)
-            return (string)null;
-        IEnumerable<Currency> list = currencies.List;
-        if (list == null)
-            return (string)null;
-        return list.SingleOrDefault<Currency>((Func<Currency, bool>)(x => x.IsDefault))?.Id;
+
+        return this.Currencies?.List?.SingleOrDefault(x => x.IsDefault)?.Id;
     }
 }

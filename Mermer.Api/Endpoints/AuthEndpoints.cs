@@ -1,45 +1,44 @@
-﻿using Mermer.Api.DTOs;
-using Mermer.Api.Services;
-using Mermer.Data.Postgres;
+﻿using System;
+using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Security.Cryptography;
-using System.Text;
-using System.Threading.Tasks;
+using Mermer.Api.Services;
+using Mermer.Data.Postgres;
 
 namespace Mermer.Api.Endpoints;
-
-public record UserSessionDto(
-    string Id,
-    string Username,
-    string Name,
-    string Role,
-    List<string> Roles,
-    bool IsAdmin,
-    string Token
-);
 
 public record LoginRequestDto(string Username, string Password);
 public record UpdatePasswordRequestDto(string? UserId, string? CurrentPassword, string? NewPassword);
 
 public static class AuthEndpoints
 {
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = null, // PascalCase для полного соответствия моделям клиента
+        PropertyNameCaseInsensitive = true
+    };
+
     public static void MapAuthEndpoints(this IEndpointRouteBuilder routes)
     {
-        var group = routes.MapGroup("/api/auth").WithTags("Auth");
+        // =========================================================================
+        // АВТОРИЗАЦИЯ (/api/auth)
+        // =========================================================================
+        var authGroup = routes.MapGroup("/api/auth").WithTags("Auth");
 
-        // 1. Авторизация
-        group.MapPost("/login", async (
+        authGroup.MapPost("/login", async (
             LoginRequestDto request,
             MermerDbContext db,
-            IServerLicenseValidationService licenseValidator) =>
+            IServerLicenseValidationService licenseValidator,
+            CancellationToken ct) =>
         {
-            // Серверная лицензия обязательна всегда
             bool isServerValid = await licenseValidator.IsServerLicenseValidAsync();
             if (!isServerValid)
             {
@@ -52,7 +51,8 @@ public static class AuthEndpoints
             var password = request.Password ?? string.Empty;
 
             var user = await db.Users
-                .FirstOrDefaultAsync(u => u.Username.ToLower() == username.ToLower() && !u.IsDisabled);
+                .AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Username.ToLower() == username.ToLower() && !u.IsDisabled, ct);
 
             if (user == null || !VerifyPassword(user.Password, password))
             {
@@ -61,82 +61,49 @@ public static class AuthEndpoints
 
             var userRoles = user.Roles ?? new List<string>();
 
-            var response = new UserSessionDto(
-                Id: user.Id.ToString(),
-                Username: user.Username,
-                Name: !string.IsNullOrEmpty(user.Description) ? user.Description : user.Username,
-                Role: user.IsAdmin ? "Admin" : (userRoles.FirstOrDefault() ?? "User"),
-                Roles: userRoles,
-                IsAdmin: user.IsAdmin,
-                Token: Guid.NewGuid().ToString()
-            );
+            var response = new
+            {
+                Id = user.Id.ToString(),
+                Username = user.Username,
+                Name = !string.IsNullOrEmpty(user.Description) ? user.Description : user.Username,
+                Role = user.IsAdmin ? "Admin" : (userRoles.FirstOrDefault() ?? "User"),
+                Roles = userRoles,
+                IsAdmin = user.IsAdmin,
+                AccountPrivileges = user.AccountPrivileges,
+                Token = Guid.NewGuid().ToString()
+            };
 
-            return Results.Ok(response);
-        })
-        .WithName("Login")
-        .WithSummary("Авторизация пользователя в системе");
+            return Results.Json(response, JsonOptions);
+        });
 
-        // 2. Смена пароля
-        group.MapPost("/update-password", async (UpdatePasswordRequestDto request, MermerDbContext db) =>
+        authGroup.MapPost("/update-password", async (UpdatePasswordRequestDto request, MermerDbContext db, CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(request.UserId) || !Guid.TryParse(request.UserId, out var userId))
-            {
                 return Results.BadRequest(new { message = "Некорректный ID пользователя." });
-            }
 
             if (string.IsNullOrWhiteSpace(request.CurrentPassword) || string.IsNullOrWhiteSpace(request.NewPassword))
-            {
-                return Results.BadRequest(new { message = "Текущий и новый пароли обязательны." });
-            }
+                return Results.BadRequest(new { message = "Пароли не могут быть пустыми." });
 
-            var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
-            if (user == null)
-            {
-                return Results.NotFound(new { message = "Пользователь не найден." });
-            }
+            var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId, ct);
+            if (user == null) return Results.NotFound(new { message = "Пользователь не найден." });
 
             if (!VerifyPassword(user.Password, request.CurrentPassword))
-            {
-                return Results.BadRequest(new { message = "Неверный текущий пароль!" });
-            }
+                return Results.BadRequest(new { message = "Неверный текущий пароль." });
 
             user.Password = HashPasswordSha256Base64(request.NewPassword);
             user.UpdatedAt = DateTimeOffset.UtcNow;
-
-            await db.SaveChangesAsync();
+            await db.SaveChangesAsync(ct);
 
             return Results.Ok(new { message = "Пароль успешно обновлен." });
-        })
-        .WithName("UpdatePassword")
-        .WithSummary("Смена пароля текущего пользователя");
-
-        // 3. Получение ролей
-        group.MapPost("/roles", async (List<string> roleIds, MermerDbContext db) =>
-        {
-            var guids = (roleIds ?? new List<string>())
-                .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)
-                .Where(x => x.HasValue)
-                .Select(x => x!.Value)
-                .ToList();
-
-            var roles = await db.Roles
-                .AsNoTracking()
-                .Where(r => guids.Contains(r.Id) && !r.IsDisabled)
-                .ToListAsync();
-
-            return Results.Ok(roles.Select(r => new
-            {
-                Id = r.Id.ToString(),
-                Name = r.Name,
-                Authorizations = r.Authorizations
-            }));
-        })
-        .WithName("GetRoles")
-        .WithSummary("Получение ролей пользователя");
+        });
     }
 
-    private static bool VerifyPassword(string storedPassword, string providedPassword)
+    #region Password Verification & Hashing
+    public static bool VerifyPassword(string storedPassword, string providedPassword)
     {
+        if (string.IsNullOrEmpty(storedPassword) && string.IsNullOrEmpty(providedPassword))
+            return true;
+
         if (string.IsNullOrEmpty(storedPassword) || string.IsNullOrEmpty(providedPassword))
             return false;
 
@@ -163,7 +130,7 @@ public static class AuthEndpoints
         return Convert.ToBase64String(bytes);
     }
 
-    private static string HashPasswordSha256Hex(string password)
+    public static string HashPasswordSha256Hex(string password)
     {
         if (string.IsNullOrEmpty(password)) return string.Empty;
         using var sha256 = SHA256.Create();
@@ -178,4 +145,5 @@ public static class AuthEndpoints
         var bytes = sha1.ComputeHash(Encoding.UTF8.GetBytes(password));
         return Convert.ToBase64String(bytes);
     }
+    #endregion
 }

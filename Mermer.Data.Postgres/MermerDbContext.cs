@@ -176,6 +176,23 @@ public class MermerDbContext : DbContext
             e.Property(x => x.IsAdmin).HasColumnName("is_admin");
             e.Property(x => x.IsDisabled).HasColumnName("is_disabled");
             e.Property(x => x.Description).HasColumnName("description");
+            e.Property(x => x.Roles).HasColumnName("roles");
+            e.Property(x => x.AccountPrivilegesJson).HasColumnName("account_privileges").HasColumnType("jsonb");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("NOW()");
+            e.Property(x => x.UpdatedAt).HasColumnName("updated_at").HasDefaultValueSql("NOW()");
+        });
+
+        // ── Roles ──
+        modelBuilder.Entity<RoleEntity>(e =>
+        {
+            e.ToTable("roles");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.Name).HasColumnName("name").HasMaxLength(200).IsRequired();
+            e.Property(x => x.Description).HasColumnName("description");
+            e.Property(x => x.AuthorizationsJson).HasColumnName("authorizations").HasColumnType("jsonb");
+            e.Property(x => x.AccountPrivilegesJson).HasColumnName("account_privileges").HasColumnType("jsonb");
+            e.Property(x => x.IsDisabled).HasColumnName("is_disabled");
             e.Property(x => x.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("NOW()");
             e.Property(x => x.UpdatedAt).HasColumnName("updated_at").HasDefaultValueSql("NOW()");
         });

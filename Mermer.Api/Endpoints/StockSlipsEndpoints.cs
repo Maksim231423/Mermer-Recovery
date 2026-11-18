@@ -21,7 +21,7 @@ public static class StockSlipsEndpoints
     {
         var group = routes.MapGroup("/api/catalog").WithTags("Catalog");
 
-        // --- СПИСОК СКЛАДСКИХ ОРДЕРОВ ---
+        // --- 1. СПИСОК СКЛАДСКИХ ОРДЕРОВ ---
         group.MapGet("/slips", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             try
@@ -62,6 +62,7 @@ public static class StockSlipsEndpoints
 
                 var slipsQuery = db.StockSlips
                     .AsNoTracking()
+                    .Include(s => s.User)
                     .Where(s => s.Date >= startDate && s.Date <= endDate);
 
                 if (Guid.TryParse(warehouseId, out var wGuid))
@@ -77,6 +78,7 @@ public static class StockSlipsEndpoints
                         s.SlipType,
                         s.WarehouseId,
                         s.UserId,
+                        UserName = s.User != null ? s.User.Username : "admin",
                         s.IsCompleted,
                         s.DisplayTotal,
                         s.Description,
@@ -192,8 +194,8 @@ public static class StockSlipsEndpoints
                         Type = s.SlipType,
                         WarehouseId = s.WarehouseId?.ToString(),
                         UserId = s.UserId?.ToString(),
-                        UserName = "admin",
-                        TransactionUserName = "admin",
+                        UserName = s.UserName,
+                        TransactionUserName = s.UserName,
                         IsCompleted = s.IsCompleted,
                         IsDisabled = false,
                         Group = string.Empty,
@@ -219,11 +221,15 @@ public static class StockSlipsEndpoints
             }
         });
 
-        // --- ПОЛУЧЕНИЕ ПО ID ---
+        // --- 2. ПОЛУЧЕНИЕ ПО ID ---
         group.MapGet("/slips/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
         {
             if (!Guid.TryParse(id, out var guid)) return Results.NotFound();
-            var s = await db.StockSlips.Include(x => x.Lines).FirstOrDefaultAsync(x => x.Id == guid, ct);
+            var s = await db.StockSlips
+                .Include(x => x.Lines)
+                .Include(x => x.User)
+                .FirstOrDefaultAsync(x => x.Id == guid, ct);
+
             if (s == null) return Results.NotFound();
 
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
@@ -249,6 +255,8 @@ public static class StockSlipsEndpoints
                 calculatedTotal = s.Lines.Sum(l => l.ActionTotal != 0m ? l.ActionTotal : (l.Quantity * l.Price));
             }
 
+            string authorName = s.User != null ? s.User.Username : "admin";
+
             return Results.Ok(new
             {
                 Id = s.Id.ToString(),
@@ -258,8 +266,8 @@ public static class StockSlipsEndpoints
                 Type = s.SlipType,
                 WarehouseId = s.WarehouseId?.ToString(),
                 UserId = s.UserId?.ToString(),
-                UserName = "admin",
-                TransactionUserName = "admin",
+                UserName = authorName,
+                TransactionUserName = authorName,
                 IsCompleted = s.IsCompleted,
                 IsDisabled = false,
                 Group = s.GroupName ?? string.Empty,
@@ -290,7 +298,7 @@ public static class StockSlipsEndpoints
             });
         });
 
-        // --- СОХРАНЕНИЕ ---
+        // --- 3. СОХРАНЕНИЕ С ВАЛИДАЦИЕЙ СКЛАДОВ И ДАТ ---
         Func<HttpRequest, MermerDbContext, Task<IResult>> saveSlipHandler = async (request, db) =>
         {
             using var reader = new StreamReader(request.Body);
@@ -313,22 +321,46 @@ public static class StockSlipsEndpoints
             string? wIdStr = GetStringProp(root, "warehouseId", "WarehouseId");
             Guid? wId = Guid.TryParse(wIdStr, out var parsedW) && parsedW != Guid.Empty ? parsedW : null;
 
-            if (!wId.HasValue)
-            {
-                var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled);
-                var defWh = (defOffice != null
-                                ? await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => w.OfficeId == defOffice.Id && !w.IsDisabled)
-                                : null)
-                            ?? await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => !w.IsDisabled);
+            string? uIdStr = GetStringProp(root, "userId", "UserId", "authorId", "AuthorId");
+            Guid? authorUserId = Guid.TryParse(uIdStr, out var parsedU) && parsedU != Guid.Empty ? parsedU : null;
 
-                wId = defWh?.Id;
+            // Если UserId не передан напрямую, пробуем найти автора по Username
+            if (!authorUserId.HasValue)
+            {
+                string? uName = GetStringProp(root, "userName", "UserName", "author", "Author");
+                if (!string.IsNullOrEmpty(uName))
+                {
+                    var u = await db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Username.ToLower() == uName.ToLower());
+                    authorUserId = u?.Id;
+                }
             }
 
-            DateTimeOffset date = new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
+            // === СЕРВЕРНАЯ ПРОВЕРКА ПРАВ НА СКЛАД ===
+            if (authorUserId.HasValue && wId.HasValue)
+            {
+                var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == authorUserId.Value);
+                if (user != null && !user.IsAdmin)
+                {
+                    string whKey = wId.Value.ToString();
+                    if (user.AccountPrivileges.TryGetValue(whKey, out int accessLevel))
+                    {
+                        // 0 = NoAccess (Запрещено)
+                        if (accessLevel == 0)
+                        {
+                            return Results.Problem(
+                                detail: $"Операция отклонена сервером: пользователю '{user.Username}' запрещен доступ к выбранному складу.",
+                                statusCode: StatusCodes.Status403Forbidden);
+                        }
+                    }
+                }
+            }
+
+            // Обработка даты:
             string? dateStr = GetStringProp(root, "date", "Date");
+            DateTimeOffset? clientDate = null;
             if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate))
             {
-                date = new DateTimeOffset(DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc), TimeSpan.Zero);
+                clientDate = new DateTimeOffset(DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc), TimeSpan.Zero);
             }
 
             bool isCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
@@ -379,13 +411,14 @@ public static class StockSlipsEndpoints
 
             if (existing == null)
             {
-                await db.StockSlips.AddAsync(new StockSlipEntity
+                var newEntity = new StockSlipEntity
                 {
                     Id = slipId,
                     Code = code,
                     SlipType = slipType,
-                    Date = date,
+                    Date = clientDate ?? DateTimeOffset.UtcNow,
                     WarehouseId = wId,
+                    UserId = authorUserId,
                     Description = desc,
                     GroupName = groupName,
                     Tags = tagsList.ToArray(),
@@ -394,7 +427,8 @@ public static class StockSlipsEndpoints
                     CreatedAt = DateTimeOffset.UtcNow,
                     UpdatedAt = DateTimeOffset.UtcNow,
                     Lines = linesList
-                });
+                };
+                await db.StockSlips.AddAsync(newEntity);
             }
             else
             {
@@ -408,13 +442,22 @@ public static class StockSlipsEndpoints
                 existing.DisplayTotal = displayTotal;
                 existing.UpdatedAt = DateTimeOffset.UtcNow;
 
-                // 1. Удаляем старые строки из контекста
+                // ОБНОВЛЕНИЕ ДАТЫ: если передана клиентом — применяем
+                if (clientDate.HasValue && clientDate.Value.Year >= 2000)
+                {
+                    existing.Date = clientDate.Value;
+                }
+
+                if (authorUserId.HasValue)
+                {
+                    existing.UserId = authorUserId.Value;
+                }
+
                 if (existing.Lines != null && existing.Lines.Any())
                 {
                     db.StockSlipLines.RemoveRange(existing.Lines);
                 }
 
-                // 2. Добавляем новые строки в DbSet, чтобы EF пометил их как Added, а не Modified
                 if (linesList.Any())
                 {
                     await db.StockSlipLines.AddRangeAsync(linesList);
@@ -439,6 +482,7 @@ public static class StockSlipsEndpoints
             return Results.Ok();
         });
 
+        // --- ОСТАЛЬНЫЕ МЕТОДЫ (COUNT, FACETS) ---
         group.MapGet("/slips/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             var query = db.StockSlips.AsNoTracking();
@@ -551,20 +595,7 @@ public static class StockSlipsEndpoints
         });
     }
 
-    #region Safe Date Helpers
-    private static DateTimeOffset ParseCleanDateOffset(string raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw))
-            return new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
-
-        raw = raw.Replace(" ", "+").Trim();
-        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
-        {
-            return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc), TimeSpan.Zero);
-        }
-        return new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
-    }
-
+    #region Helpers
     private static DateTimeOffset ParseSafeFilterOffset(string raw, bool isTill = false, string? fromRaw = null)
     {
         if (string.IsNullOrWhiteSpace(raw))
