@@ -1,10 +1,12 @@
 ﻿using Mermer.Authorization.Services;
+using Mermer.Data;
 using Mermer.Data.Authorizers;
 using Mermer.Data.Storage;
 using Mermer.Enterprise.Models;
 using Mermer.Finance.Models;
 using Mermer.FundsManagement.Models;
 using Mermer.Mvvm.Services;
+using Mermer.Mvvm.ViewModels;
 using Mermer.Services;
 using Mermer.Transactions.Models;
 using Mermer.Transactions.Services;
@@ -12,7 +14,6 @@ using Mermer.Ui.Core.Helpers;
 using Mermer.Ui.Core.ViewModels.Transactions;
 using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
-using MvvmCross.Platform;
 using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
@@ -29,7 +30,6 @@ public class FundsSlipDetailsViewModel :
   IMvxViewModel
 {
     private FundsSlipType _newSlipType;
-    private bool _isUpdatingCurrency;
 
     public FundsSlipDetailsViewModel(
         IConfigurator configurator,
@@ -60,92 +60,148 @@ public class FundsSlipDetailsViewModel :
             }).ToArray();
 
         this.CanChangeType = true;
+
+        await Task.WhenAll(
+            Depositories.Initialize(),
+            Currencies.Initialize()
+        );
+    }
+
+    protected override async Task OnLoad()
+    {
+        await base.OnLoad();
+        if (!string.IsNullOrEmpty(ItemId))
+            return;
+
+        await Currencies.Initialize();
+
+        if (Details.CurrencyConvertions == null)
+        {
+            Details.CurrencyConvertions = new WatchedObservableCollection<CurrencyConvertion>();
+        }
+
+        var activeCurrencies = Currencies?.List?
+            .Where(c => !c.IsDisabled)
+            .ToList() ?? new List<Currency>();
+
+        var activeIds = activeCurrencies.Select(c => c.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var invalidItems = Details.CurrencyConvertions
+            .Where(c => string.IsNullOrEmpty(c.CurrencyId) || !activeIds.Contains(c.CurrencyId))
+            .ToList();
+
+        foreach (var item in invalidItems)
+        {
+            Details.CurrencyConvertions.Remove(item);
+        }
+
+        foreach (var curr in activeCurrencies)
+        {
+            if (!Details.CurrencyConvertions.Any(c => string.Equals(c.CurrencyId, curr.Id, StringComparison.OrdinalIgnoreCase)))
+            {
+                Details.CurrencyConvertions.Add(new CurrencyConvertion
+                {
+                    CurrencyId = curr.Id,
+                    Multiplier = 1m,
+                    Divider = 1m
+                });
+            }
+        }
     }
 
     protected override async Task PostLoad()
     {
         await base.PostLoad();
 
-        if (this.Depositories.List == null || !this.Depositories.List.Any())
+        if (string.IsNullOrEmpty(ItemId))
         {
-            try
-            {
-                if (Mvx.CanResolve<IRepository<Depository>>())
-                {
-                    var repo = Mvx.Resolve<IRepository<Depository>>();
-                    var list = await repo.GetAsync();
-                    if (list != null && list.Any())
-                    {
-                        this.Depositories.SuspendLoading = true;
-                        this.Depositories.Filter = null;
-                        this.Depositories.List = list.ToList();
-
-                        if (Details != null && string.IsNullOrEmpty(Details.DepositoryId))
-                        {
-                            Details.DepositoryId = list.FirstOrDefault()?.Id;
-                        }
-                    }
-                }
-            }
-            catch { }
-        }
-
-        if (Details != null)
-        {
-            if (string.IsNullOrEmpty(Details.Code))
-                Details.Code = $"FS-{DateTime.Now:yyMMddHHmmss}";
-
-            if (string.IsNullOrEmpty(Details.DepositoryId) && Depositories?.List != null)
-            {
-                Details.DepositoryId = Depositories.List.FirstOrDefault()?.Id;
-            }
+            Details.SlipType = _newSlipType;
 
             if (Currencies?.List != null)
             {
                 var activeCurrencies = Currencies.List.Where(c => !c.IsDisabled).ToList();
-
                 if (string.IsNullOrEmpty(Details.DisplayCurrencyId))
                     Details.DisplayCurrencyId = activeCurrencies.FirstOrDefault(c => c.IsDefault)?.Id ?? activeCurrencies.FirstOrDefault()?.Id;
             }
 
-            Details.RaiseChangeEvents = true;
-
-            // Синхронизируем строки документа с выбранной валютой шапки
-            SyncAllLinesDisplayCurrency();
-
-            SubscribeLines();
-
-            if (string.IsNullOrEmpty(ItemId))
+            if (string.IsNullOrEmpty(Details.DepositoryId) && Depositories?.List != null)
             {
-                Details.SlipType = _newSlipType;
+                Details.DepositoryId = Depositories.List.FirstOrDefault(d => !d.IsDisabled)?.Id ?? Depositories.List.FirstOrDefault()?.Id;
             }
 
-            RaisePropertyChanged(() => Details);
-            RaisePropertyChanged(() => Types);
-            Depositories?.RaisePropertyChanged("List");
+            if (string.IsNullOrEmpty(Details.Code))
+            {
+                Details.Code = $"FS-{DateTime.Now:yyMMddHHmmss}";
+            }
         }
-    }
 
-    /// <summary>
-    /// Передает в каждую строку объект конвертации валюты шапки и принудительно обновляет расчет
-    /// </summary>
-    private void SyncAllLinesDisplayCurrency()
-    {
-        if (Details?.Lines == null || string.IsNullOrEmpty(Details.DisplayCurrencyId))
-            return;
-
-        var displayConv = Details.CurrencyConverter(Details.DisplayCurrencyId);
-        if (displayConv == null)
-            return;
-
-        foreach (var line in Details.Lines)
+        // Заполняем актуальные курсы валют
+        if (Details != null)
         {
-            line.UpdateDisplayCurrencyConvertion(displayConv, true);
-            line.UpdateCurrencyConvertion();
+            if (Details.CurrencyConvertions == null)
+                Details.CurrencyConvertions = new WatchedObservableCollection<CurrencyConvertion>();
+
+            var activeCurrencies = Currencies?.List?.Where(c => !c.IsDisabled).ToList() ?? new List<Currency>();
+            var activeIds = activeCurrencies.Select(c => c.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var toRemove = Details.CurrencyConvertions
+                .Where(c => string.IsNullOrEmpty(c.CurrencyId) || !activeIds.Contains(c.CurrencyId))
+                .ToList();
+
+            foreach (var item in toRemove)
+                Details.CurrencyConvertions.Remove(item);
+
+            var docDate = Details.Date != default ? Details.Date.Date : DateTime.Today;
+
+            foreach (var curr in activeCurrencies)
+            {
+                CurrencyRate matchedRate = null;
+                if (curr.Rates != null && curr.Rates.Any())
+                {
+                    matchedRate = curr.Rates
+                        .Where(r => r.ValidFrom.Date <= docDate)
+                        .OrderByDescending(r => r.ValidFrom)
+                        .FirstOrDefault()
+                        ?? curr.Rates.OrderByDescending(r => r.ValidFrom).FirstOrDefault();
+                }
+
+                decimal mult = (matchedRate != null && matchedRate.Multiplier != 0m) ? matchedRate.Multiplier : 1m;
+                decimal div = (matchedRate != null && matchedRate.Divider != 0m) ? matchedRate.Divider : 1m;
+
+                var existingConv = Details.CurrencyConvertions.FirstOrDefault(c =>
+                    string.Equals(c.CurrencyId, curr.Id, StringComparison.OrdinalIgnoreCase));
+
+                if (existingConv == null)
+                {
+                    Details.CurrencyConvertions.Add(new CurrencyConvertion
+                    {
+                        CurrencyId = curr.Id,
+                        Multiplier = mult,
+                        Divider = div
+                    });
+                }
+                else if (existingConv.Multiplier == 1m && existingConv.Divider == 1m && (mult != 1m || div != 1m))
+                {
+                    existingConv.Multiplier = mult;
+                    existingConv.Divider = div;
+                }
+            }
+
+            Details.UpdateCurrencyConvertion();
+            if (Details.Lines != null)
+            {
+                foreach (var line in Details.Lines)
+                {
+                    line.UpdateCurrencyConvertion();
+                }
+            }
+
+            SubscribeLines();
         }
 
         Details.RaisePropertyChanged("ActionTotal");
         Details.RaisePropertyChanged("DisplayTotal");
+        Depositories?.RaisePropertyChanged("List");
     }
 
     private void SubscribeLines()
@@ -155,31 +211,15 @@ public class FundsSlipDetailsViewModel :
             Details.Lines.CollectionChanged -= Lines_CollectionChanged;
             Details.Lines.CollectionChanged += Lines_CollectionChanged;
 
-            var displayConv = !string.IsNullOrEmpty(Details.DisplayCurrencyId)
-                ? Details.CurrencyConverter(Details.DisplayCurrencyId)
-                : null;
-
-            foreach (var line in Details.Lines)
+            // Если открыт новый документ, в пустых строках ставим валюту шапки
+            if (string.IsNullOrEmpty(ItemId) && !string.IsNullOrEmpty(Details.DisplayCurrencyId))
             {
-                line.PropertyChanged -= Line_PropertyChanged;
-                line.PropertyChanged += Line_PropertyChanged;
-
-                if (displayConv != null)
+                foreach (var line in Details.Lines)
                 {
-                    line.UpdateDisplayCurrencyConvertion(displayConv, false);
-                }
-
-                if (string.IsNullOrEmpty(ItemId) && !string.IsNullOrEmpty(Details.DisplayCurrencyId) && string.IsNullOrEmpty(line.CurrencyId))
-                {
-                    _isUpdatingCurrency = true;
-                    try
+                    if (line.Amount == 0m || string.IsNullOrEmpty(line.CurrencyId))
                     {
                         line.CurrencyId = Details.DisplayCurrencyId;
                         line.UpdateCurrencyConvertion();
-                    }
-                    finally
-                    {
-                        _isUpdatingCurrency = false;
                     }
                 }
             }
@@ -188,78 +228,17 @@ public class FundsSlipDetailsViewModel :
 
     private void Lines_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
     {
-        if (e.OldItems != null)
+        if (e.Action == NotifyCollectionChangedAction.Add && e.NewItems != null)
         {
-            foreach (var item in e.OldItems)
+            foreach (var item in e.NewItems)
             {
-                if (item is FundsSlipLine line)
-                    line.PropertyChanged -= Line_PropertyChanged;
-            }
-        }
-
-        if (e.NewItems != null)
-        {
-            var displayConv = !string.IsNullOrEmpty(Details?.DisplayCurrencyId)
-                ? Details.CurrencyConverter(Details.DisplayCurrencyId)
-                : null;
-
-            _isUpdatingCurrency = true;
-            try
-            {
-                foreach (var item in e.NewItems)
+                if (item is FundsSlipLine line && !string.IsNullOrEmpty(Details?.DisplayCurrencyId))
                 {
-                    if (item is FundsSlipLine line)
-                    {
-                        line.PropertyChanged -= Line_PropertyChanged;
-                        line.PropertyChanged += Line_PropertyChanged;
-
-                        // Новая строка по умолчанию наследует валюту шапки
-                        if (!string.IsNullOrEmpty(Details?.DisplayCurrencyId))
-                        {
-                            line.CurrencyId = Details.DisplayCurrencyId;
-                        }
-
-                        if (displayConv != null)
-                        {
-                            line.UpdateDisplayCurrencyConvertion(displayConv, true);
-                        }
-
-                        line.UpdateCurrencyConvertion();
-                    }
+                    // Новая строка всегда наследует валюту, выбранную в шапке документа
+                    line.CurrencyId = Details.DisplayCurrencyId;
+                    line.UpdateCurrencyConvertion();
                 }
             }
-            finally
-            {
-                _isUpdatingCurrency = false;
-            }
-        }
-
-        Details?.RaisePropertyChanged("ActionTotal");
-        Details?.RaisePropertyChanged("DisplayTotal");
-    }
-
-    /// <summary>
-    /// Если пользователь вручную изменил валюту в конкретной строке таблицы — пересчитываем её по курсу
-    /// </summary>
-    private void Line_PropertyChanged(object sender, PropertyChangedEventArgs e)
-    {
-        if (_isUpdatingCurrency) return;
-
-        if (e.PropertyName == "CurrencyId" && sender is FundsSlipLine line)
-        {
-            var displayConv = !string.IsNullOrEmpty(Details?.DisplayCurrencyId)
-                ? Details.CurrencyConverter(Details.DisplayCurrencyId)
-                : null;
-
-            if (displayConv != null)
-            {
-                line.UpdateDisplayCurrencyConvertion(displayConv, true);
-            }
-
-            line.UpdateCurrencyConvertion();
-
-            Details?.RaisePropertyChanged("ActionTotal");
-            Details?.RaisePropertyChanged("DisplayTotal");
         }
     }
 
@@ -267,52 +246,30 @@ public class FundsSlipDetailsViewModel :
     {
         base.Details_PropertyChanged(sender, e);
 
-        if (_isUpdatingCurrency) return;
-
         if (e.PropertyName == "Lines")
         {
             SubscribeLines();
         }
 
-        if (e.PropertyName == "ActionTotal")
-        {
-            Details?.RaisePropertyChanged("DisplayTotal");
-        }
-
-        // Если пользователь изменил валюту в шапке документа
         if (e.PropertyName == "DisplayCurrencyId")
         {
-            _isUpdatingCurrency = true;
-            try
+            if (Details.Lines != null)
             {
-                var displayConv = Details.CurrencyConverter(Details.DisplayCurrencyId);
-
-                if (Details.Lines != null)
+                foreach (var line in Details.Lines)
                 {
-                    foreach (var line in Details.Lines)
+                    // Меняем валюту строки, если это новый документ и строка пустая (Amount == 0)
+                    if (string.IsNullOrEmpty(ItemId) && line.Amount == 0m)
                     {
-                        // В новом документе переключаем строки на валюту шапки -> расчет будет 1 к 1
-                        if (string.IsNullOrEmpty(ItemId))
-                        {
-                            line.CurrencyId = Details.DisplayCurrencyId;
-                        }
-
-                        if (displayConv != null)
-                        {
-                            line.UpdateDisplayCurrencyConvertion(displayConv, true);
-                        }
-
-                        line.UpdateCurrencyConvertion();
+                        line.CurrencyId = Details.DisplayCurrencyId;
                     }
+                    line.UpdateCurrencyConvertion();
                 }
             }
-            finally
-            {
-                _isUpdatingCurrency = false;
-            }
 
-            Details?.RaisePropertyChanged("ActionTotal");
-            Details?.RaisePropertyChanged("DisplayTotal");
+            Details.UpdateCurrencyConvertion();
+
+            Details.RaisePropertyChanged("ActionTotal");
+            Details.RaisePropertyChanged("DisplayTotal");
         }
     }
 
@@ -321,18 +278,26 @@ public class FundsSlipDetailsViewModel :
         try
         {
             if (string.IsNullOrEmpty(Details.DepositoryId))
+            {
                 throw new Exception(this["Field '{0}' is required", this["Depository"]]);
+            }
 
             if (Details.Lines == null || !Details.Lines.Any())
+            {
                 throw new Exception(this["Document cannot be empty"]);
+            }
 
             foreach (var line in Details.Lines)
             {
-                if (line.Amount <= 0)
-                    throw new Exception(this["Amount must be greater than zero"]);
+                if (line.Amount <= 0m)
+                {
+                    throw new Exception(this["Field '{0}' is required and must be greater than zero", this["Amount"]]);
+                }
 
                 if (string.IsNullOrEmpty(line.CurrencyId))
+                {
                     throw new Exception(this["Field '{0}' is required", this["Currency"]]);
+                }
             }
         }
         catch (Exception ex)

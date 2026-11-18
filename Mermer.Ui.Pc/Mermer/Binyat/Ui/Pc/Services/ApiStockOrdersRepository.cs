@@ -68,8 +68,9 @@ namespace Mermer.Ui.Pc.Services
             {
                 try
                 {
-                    var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                    var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                    // СТАЛО:
+                    var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ss");
+                    var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ss");
 
                     var remoteSlice = await _restClient.GetAsync<List<StockOrder>>($"/api/warehousing/orders?from={fromStr}&till={tillStr}&limit=5000");
                     if (remoteSlice != null)
@@ -110,8 +111,9 @@ namespace Mermer.Ui.Pc.Services
             {
                 try
                 {
-                    var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                    var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                    // СТАЛО:
+                    var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ss");
+                    var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ss");
 
                     var res = await _restClient.GetAsync<CountResponse>($"/api/warehousing/orders/count?from={fromStr}&till={tillStr}");
                     if (res != null && res.Count > 0) return res.Count;

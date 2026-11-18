@@ -22,10 +22,10 @@ namespace Mermer.Ui.Pc.Services
             try
             {
                 var queryParams = new List<string>
-                {
-                    $"from={dateFrom:yyyy-MM-ddTHH:mm:ssZ}",
-                    $"till={dateTill:yyyy-MM-ddTHH:mm:ssZ}"
-                };
+{
+    $"from={dateFrom:yyyy-MM-ddTHH:mm:ss}",
+    $"till={dateTill:yyyy-MM-ddTHH:mm:ss}"
+};
 
                 if (!string.IsNullOrEmpty(partnerId))
                     queryParams.Add($"partnerId={partnerId}");
@@ -65,7 +65,7 @@ namespace Mermer.Ui.Pc.Services
         {
             $"officeId={officeId}",
             $"partnerId={partnerId}",
-            $"date={date.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}"
+            $"date={date:yyyy-MM-ddTHH:mm:ss}"
         };
 
                 if (!string.IsNullOrEmpty(excludeTransactionId))

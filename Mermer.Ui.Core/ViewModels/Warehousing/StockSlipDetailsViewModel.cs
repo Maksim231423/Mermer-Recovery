@@ -19,6 +19,7 @@ using MvvmCross.Core.ViewModels;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Linq;
 using System.Threading;
@@ -35,8 +36,6 @@ public class StockSlipDetailsViewModel :
 {
     private StockSlipType _newSlipType = StockSlipType.StockUsage;
     private readonly IPrintingService _printingService;
-    private IEnumerable<CopyCreateLine> _stockLineCopies;
-    private IMvxAsyncCommand _forceCloseCommand;
 
     public StockSlipDetailsViewModel(
       CopyCreate copyCreate,
@@ -59,36 +58,93 @@ public class StockSlipDetailsViewModel :
 
     public void Prepare(StockSlipType parameter) => this._newSlipType = parameter;
 
-    // --- ИСПРАВЛЕНИЕ: Заполняем список типов вручную ---
     protected override async Task PreLoad()
     {
         await base.PreLoad();
 
-        // Защита: если базовый класс не смог загрузить типы ордеров
         if (this.Types == null || !this.Types.Any())
         {
             this.Types = Enum.GetValues(typeof(StockSlipType))
                 .Cast<StockSlipType>()
                 .Select(x => new ListHelper<StockSlipType>
                 {
-                    Text = this[x.ToString()], // Локализованное название
+                    Text = this[x.ToString()],
                     Value = x
                 }).ToArray();
 
-            // Если создаем новый документ, разрешаем выбор типа
             if (string.IsNullOrEmpty(this.ItemId))
             {
                 this.CanChangeType = true;
             }
         }
+
+        await Task.WhenAll(
+            Currencies.Initialize(),
+            Warehouses.Initialize()
+        );
     }
 
     protected override async Task PostLoad()
     {
         await base.PostLoad();
-        if (!string.IsNullOrEmpty(ItemId))
-            return;
-        Details.SlipType = _newSlipType;
+
+        if (string.IsNullOrEmpty(ItemId))
+        {
+            Details.SlipType = _newSlipType;
+
+            if (Currencies?.List != null && string.IsNullOrEmpty(Details.DisplayCurrencyId))
+            {
+                var active = Currencies.List.Where(c => !c.IsDisabled).ToList();
+                Details.DisplayCurrencyId = active.FirstOrDefault(c => c.IsDefault)?.Id ?? active.FirstOrDefault()?.Id;
+            }
+        }
+
+        // Передаем текущую валюту шапки в поисковик товаров
+        if (StockSearcher != null && !string.IsNullOrEmpty(Details.DisplayCurrencyId))
+        {
+            var prop = StockSearcher.GetType().GetProperty("CurrencyId");
+            prop?.SetValue(StockSearcher, Details.DisplayCurrencyId);
+        }
+
+        SubscribeLines();
+    }
+
+    private void SubscribeLines()
+    {
+        if (Details?.Lines != null)
+        {
+            Details.Lines.CollectionChanged -= Lines_CollectionChanged;
+            Details.Lines.CollectionChanged += Lines_CollectionChanged;
+
+            // Если открыт новый документ, в пустых строках проставляем валюту шапки
+            if (string.IsNullOrEmpty(ItemId) && !string.IsNullOrEmpty(Details.DisplayCurrencyId))
+            {
+                foreach (var line in Details.Lines)
+                {
+                    if (string.IsNullOrEmpty(line.CurrencyId) || line.Price == 0m)
+                    {
+                        line.CurrencyId = Details.DisplayCurrencyId;
+                        line.RaisePropertyChanged("CurrencyId");
+                    }
+                }
+            }
+        }
+    }
+
+    private void Lines_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.Action == NotifyCollectionChangedAction.Add && e.NewItems != null)
+        {
+            foreach (var item in e.NewItems)
+            {
+                if (item is StockSlipLine line && !string.IsNullOrEmpty(Details?.DisplayCurrencyId))
+                {
+                    // Новая строка всегда наследует валюту шапки
+                    line.CurrencyId = Details.DisplayCurrencyId;
+                    line.RaisePropertyChanged("CurrencyId");
+                }
+            }
+        }
     }
 
     protected override async Task<bool> OnSaveAsync()
@@ -135,6 +191,11 @@ public class StockSlipDetailsViewModel :
     {
         base.Details_PropertyChanged(sender, e);
 
+        if (e.PropertyName == "Lines")
+        {
+            SubscribeLines();
+        }
+
         if (e.PropertyName == "DisplayCurrencyId")
         {
             var newCurrencyId = this.Details.DisplayCurrencyId;
@@ -142,30 +203,25 @@ public class StockSlipDetailsViewModel :
             if (StockSearcher != null && !string.IsNullOrEmpty(newCurrencyId))
             {
                 var prop = StockSearcher.GetType().GetProperty("CurrencyId");
-                if (prop != null)
+                prop?.SetValue(StockSearcher, newCurrencyId);
+            }
+
+            // При смене валюты в шапке меняем валюту незаполненных строк
+            if (this.Details.Lines != null)
+            {
+                foreach (var line in this.Details.Lines)
                 {
-                    prop.SetValue(StockSearcher, newCurrencyId);
+                    if (string.IsNullOrEmpty(ItemId) && (line.Price == 0m || string.IsNullOrEmpty(line.CurrencyId)))
+                    {
+                        line.CurrencyId = newCurrencyId;
+                        line.RaisePropertyChanged("CurrencyId");
+                    }
+                    line.RaisePropertyChanged("DisplayTotal");
                 }
             }
 
-            System.Threading.Tasks.Task.Run(async () =>
-            {
-                await System.Threading.Tasks.Task.Delay(150);
-
-                InvokeOnMainThread(() =>
-                {
-                    if (this.Details.Lines != null)
-                    {
-                        foreach (var line in this.Details.Lines)
-                        {
-                            line.RaisePropertyChanged("DisplayTotal");
-                        }
-                    }
-
-                    this.Details.RaisePropertyChanged("DisplayTotal");
-                    this.Details.RaisePropertyChanged("Lines");
-                });
-            });
+            this.Details.RaisePropertyChanged("DisplayTotal");
+            this.Details.RaisePropertyChanged("Lines");
         }
 
         if (!(e.PropertyName == "IsPriceEditable") || this.Details.IsPriceEditable)
@@ -194,7 +250,9 @@ public class StockSlipDetailsViewModel :
         @params.UnitId = detailsViewModel.SelectedLine.UnitId;
         @params.Units = (IEnumerable<StockUnit>)stocksCacheAsync.Units;
         @params.Price = detailsViewModel.SelectedLine.Price;
-        @params.CurrencyId = detailsViewModel.SelectedLine.CurrencyId;
+        @params.CurrencyId = !string.IsNullOrEmpty(detailsViewModel.SelectedLine.CurrencyId)
+            ? detailsViewModel.SelectedLine.CurrencyId
+            : detailsViewModel.Details.DisplayCurrencyId;
         @params.Currencies = detailsViewModel.Currencies.List;
         @params.IsPriceEditable = detailsViewModel.Details.IsPriceEditable;
         CancellationToken cancellationToken = new CancellationToken();

@@ -115,8 +115,12 @@
                   </dxg:GridColumn>
                 </dxg:GridControlBand>
                 <dxg:GridControlBand Header="{Localize Debit}">
-                  <dxg:GridColumn FieldName="DebitAmount" Header="{Localize Amount}"/>
-                  <dxg:GridColumn FieldName="DebitCurrencyId" Header="{Localize Currency}">
+                                    <dxg:GridColumn FieldName="DebitAmount" Header="{Localize Amount}">
+                                        <dxg:ColumnBase.EditSettings>
+                                            <dxe:SpinEditSettings Mask="n2" MaskType="Numeric" MaskUseAsDisplayFormat="True"/>
+                                        </dxg:ColumnBase.EditSettings>
+                                    </dxg:GridColumn>
+                                    <dxg:GridColumn FieldName="DebitCurrencyId" Header="{Localize Currency}">
                     <dxg:ColumnBase.EditSettings>
                       <dxg:LookUpEditSettings AutoPopulateColumns="false" DisplayMember="Name" ValueMember="Id"
                                               ItemsSource="{Binding Currencies.List}">
@@ -137,8 +141,12 @@
                   </dxg:GridColumn>
                 </dxg:GridControlBand>
                 <dxg:GridControlBand Header="{Localize Credit}">
-                  <dxg:GridColumn FieldName="CreditAmount" Header="{Localize Amount}"/>
-                  <dxg:GridColumn FieldName="CreditCurrencyId" Header="{Localize Currency}">
+                                    <dxg:GridColumn FieldName="CreditAmount" Header="{Localize Amount}">
+                                        <dxg:ColumnBase.EditSettings>
+                                            <dxe:SpinEditSettings Mask="n2" MaskType="Numeric" MaskUseAsDisplayFormat="True"/>
+                                        </dxg:ColumnBase.EditSettings>
+                                    </dxg:GridColumn>
+                                    <dxg:GridColumn FieldName="CreditCurrencyId" Header="{Localize Currency}">
                     <dxg:ColumnBase.EditSettings>
                       <dxg:LookUpEditSettings AutoPopulateColumns="false" DisplayMember="Name" ValueMember="Id"
                                               ItemsSource="{Binding Currencies.List}">

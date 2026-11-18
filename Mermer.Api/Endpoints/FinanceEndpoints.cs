@@ -41,15 +41,25 @@ public static class FinanceEndpoints
 
                 if (from.HasValue && from.Value.Year > 2000)
                 {
-                    var startDate = from.Value.ToUniversalTime();
+                    var startDate = DateTime.SpecifyKind(from.Value, DateTimeKind.Utc);
                     query = query.Where(s => s.Date >= startDate);
                 }
 
                 if (till.HasValue && till.Value.Year < 2099)
                 {
-                    var endDate = till.Value.TimeOfDay == TimeSpan.Zero
-                        ? till.Value.Date.AddDays(1).AddTicks(-1).ToUniversalTime()
-                        : till.Value.ToUniversalTime();
+                    DateTime endDt;
+                    if (till.Value.TimeOfDay == TimeSpan.Zero)
+                    {
+                        if (from.HasValue && till.Value.Date > from.Value.Date)
+                            endDt = till.Value.AddTicks(-1);
+                        else
+                            endDt = till.Value.Date.AddDays(1).AddTicks(-1);
+                    }
+                    else
+                    {
+                        endDt = till.Value;
+                    }
+                    var endDate = DateTime.SpecifyKind(endDt, DateTimeKind.Utc);
                     query = query.Where(s => s.Date <= endDate);
                 }
 
@@ -95,7 +105,7 @@ public static class FinanceEndpoints
                     {
                         Id = s.Id.ToString(),
                         Code = s.Code ?? string.Empty,
-                        Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                        Date = s.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                         FundsSlipType = billTypeStr,
                         SlipType = billTypeStr,
                         BillType = billTypeInt,
@@ -143,8 +153,33 @@ public static class FinanceEndpoints
                 int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
                 int skip = offset.GetValueOrDefault(0);
 
-                var startDate = from.HasValue ? from.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-                var endDate = till.HasValue ? till.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+                var startDate = from.HasValue
+                    ? DateTime.SpecifyKind(from.Value, DateTimeKind.Utc)
+                    : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+
+                DateTime endDate;
+                if (till.HasValue && till.Value.Year < 2099)
+                {
+                    DateTime tDt;
+                    if (till.Value.TimeOfDay == TimeSpan.Zero)
+                    {
+                        // Если till больше from (клиент уже передал полночь следующего дня) — не накидываем лишние сутки
+                        if (from.HasValue && till.Value.Date > from.Value.Date)
+                            tDt = till.Value.AddTicks(-1);
+                        else
+                            tDt = till.Value.Date.AddDays(1).AddTicks(-1);
+                    }
+                    else
+                    {
+                        tDt = till.Value;
+                    }
+
+                    endDate = DateTime.SpecifyKind(tDt, DateTimeKind.Utc);
+                }
+                else
+                {
+                    endDate = DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
+                }
 
                 var defaultCurrency = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
                                       ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
@@ -154,7 +189,7 @@ public static class FinanceEndpoints
 
                 var query = db.FundsSlips
                     .AsNoTracking()
-                    .Where(s => s.Date >= startDate && s.Date <= endDate && !s.IsDisabled);
+                    .Where(s => s.Date >= startDate && s.Date <= endDate);
 
                 query = query.Where(s => s.FundsSlipType != null &&
                                          (s.FundsSlipType.ToLower().Contains("opening") ||
@@ -190,7 +225,7 @@ public static class FinanceEndpoints
                     {
                         Id = s.Id.ToString(),
                         Code = s.Code ?? string.Empty,
-                        Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                        Date = s.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                         FundsSlipType = fundsType,
                         SlipType = fundsType,
                         BillType = fundsType,
@@ -246,6 +281,11 @@ public static class FinanceEndpoints
 
             var existing = await db.FundsSlips.Include(s => s.Lines).FirstOrDefaultAsync(s => s.Id == slipId);
 
+            // Фиксируем исходные валюты существующих строк
+            var existingLinesMap = existing?.Lines?
+                .Where(l => l.Id != Guid.Empty)
+                .ToDictionary(l => l.Id) ?? new Dictionary<Guid, FundsSlipLineEntity>();
+
             string code = GetStringProperty(root, "code", "Code") ?? $"DOC-{DateTime.UtcNow:yyMMddHHmmss}";
             string? depIdStr = GetStringProperty(root, "depositoryId", "DepositoryId");
             Guid? depId = Guid.TryParse(depIdStr, out var parsedDep) && parsedDep != Guid.Empty ? parsedDep : null;
@@ -287,10 +327,12 @@ public static class FinanceEndpoints
                 dispCurId = defCur?.Id;
             }
 
-            DateTime date = DateTime.UtcNow;
+            DateTime date = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
             string? dateStr = GetStringProperty(root, "date", "Date");
             if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var parsedDate))
-                date = parsedDate.ToUniversalTime();
+            {
+                date = DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc);
+            }
 
             string rawType = GetStringProperty(root, "fundsSlipType", "FundsSlipType", "billType", "BillType", "slipType", "SlipType", "type", "Type") ?? "FundsOpening";
 
@@ -300,12 +342,18 @@ public static class FinanceEndpoints
                 int sortOrder = 0;
                 foreach (var lineJson in linesProp.EnumerateArray())
                 {
+                    string? lineIdStr = GetStringProperty(lineJson, "id", "Id");
+                    Guid lineGuid = Guid.TryParse(lineIdStr, out var lG) && lG != Guid.Empty ? lG : Guid.NewGuid();
+
                     decimal lineAmount = GetDecimalProperty(lineJson, "amount", "Amount", "total", "Total", "value", "Value");
                     string? curIdStr = GetStringProperty(lineJson, "currencyId", "CurrencyId");
                     Guid? currencyGuid = Guid.TryParse(curIdStr, out var cG) && cG != Guid.Empty ? cG : dispCurId;
 
-                    string? lineIdStr = GetStringProperty(lineJson, "id", "Id");
-                    Guid lineGuid = Guid.TryParse(lineIdStr, out var lG) && lG != Guid.Empty ? lG : Guid.NewGuid();
+                    // Если строка уже была в документе — сохраняем её оригинальную валюту
+                    if (existingLinesMap.TryGetValue(lineGuid, out var oldLine) && oldLine.CurrencyId.HasValue)
+                    {
+                        currencyGuid = oldLine.CurrencyId;
+                    }
 
                     linesList.Add(new FundsSlipLineEntity
                     {
@@ -363,12 +411,11 @@ public static class FinanceEndpoints
             else
             {
                 existing.Code = code;
-                existing.Date = date;
                 existing.FundsSlipType = rawType;
                 existing.DepositoryId = depId;
                 existing.PartnerId = partId;
                 existing.OfficeId = offId;
-                existing.DisplayCurrencyId = dispCurId;
+                // Не перезаписываем DisplayCurrencyId
                 existing.IsCompleted = GetBoolProperty(root, "isCompleted", "IsCompleted");
                 existing.IsDisabled = GetBoolProperty(root, "isDisabled", "IsDisabled");
                 existing.Group = GetStringProperty(root, "group", "Group") ?? "";
@@ -404,13 +451,28 @@ public static class FinanceEndpoints
 
             if (from.HasValue && from.Value.Year > 2000)
             {
-                var fUtc = from.Value.ToUniversalTime();
+                var fUtc = DateTime.SpecifyKind(from.Value, DateTimeKind.Utc);
                 query = query.Where(s => s.Date >= fUtc);
             }
 
             if (till.HasValue && till.Value.Year < 2099)
             {
-                var tUtc = till.Value.ToUniversalTime();
+                DateTime tDt;
+                if (till.Value.TimeOfDay == TimeSpan.Zero)
+                {
+                    // Если from и till одинаковые (один день) — берем до конца этого дня.
+                    // Если till больше from (клиент уже передал полночь следующего дня) — не прибавляем лишний день!
+                    if (from.HasValue && till.Value.Date > from.Value.Date)
+                        tDt = till.Value.AddTicks(-1);
+                    else
+                        tDt = till.Value.Date.AddDays(1).AddTicks(-1);
+                }
+                else
+                {
+                    tDt = till.Value;
+                }
+
+                var tUtc = DateTime.SpecifyKind(tDt, DateTimeKind.Utc);
                 query = query.Where(s => s.Date <= tUtc);
             }
 
@@ -425,16 +487,29 @@ public static class FinanceEndpoints
 
         financeGroup.MapGet("/slips/facets", async (string? fields, MermerDbContext db, CancellationToken ct) =>
         {
-            var todayUtc = DateTime.UtcNow.Date;
-            var weekStart = todayUtc.AddDays(-7);
-            var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+            var today = DateTime.Today; // 18.11.2026
+            var todayStart = DateTime.SpecifyKind(today, DateTimeKind.Utc);
+            var tomorrowStart = todayStart.AddDays(1);
+            var yesterdayStart = todayStart.AddDays(-1);
+
+            // Начало текущей недели (понедельник)
+            int diff = (7 + (today.DayOfWeek - DayOfWeek.Monday)) % 7;
+            var weekStart = DateTime.SpecifyKind(today.AddDays(-1 * diff), DateTimeKind.Utc);
+            var pastWeekStart = weekStart.AddDays(-7);
+
+            var monthStart = DateTime.SpecifyKind(new DateTime(today.Year, today.Month, 1), DateTimeKind.Utc);
+            var pastMonthStart = monthStart.AddMonths(-1);
 
             var baseQuery = db.FundsSlips.AsNoTracking().Where(s => !s.IsDisabled && s.FundsSlipType != null &&
                 (s.FundsSlipType.ToLower().Contains("opening") || s.FundsSlipType.ToLower().Contains("revision")));
 
-            var countToday = await baseQuery.CountAsync(s => s.Date >= todayUtc, ct);
-            var countWeek = await baseQuery.CountAsync(s => s.Date >= weekStart, ct);
-            var countMonth = await baseQuery.CountAsync(s => s.Date >= monthStart, ct);
+            // Считаем строго каждый интервал без наложений
+            var countToday = await baseQuery.CountAsync(s => s.Date >= todayStart && s.Date < tomorrowStart, ct);
+            var countYesterday = await baseQuery.CountAsync(s => s.Date >= yesterdayStart && s.Date < todayStart, ct);
+            var countWeek = await baseQuery.CountAsync(s => s.Date >= weekStart && s.Date < tomorrowStart, ct);
+            var countPastWeek = await baseQuery.CountAsync(s => s.Date >= pastWeekStart && s.Date < weekStart, ct);
+            var countMonth = await baseQuery.CountAsync(s => s.Date >= monthStart && s.Date < tomorrowStart, ct);
+            var countPastMonth = await baseQuery.CountAsync(s => s.Date >= pastMonthStart && s.Date < monthStart, ct);
             var countAll = await baseQuery.CountAsync(ct);
 
             var (groups, tags) = await GetGlobalGroupsAndTagsAsync(db, ct);
@@ -450,8 +525,12 @@ public static class FinanceEndpoints
                 ["Date"] = new Dictionary<string, int>
                 {
                     { "#Today", countToday },
+                    { "#Yesturday", countYesterday }, // Ключ с буквой 'u' для совместимости с WPF-клиентом
+                    { "#Yesterday", countYesterday },
                     { "#This Week", countWeek },
+                    { "#Past Week", countPastWeek },
                     { "#This Month", countMonth },
+                    { "#Past Month", countPastMonth },
                     { "#All Records", countAll }
                 }
             });
@@ -478,7 +557,7 @@ public static class FinanceEndpoints
             {
                 Id = s.Id.ToString(),
                 Code = s.Code ?? string.Empty,
-                Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                Date = s.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                 FundsSlipType = fundsType,
                 SlipType = fundsType,
                 BillType = fundsType,
@@ -523,9 +602,8 @@ public static class FinanceEndpoints
 
         billsGroup.MapGet("/count", async (DateTime? from, DateTime? till, string? depositoryId, string? partnerId, MermerDbContext db, CancellationToken ct) =>
         {
-            var query = db.FundsSlips
-                .AsNoTracking()
-                .Where(s => !s.IsDisabled);
+            // Убираем !s.IsDisabled, чтобы удаленные записи учитывались так же, как в общем списке
+            var query = db.FundsSlips.AsNoTracking();
 
             query = query.Where(s => s.FundsSlipType != null &&
                                      (s.FundsSlipType.ToLower() == "payment" ||
@@ -534,13 +612,27 @@ public static class FinanceEndpoints
 
             if (from.HasValue && from.Value.Year > 2000)
             {
-                var fUtc = from.Value.ToUniversalTime();
+                var fUtc = DateTime.SpecifyKind(from.Value, DateTimeKind.Utc);
                 query = query.Where(s => s.Date >= fUtc);
             }
 
             if (till.HasValue && till.Value.Year < 2099)
             {
-                var tUtc = till.Value.ToUniversalTime();
+                DateTime tDt;
+                if (till.Value.TimeOfDay == TimeSpan.Zero)
+                {
+                    // Если till больше from (клиент уже передал полночь следующего дня) — не накидываем лишние сутки!
+                    if (from.HasValue && till.Value.Date > from.Value.Date)
+                        tDt = till.Value.AddTicks(-1);
+                    else
+                        tDt = till.Value.Date.AddDays(1).AddTicks(-1);
+                }
+                else
+                {
+                    tDt = till.Value;
+                }
+
+                var tUtc = DateTime.SpecifyKind(tDt, DateTimeKind.Utc);
                 query = query.Where(s => s.Date <= tUtc);
             }
 
@@ -562,7 +654,37 @@ public static class FinanceEndpoints
 
         billsGroup.MapGet("/facets", async (string? fields, MermerDbContext db, CancellationToken ct) =>
         {
+            var today = DateTime.Today;
+            var todayStart = DateTime.SpecifyKind(today, DateTimeKind.Utc);
+            var tomorrowStart = todayStart.AddDays(1);
+            var yesterdayStart = todayStart.AddDays(-1);
+
+            // Начало текущей недели (понедельник)
+            int diff = (7 + (today.DayOfWeek - DayOfWeek.Monday)) % 7;
+            var weekStart = DateTime.SpecifyKind(today.AddDays(-1 * diff), DateTimeKind.Utc);
+            var pastWeekStart = weekStart.AddDays(-7);
+
+            var monthStart = DateTime.SpecifyKind(new DateTime(today.Year, today.Month, 1), DateTimeKind.Utc);
+            var pastMonthStart = monthStart.AddMonths(-1);
+
+            // Базовый запрос для ордеров оплат/поступлений (Bills)
+            // Убираем !s.IsDisabled, чтобы счетчики соответствовали отображению таблицы
+            var baseQuery = db.FundsSlips.AsNoTracking().Where(s => s.FundsSlipType != null &&
+                (s.FundsSlipType.ToLower() == "payment" ||
+                 s.FundsSlipType.ToLower() == "collection" ||
+                 s.FundsSlipType.ToLower() == "expense"));
+
+            // Считаем строго каждый интервал без наложений
+            var countToday = await baseQuery.CountAsync(s => s.Date >= todayStart && s.Date < tomorrowStart, ct);
+            var countYesterday = await baseQuery.CountAsync(s => s.Date >= yesterdayStart && s.Date < todayStart, ct);
+            var countWeek = await baseQuery.CountAsync(s => s.Date >= weekStart && s.Date < tomorrowStart, ct);
+            var countPastWeek = await baseQuery.CountAsync(s => s.Date >= pastWeekStart && s.Date < weekStart, ct);
+            var countMonth = await baseQuery.CountAsync(s => s.Date >= monthStart && s.Date < tomorrowStart, ct);
+            var countPastMonth = await baseQuery.CountAsync(s => s.Date >= pastMonthStart && s.Date < monthStart, ct);
+            var countAll = await baseQuery.CountAsync(ct);
+
             var (groups, tags) = await GetGlobalGroupsAndTagsAsync(db, ct);
+
             return Results.Ok(new Dictionary<string, object>
             {
                 ["Group"] = groups,
@@ -570,7 +692,18 @@ public static class FinanceEndpoints
                 ["GroupName"] = groups,
                 ["Tags"] = tags,
                 ["TagNames"] = tags,
-                ["Tag"] = tags
+                ["Tag"] = tags,
+                ["Date"] = new Dictionary<string, int>
+        {
+            { "#Today", countToday },
+            { "#Yesturday", countYesterday }, // для совместимости со старыми ресурсами UI
+            { "#Yesterday", countYesterday },
+            { "#This Week", countWeek },
+            { "#Past Week", countPastWeek },
+            { "#This Month", countMonth },
+            { "#Past Month", countPastMonth },
+            { "#All Records", countAll }
+        }
             });
         });
 
@@ -592,7 +725,7 @@ public static class FinanceEndpoints
             {
                 Id = s.Id.ToString(),
                 Code = s.Code ?? string.Empty,
-                Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                Date = s.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                 FundsSlipType = billType,
                 SlipType = billType,
                 BillType = billType,
@@ -634,6 +767,25 @@ public static class FinanceEndpoints
         transferGroup.MapGet("/facets", async (HttpContext ctx, MermerDbContext db, CancellationToken ct) =>
         {
             var (groups, tags) = await GetGlobalGroupsAndTagsAsync(db, ct);
+
+            var todayLocal = DateTime.Today;
+            var todayUtc = DateTime.SpecifyKind(todayLocal, DateTimeKind.Utc);
+            var weekStart = DateTime.SpecifyKind(todayLocal.AddDays(-7), DateTimeKind.Utc);
+            var monthStart = new DateTime(todayLocal.Year, todayLocal.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+            var yearStart = new DateTime(todayLocal.Year, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+            // Подсчет переводов с любым расхождением сумм отправлено/получено (включая удаленные)
+            var countConflicted = await db.FundsTransfers
+                .AsNoTracking()
+                .Where(t => t.Lines.Sum(l => l.Amount) != t.Lines.Sum(l => l.ReceivedAmount))
+                .CountAsync(ct);
+
+            var countToday = await db.FundsTransfers.CountAsync(t => t.Date >= todayUtc, ct);
+            var countWeek = await db.FundsTransfers.CountAsync(t => t.Date >= weekStart, ct);
+            var countMonth = await db.FundsTransfers.CountAsync(t => t.Date >= monthStart, ct);
+            var countYear = await db.FundsTransfers.CountAsync(t => t.Date >= yearStart, ct);
+            var countAll = await db.FundsTransfers.CountAsync(ct);
+
             return Results.Ok(new Dictionary<string, object>
             {
                 ["Group"] = groups,
@@ -641,23 +793,33 @@ public static class FinanceEndpoints
                 ["GroupName"] = groups,
                 ["Tags"] = tags,
                 ["TagNames"] = tags,
-                ["Tag"] = tags
+                ["Tag"] = tags,
+                ["Date"] = new Dictionary<string, int>
+        {
+            { "#Conflicted", countConflicted },
+            { "#Today", countToday },
+            { "#This Week", countWeek },
+            { "#This Month", countMonth },
+            { "#This Year", countYear },
+            { "#All Records", countAll }
+        }
             });
         });
 
         transferGroup.MapGet("/count", async (HttpRequest req, DateTime? from, DateTime? till, string? sourceDepositoryId, string? destinationDepositoryId, MermerDbContext db, CancellationToken ct) =>
         {
-            var query = db.FundsTransfers.AsNoTracking().Where(t => !t.IsDisabled);
+            var query = db.FundsTransfers.AsNoTracking();
 
             if (from.HasValue && from.Value.Year > 2000)
             {
-                var fUtc = from.Value.Kind == DateTimeKind.Utc ? from.Value : from.Value.ToUniversalTime();
+                var fUtc = DateTime.SpecifyKind(from.Value, DateTimeKind.Utc);
                 query = query.Where(t => t.Date >= fUtc);
             }
 
             if (till.HasValue && till.Value.Year < 2099)
             {
-                var tUtc = till.Value.Kind == DateTimeKind.Utc ? till.Value : till.Value.ToUniversalTime();
+                var tDt = till.Value.TimeOfDay == TimeSpan.Zero ? till.Value.Date.AddDays(1).AddTicks(-1) : till.Value;
+                var tUtc = DateTime.SpecifyKind(tDt, DateTimeKind.Utc);
                 query = query.Where(t => t.Date <= tUtc);
             }
 
@@ -691,21 +853,41 @@ public static class FinanceEndpoints
             int skip = offset.GetValueOrDefault(0);
 
             var startDate = from.HasValue && from.Value.Year > 2000
-                ? from.Value.ToUniversalTime()
+                ? DateTime.SpecifyKind(from.Value, DateTimeKind.Utc)
                 : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
 
-            var endDate = till.HasValue && till.Value.Year < 2099
-                ? till.Value.ToUniversalTime()
-                : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+            DateTime endDate;
+            if (till.HasValue && till.Value.Year < 2099)
+            {
+                DateTime tDt;
+                if (till.Value.TimeOfDay == TimeSpan.Zero)
+                {
+                    if (from.HasValue && till.Value.Date > from.Value.Date)
+                        tDt = till.Value.AddTicks(-1);
+                    else
+                        tDt = till.Value.Date.AddDays(1).AddTicks(-1);
+                }
+                else
+                {
+                    tDt = till.Value;
+                }
+
+                endDate = DateTime.SpecifyKind(tDt, DateTimeKind.Utc);
+            }
+            else
+            {
+                endDate = DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
+            }
 
             var defaultCurrency = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
                                   ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
             var defaultCurrencyId = defaultCurrency?.Id.ToString();
             var allConvertions = await GetCurrencyConvertionsAsync(db, DateTime.UtcNow, ct);
 
+            // ИСПРАВЛЕНИЕ: Убрали && !t.IsDisabled, чтобы удаленные записи отдавались в таблицу
             var transferQuery = db.FundsTransfers
                 .AsNoTracking()
-                .Where(t => t.Date >= startDate && t.Date <= endDate && !t.IsDisabled);
+                .Where(t => t.Date >= startDate && t.Date <= endDate);
 
             if (Guid.TryParse(sourceDepositoryId, out var srcGuid))
                 transferQuery = transferQuery.Where(t => t.FromDepositoryId == srcGuid);
@@ -714,7 +896,9 @@ public static class FinanceEndpoints
                 transferQuery = transferQuery.Where(t => t.ToDepositoryId == dstGuid);
 
             bool isConflictedReq = req.Query.ContainsKey("conflicted") ||
-                                   req.Query["conflicted"].ToString().Equals("true", StringComparison.OrdinalIgnoreCase);
+                                   req.Query["conflicted"].ToString().Equals("true", StringComparison.OrdinalIgnoreCase) ||
+                                   (req.QueryString.Value?.Contains("conflicted", StringComparison.OrdinalIgnoreCase) ?? false) ||
+                                   (req.QueryString.Value?.Contains("IsConflicted", StringComparison.OrdinalIgnoreCase) ?? false);
 
             if (isConflictedReq)
             {
@@ -740,7 +924,7 @@ public static class FinanceEndpoints
                 {
                     Id = t.Id.ToString(),
                     Code = t.Code ?? string.Empty,
-                    Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                    Date = t.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                     Type = "FundsTransfer",
                     DepositoryId = t.FromDepositoryId?.ToString(),
                     DestinationDepositoryId = t.ToDepositoryId?.ToString(),
@@ -788,7 +972,7 @@ public static class FinanceEndpoints
             {
                 Id = t.Id.ToString(),
                 Code = t.Code ?? string.Empty,
-                Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                Date = t.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                 Type = "FundsTransfer",
                 DepositoryId = t.FromDepositoryId?.ToString(),
                 DestinationDepositoryId = t.ToDepositoryId?.ToString(),
@@ -832,6 +1016,10 @@ public static class FinanceEndpoints
 
             var existing = await db.FundsTransfers.Include(t => t.Lines).FirstOrDefaultAsync(t => t.Id == transferId);
 
+            var existingLinesMap = existing?.Lines?
+                .Where(l => l.Id != Guid.Empty)
+                .ToDictionary(l => l.Id) ?? new Dictionary<Guid, FundsTransferLineEntity>();
+
             string code = GetStringProperty(root, "code", "Code") ?? $"TR-{DateTime.UtcNow:yyMMddHHmmss}";
             string? fromDepIdStr = GetStringProperty(root, "depositoryId", "DepositoryId", "fromDepositoryId", "FromDepositoryId");
             Guid? fromDepId = Guid.TryParse(fromDepIdStr, out var pFromDep) ? pFromDep : null;
@@ -842,10 +1030,10 @@ public static class FinanceEndpoints
             string? dispCurStr = GetStringProperty(root, "displayCurrencyId", "DisplayCurrencyId", "currencyId", "CurrencyId");
             Guid? dispCurId = Guid.TryParse(dispCurStr, out var pCur) ? pCur : null;
 
-            DateTime date = DateTime.UtcNow;
+            DateTime date = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
             string? dateStr = GetStringProperty(root, "date", "Date");
             if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var pDate))
-                date = pDate.ToUniversalTime();
+                date = DateTime.SpecifyKind(pDate, DateTimeKind.Utc);
 
             var tagsList = ExtractTagsFromRawJson(root);
 
@@ -855,15 +1043,19 @@ public static class FinanceEndpoints
                 int sortOrder = 0;
                 foreach (var lJson in linesProp.EnumerateArray())
                 {
+                    string? lineIdStr = GetStringProperty(lJson, "id", "Id");
+                    Guid lineGuid = Guid.TryParse(lineIdStr, out var lG) && lG != Guid.Empty ? lG : Guid.NewGuid();
+
                     decimal amount = GetDecimalProperty(lJson, "amount", "Amount", "total", "Total");
                     decimal receivedAmount = GetDecimalProperty(lJson, "receivedAmount", "ReceivedAmount");
-                    if (receivedAmount == 0 && amount > 0) receivedAmount = amount;
 
                     string? curIdStr = GetStringProperty(lJson, "currencyId", "CurrencyId");
                     Guid? currencyGuid = Guid.TryParse(curIdStr, out var cG) && cG != Guid.Empty ? cG : dispCurId;
 
-                    string? lineIdStr = GetStringProperty(lJson, "id", "Id");
-                    Guid lineGuid = Guid.TryParse(lineIdStr, out var lG) && lG != Guid.Empty ? lG : Guid.NewGuid();
+                    if (existingLinesMap.TryGetValue(lineGuid, out var oldLine) && oldLine.CurrencyId.HasValue)
+                    {
+                        currencyGuid = oldLine.CurrencyId;
+                    }
 
                     linesList.Add(new FundsTransferLineEntity
                     {
@@ -902,10 +1094,9 @@ public static class FinanceEndpoints
             else
             {
                 existing.Code = code;
-                existing.Date = date;
                 existing.FromDepositoryId = fromDepId;
                 existing.ToDepositoryId = toDepId;
-                existing.DisplayCurrencyId = dispCurId;
+                // Не перезаписываем DisplayCurrencyId
                 existing.IsCompleted = GetBoolProperty(root, "isCompleted", "IsCompleted");
                 existing.IsDisabled = GetBoolProperty(root, "isDisabled", "IsDisabled");
                 existing.Group = GetStringProperty(root, "group", "Group") ?? "";
@@ -924,7 +1115,6 @@ public static class FinanceEndpoints
 
         transferGroup.MapPost("", saveTransferHandler);
         transferGroup.MapPut("/{id:guid}", saveTransferHandler);
-
         // =========================================================================
         // 7. РОУТЫ DAILY FUNDS REGISTRIES
         // =========================================================================
@@ -936,12 +1126,30 @@ public static class FinanceEndpoints
             int skip = offset.GetValueOrDefault(0);
 
             var startDate = from.HasValue && from.Value.Year > 2000
-                ? from.Value.ToUniversalTime()
+                ? DateTime.SpecifyKind(from.Value, DateTimeKind.Utc)
                 : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
 
-            var endDate = till.HasValue && till.Value.Year < 2099
-                ? till.Value.ToUniversalTime()
-                : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+            DateTime endDate;
+            if (till.HasValue && till.Value.Year < 2099)
+            {
+                DateTime tDt;
+                if (till.Value.TimeOfDay == TimeSpan.Zero)
+                {
+                    if (from.HasValue && till.Value.Date > from.Value.Date)
+                        tDt = till.Value.AddTicks(-1);
+                    else
+                        tDt = till.Value.Date.AddDays(1).AddTicks(-1);
+                }
+                else
+                {
+                    tDt = till.Value;
+                }
+                endDate = DateTime.SpecifyKind(tDt, DateTimeKind.Utc);
+            }
+            else
+            {
+                endDate = DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
+            }
 
             var defaultCurrency = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
                                   ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
@@ -972,7 +1180,7 @@ public static class FinanceEndpoints
                 {
                     Id = r.Id.ToString(),
                     Code = r.Code ?? string.Empty,
-                    Date = r.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                    Date = r.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                     Type = "DailyFundsRegistery",
                     DepositoryId = r.DepositoryId?.ToString(),
                     DisplayCurrencyId = docCurrencyId,
@@ -1007,13 +1215,25 @@ public static class FinanceEndpoints
 
             if (from.HasValue && from.Value.Year > 2000)
             {
-                var fUtc = from.Value.Kind == DateTimeKind.Utc ? from.Value : from.Value.ToUniversalTime();
+                var fUtc = DateTime.SpecifyKind(from.Value, DateTimeKind.Utc);
                 query = query.Where(r => r.Date >= fUtc);
             }
 
             if (till.HasValue && till.Value.Year < 2099)
             {
-                var tUtc = till.Value.Kind == DateTimeKind.Utc ? till.Value : till.Value.ToUniversalTime();
+                DateTime tDt;
+                if (till.Value.TimeOfDay == TimeSpan.Zero)
+                {
+                    if (from.HasValue && till.Value.Date > from.Value.Date)
+                        tDt = till.Value.AddTicks(-1);
+                    else
+                        tDt = till.Value.Date.AddDays(1).AddTicks(-1);
+                }
+                else
+                {
+                    tDt = till.Value;
+                }
+                var tUtc = DateTime.SpecifyKind(tDt, DateTimeKind.Utc);
                 query = query.Where(r => r.Date <= tUtc);
             }
 
@@ -1026,16 +1246,27 @@ public static class FinanceEndpoints
 
         registryGroup.MapGet("/facets", async (HttpContext context, MermerDbContext db, CancellationToken ct) =>
         {
-            var todayUtc = DateTime.UtcNow.Date;
-            var weekStart = todayUtc.AddDays(-7);
-            var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
-            var yearStart = new DateTime(todayUtc.Year, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            var today = DateTime.Today;
+            var todayStart = DateTime.SpecifyKind(today, DateTimeKind.Utc);
+            var tomorrowStart = todayStart.AddDays(1);
+            var yesterdayStart = todayStart.AddDays(-1);
 
-            var countToday = await db.DailyFundsRegisteries.CountAsync(r => !r.IsDisabled && r.Date >= todayUtc, ct);
-            var countWeek = await db.DailyFundsRegisteries.CountAsync(r => !r.IsDisabled && r.Date >= weekStart, ct);
-            var countMonth = await db.DailyFundsRegisteries.CountAsync(r => !r.IsDisabled && r.Date >= monthStart, ct);
-            var countYear = await db.DailyFundsRegisteries.CountAsync(r => !r.IsDisabled && r.Date >= yearStart, ct);
-            var countAll = await db.DailyFundsRegisteries.CountAsync(r => !r.IsDisabled, ct);
+            int diff = (7 + (today.DayOfWeek - DayOfWeek.Monday)) % 7;
+            var weekStart = DateTime.SpecifyKind(today.AddDays(-1 * diff), DateTimeKind.Utc);
+            var pastWeekStart = weekStart.AddDays(-7);
+
+            var monthStart = DateTime.SpecifyKind(new DateTime(today.Year, today.Month, 1), DateTimeKind.Utc);
+            var pastMonthStart = monthStart.AddMonths(-1);
+
+            var baseQuery = db.DailyFundsRegisteries.AsNoTracking().Where(r => !r.IsDisabled);
+
+            var countToday = await baseQuery.CountAsync(r => r.Date >= todayStart && r.Date < tomorrowStart, ct);
+            var countYesterday = await baseQuery.CountAsync(r => r.Date >= yesterdayStart && r.Date < todayStart, ct);
+            var countWeek = await baseQuery.CountAsync(r => r.Date >= weekStart && r.Date < tomorrowStart, ct);
+            var countPastWeek = await baseQuery.CountAsync(r => r.Date >= pastWeekStart && r.Date < weekStart, ct);
+            var countMonth = await baseQuery.CountAsync(r => r.Date >= monthStart && r.Date < tomorrowStart, ct);
+            var countPastMonth = await baseQuery.CountAsync(r => r.Date >= pastMonthStart && r.Date < monthStart, ct);
+            var countAll = await baseQuery.CountAsync(ct);
 
             var (groups, tags) = await GetGlobalGroupsAndTagsAsync(db, ct);
 
@@ -1050,9 +1281,12 @@ public static class FinanceEndpoints
                 ["Date"] = new Dictionary<string, int>
                 {
                     { "#Today", countToday },
+                    { "#Yesturday", countYesterday },
+                    { "#Yesterday", countYesterday },
                     { "#This Week", countWeek },
+                    { "#Past Week", countPastWeek },
                     { "#This Month", countMonth },
-                    { "#This Year", countYear },
+                    { "#Past Month", countPastMonth },
                     { "#All Records", countAll }
                 }
             });
@@ -1072,7 +1306,7 @@ public static class FinanceEndpoints
             {
                 Id = r.Id.ToString(),
                 Code = r.Code ?? string.Empty,
-                Date = r.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                Date = r.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                 Type = "DailyFundsRegistery",
                 DepositoryId = r.DepositoryId?.ToString(),
                 DisplayCurrencyId = docCurrencyId,
@@ -1112,6 +1346,10 @@ public static class FinanceEndpoints
 
             var existing = await db.DailyFundsRegisteries.Include(x => x.Lines).FirstOrDefaultAsync(x => x.Id == regId);
 
+            var existingLinesMap = existing?.Lines?
+                .Where(l => l.Id != Guid.Empty)
+                .ToDictionary(l => l.Id) ?? new Dictionary<Guid, DailyFundsRegisteryLineEntity>();
+
             string code = GetStringProperty(root, "code", "Code") ?? $"REG-{DateTime.UtcNow:yyMMddHHmmss}";
             string? depIdStr = GetStringProperty(root, "depositoryId", "DepositoryId");
             Guid? depId = Guid.TryParse(depIdStr, out var pDep) ? pDep : null;
@@ -1122,10 +1360,10 @@ public static class FinanceEndpoints
             string? userIdStr = GetStringProperty(root, "userId", "UserId");
             Guid? userId = Guid.TryParse(userIdStr, out var pUser) ? pUser : null;
 
-            DateTime date = DateTime.UtcNow;
+            DateTime date = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
             string? dateStr = GetStringProperty(root, "date", "Date");
             if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var pDate))
-                date = pDate.ToUniversalTime();
+                date = DateTime.SpecifyKind(pDate, DateTimeKind.Utc);
 
             var tagsList = ExtractTagsFromRawJson(root);
             string groupName = GetStringProperty(root, "group", "Group", "groupName", "GroupName") ?? "";
@@ -1137,12 +1375,17 @@ public static class FinanceEndpoints
                 int sortOrder = 0;
                 foreach (var lJson in linesProp.EnumerateArray())
                 {
+                    string? lineIdStr = GetStringProperty(lJson, "id", "Id");
+                    Guid lineGuid = Guid.TryParse(lineIdStr, out var lG) && lG != Guid.Empty ? lG : Guid.NewGuid();
+
                     decimal amount = GetDecimalProperty(lJson, "amount", "Amount", "total", "Total");
                     string? curIdStr = GetStringProperty(lJson, "currencyId", "CurrencyId");
                     Guid? currencyGuid = Guid.TryParse(curIdStr, out var cG) ? cG : dispCurId;
 
-                    string? lineIdStr = GetStringProperty(lJson, "id", "Id");
-                    Guid lineGuid = Guid.TryParse(lineIdStr, out var lG) && lG != Guid.Empty ? lG : Guid.NewGuid();
+                    if (existingLinesMap.TryGetValue(lineGuid, out var oldLine) && oldLine.CurrencyId.HasValue)
+                    {
+                        currencyGuid = oldLine.CurrencyId;
+                    }
 
                     linesList.Add(new DailyFundsRegisteryLineEntity
                     {
@@ -1180,10 +1423,9 @@ public static class FinanceEndpoints
             else
             {
                 existing.Code = code;
-                existing.Date = date;
                 existing.UserId = userId;
                 existing.DepositoryId = depId;
-                existing.DisplayCurrencyId = dispCurId;
+                // Не перезаписываем DisplayCurrencyId
                 existing.IsCompleted = GetBoolProperty(root, "isCompleted", "IsCompleted");
                 existing.IsDisabled = GetBoolProperty(root, "isDisabled", "IsDisabled");
                 existing.GroupName = groupName;
@@ -1221,8 +1463,13 @@ public static class FinanceEndpoints
         // =========================================================================
         routes.MapGet("/api/finance/actions/count", async (DateTime? from, DateTime? till, bool? isCompleted, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            var startDate = from.HasValue ? from.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            var endDate = till.HasValue ? till.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+            var startDate = from.HasValue
+    ? DateTime.SpecifyKind(from.Value, DateTimeKind.Utc)
+    : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+
+            var endDate = till.HasValue
+                ? DateTime.SpecifyKind(till.Value.TimeOfDay == TimeSpan.Zero ? till.Value.Date.AddDays(1).AddTicks(-1) : till.Value, DateTimeKind.Utc)
+                : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
 
             bool? completedFilter = isCompleted;
             if (!completedFilter.HasValue && req.Query.ContainsKey("isCompleted"))
@@ -1284,14 +1531,32 @@ public static class FinanceEndpoints
                 transfersCount = totalTransferLines * 2;
             }
 
-            return Results.Ok(new { count = slipsCount + expenseCount + transfersCount });
+            // Подсчет накладных с привязкой к кассе
+            DateTimeOffset startOffset = startDate;
+            DateTimeOffset endOffset = endDate;
+
+            var invoicesQuery = db.Invoices.AsNoTracking()
+                .Where(i => i.Date >= startOffset && i.Date <= endOffset && !i.IsDisabled && i.DepositoryId.HasValue);
+            if (completedFilter.HasValue)
+                invoicesQuery = invoicesQuery.Where(i => i.IsCompleted == completedFilter.Value);
+            if (depGuids.Any())
+                invoicesQuery = invoicesQuery.Where(i => depGuids.Contains(i.DepositoryId.Value));
+
+            int invoicesCount = await invoicesQuery.CountAsync(ct);
+
+            return Results.Ok(new { count = slipsCount + expenseCount + transfersCount + invoicesCount });
         }).WithTags("FundsActions");
 
         routes.MapGet("/api/finance/actions", async (DateTime? from, DateTime? till, int? limit, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 50000) : 10000;
-            var startDate = from.HasValue ? from.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
-            var endDate = till.HasValue ? till.Value.ToUniversalTime() : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
+            var startDate = from.HasValue
+                ? DateTime.SpecifyKind(from.Value, DateTimeKind.Utc)
+                : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+
+            var endDate = till.HasValue
+                ? DateTime.SpecifyKind(till.Value.TimeOfDay == TimeSpan.Zero ? till.Value.Date.AddDays(1).AddTicks(-1) : till.Value, DateTimeKind.Utc)
+                : DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
 
             bool? completedFilter = null;
             if (req.Query.ContainsKey("isCompleted") && bool.TryParse(req.Query["isCompleted"], out var parsedBool))
@@ -1306,7 +1571,38 @@ public static class FinanceEndpoints
                 .Distinct()
                 .ToList();
 
-            // Загружаем справочники имен для заполнения Related Object
+            // 1. Загружаем базовую валюту системы (USD)
+            var defaultCurrency = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
+                                  ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => !c.IsDisabled, ct);
+            var defaultCurrencyId = defaultCurrency?.Id;
+
+            // 2. Загружаем курсы валют для конвертации в базовую валюту
+            var allRates = await db.CurrencyRates
+                .AsNoTracking()
+                .OrderByDescending(r => r.ValidFrom)
+                .ToListAsync(ct);
+
+            // Локальная функция пересчета любой валюты в базовую (USD)
+            decimal ConvertToBaseCurrency(decimal amount, Guid? currencyId, DateTime docDate)
+            {
+                if (amount == 0m || currencyId == null || currencyId == defaultCurrencyId)
+                    return amount;
+
+                var matchedRate = allRates
+                    .Where(r => r.CurrencyId == currencyId.Value && r.ValidFrom <= docDate)
+                    .OrderByDescending(r => r.ValidFrom)
+                    .FirstOrDefault()
+                    ?? allRates.FirstOrDefault(r => r.CurrencyId == currencyId.Value);
+
+                if (matchedRate != null && matchedRate.Divider != 0m)
+                {
+                    return Math.Round(amount * matchedRate.Multiplier / matchedRate.Divider, 2, MidpointRounding.AwayFromZero);
+                }
+
+                return amount;
+            }
+
+            // Справочники
             var partnersMap = await db.Partners.AsNoTracking()
                 .Select(p => new { p.Id, p.Name, p.Code })
                 .ToDictionaryAsync(p => p.Id, p => !string.IsNullOrWhiteSpace(p.Name) ? p.Name : p.Code, ct);
@@ -1319,7 +1615,7 @@ public static class FinanceEndpoints
 
             var actions = new List<object>();
 
-            // 1. Кассовые ордера (FundsSlips)
+            // 1. Кассовые ордера (FundsSlips: Collection, Payment, FundsOpening и т.д.)
             var slipsQuery = db.FundsSlips
                 .Include(s => s.Lines)
                 .AsNoTracking()
@@ -1340,15 +1636,19 @@ public static class FinanceEndpoints
 
                 foreach (var line in s.Lines ?? Enumerable.Empty<FundsSlipLineEntity>())
                 {
+                    var lineCurId = line.CurrencyId ?? s.DisplayCurrencyId ?? defaultCurrencyId;
+                    // Пересчитываем сумму строки в базовую валюту USD
+                    decimal baseAmount = ConvertToBaseCurrency(line.Amount, lineCurId, s.Date);
+
                     bool isIncome = s.FundsSlipType == "Collection" || s.FundsSlipType == "FundsOpening" || s.FundsSlipType == "FundsRevisionExceed";
-                    decimal income = isIncome ? line.Amount : 0m;
-                    decimal expense = !isIncome ? line.Amount : 0m;
+                    decimal income = isIncome ? baseAmount : 0m;
+                    decimal expense = !isIncome ? baseAmount : 0m;
 
                     actions.Add(new
                     {
                         TransactionId = s.Id.ToString(),
                         TransactionCode = s.Code ?? "",
-                        TransactionDate = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                        TransactionDate = s.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                         TransactionType = s.FundsSlipType,
                         TransactionUserId = s.UserId?.ToString(),
                         TransactionUserName = s.UserName,
@@ -1362,8 +1662,8 @@ public static class FinanceEndpoints
                         ActionRelatedObjectName = partnerName,
 
                         ActionDepositoryId = s.DepositoryId?.ToString(),
-                        ActionCurrencyId = line.CurrencyId?.ToString(),
-                        ActionAmount = line.Amount,
+                        ActionCurrencyId = defaultCurrencyId?.ToString(),
+                        ActionAmount = baseAmount,
                         ActionIncome = income,
                         ActionExpense = expense,
                         ActionEffect = income - expense
@@ -1392,11 +1692,14 @@ public static class FinanceEndpoints
                         ? exName
                         : string.Empty;
 
+                    var lineCurId = line.CurrencyId ?? e.DisplayCurrencyId ?? defaultCurrencyId;
+                    decimal baseAmount = ConvertToBaseCurrency(line.Amount, lineCurId, e.Date);
+
                     actions.Add(new
                     {
                         TransactionId = e.Id.ToString(),
                         TransactionCode = e.Code ?? "",
-                        TransactionDate = e.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                        TransactionDate = e.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                         TransactionType = "ExpenseSlip",
                         TransactionUserId = e.UserId?.ToString(),
                         TransactionUserName = e.UserName,
@@ -1410,11 +1713,11 @@ public static class FinanceEndpoints
                         ActionRelatedObjectName = expenseName,
 
                         ActionDepositoryId = e.DepositoryId?.ToString(),
-                        ActionCurrencyId = line.CurrencyId?.ToString() ?? e.DisplayCurrencyId?.ToString(),
-                        ActionAmount = line.Amount,
+                        ActionCurrencyId = defaultCurrencyId?.ToString(),
+                        ActionAmount = baseAmount,
                         ActionIncome = 0m,
-                        ActionExpense = line.Amount,
-                        ActionEffect = -line.Amount
+                        ActionExpense = baseAmount,
+                        ActionEffect = -baseAmount
                     });
                 }
             }
@@ -1448,13 +1751,17 @@ public static class FinanceEndpoints
 
                 foreach (var line in t.Lines ?? Enumerable.Empty<FundsTransferLineEntity>())
                 {
+                    var lineCurId = line.CurrencyId ?? t.DisplayCurrencyId ?? defaultCurrencyId;
+                    decimal baseSent = ConvertToBaseCurrency(line.Amount, lineCurId, t.Date);
+                    decimal baseReceived = ConvertToBaseCurrency(line.ReceivedAmount, lineCurId, t.Date);
+
                     if (!depGuids.Any() || (t.FromDepositoryId.HasValue && depGuids.Contains(t.FromDepositoryId.Value)))
                     {
                         actions.Add(new
                         {
                             TransactionId = t.Id.ToString(),
                             TransactionCode = t.Code ?? "",
-                            TransactionDate = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                            TransactionDate = t.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                             TransactionType = "FundsTransferSource",
                             TransactionUserId = (string?)null,
                             TransactionUserName = t.UserName,
@@ -1468,11 +1775,11 @@ public static class FinanceEndpoints
                             ActionRelatedObjectName = toDepName,
 
                             ActionDepositoryId = t.FromDepositoryId?.ToString(),
-                            ActionCurrencyId = line.CurrencyId?.ToString() ?? t.DisplayCurrencyId?.ToString(),
-                            ActionAmount = line.Amount,
+                            ActionCurrencyId = defaultCurrencyId?.ToString(),
+                            ActionAmount = baseSent,
                             ActionIncome = 0m,
-                            ActionExpense = line.Amount,
-                            ActionEffect = -line.Amount
+                            ActionExpense = baseSent,
+                            ActionEffect = -baseSent
                         });
                     }
 
@@ -1482,7 +1789,7 @@ public static class FinanceEndpoints
                         {
                             TransactionId = t.Id.ToString(),
                             TransactionCode = t.Code ?? "",
-                            TransactionDate = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                            TransactionDate = t.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                             TransactionType = "FundsTransferDestination",
                             TransactionUserId = (string?)null,
                             TransactionUserName = t.UserName,
@@ -1496,11 +1803,114 @@ public static class FinanceEndpoints
                             ActionRelatedObjectName = fromDepName,
 
                             ActionDepositoryId = t.ToDepositoryId?.ToString(),
-                            ActionCurrencyId = line.CurrencyId?.ToString() ?? t.DisplayCurrencyId?.ToString(),
-                            ActionAmount = line.ReceivedAmount,
-                            ActionIncome = line.ReceivedAmount,
+                            ActionCurrencyId = defaultCurrencyId?.ToString(),
+                            ActionAmount = baseReceived,
+                            ActionIncome = baseReceived,
                             ActionExpense = 0m,
-                            ActionEffect = line.ReceivedAmount
+                            ActionEffect = baseReceived
+                        });
+                    }
+                }
+            }
+
+            // 4. Накладные (Invoices)
+            DateTimeOffset startOffset = startDate;
+            DateTimeOffset endOffset = endDate;
+
+            var invoicesQuery = db.Invoices
+                .Include(i => i.Payments)
+                .Include(i => i.Lines)
+                .AsNoTracking()
+                .Where(i => i.Date >= startOffset && i.Date <= endOffset && !i.IsDisabled && i.DepositoryId.HasValue);
+
+            if (completedFilter.HasValue)
+                invoicesQuery = invoicesQuery.Where(i => i.IsCompleted == completedFilter.Value);
+
+            if (depGuids.Any())
+                invoicesQuery = invoicesQuery.Where(i => depGuids.Contains(i.DepositoryId.Value));
+
+            var invoices = await invoicesQuery.OrderByDescending(i => i.Date).Take(take).AsSplitQuery().ToListAsync(ct);
+            foreach (var inv in invoices)
+            {
+                string partnerName = inv.PartnerId.HasValue && partnersMap.TryGetValue(inv.PartnerId.Value, out var pName)
+                    ? pName
+                    : "Розничный покупатель";
+
+                bool isIncome = inv.InvoiceType == "Sales" || inv.InvoiceType == "PurchaseReturn";
+                var docDate = inv.Date.UtcDateTime;
+
+                if (inv.Payments != null && inv.Payments.Any())
+                {
+                    foreach (var pay in inv.Payments)
+                    {
+                        var payCurId = pay.CurrencyId ?? inv.DisplayCurrencyId ?? defaultCurrencyId;
+                        decimal basePayAmount = ConvertToBaseCurrency(pay.Amount, payCurId, docDate);
+
+                        decimal income = isIncome ? basePayAmount : 0m;
+                        decimal expense = !isIncome ? basePayAmount : 0m;
+
+                        actions.Add(new
+                        {
+                            TransactionId = inv.Id.ToString(),
+                            TransactionCode = inv.Code ?? "",
+                            TransactionDate = inv.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
+                            TransactionType = inv.InvoiceType ?? "Sales",
+                            TransactionUserId = inv.UserId?.ToString(),
+                            TransactionUserName = inv.UserName,
+                            TransactionIsCompleted = inv.IsCompleted,
+                            TransactionIsDisabled = inv.IsDisabled,
+                            TransactionGroup = inv.Group ?? "",
+                            TransactionTags = inv.Tags ?? Array.Empty<string>(),
+
+                            ActionRelatedPartnerId = inv.PartnerId?.ToString(),
+                            ActionRelatedDepositoryId = (string?)null,
+                            ActionRelatedObjectName = partnerName,
+
+                            ActionDepositoryId = inv.DepositoryId?.ToString(),
+                            ActionCurrencyId = defaultCurrencyId?.ToString(),
+                            ActionAmount = basePayAmount,
+                            ActionIncome = income,
+                            ActionExpense = expense,
+                            ActionEffect = income - expense
+                        });
+                    }
+                }
+                else
+                {
+                    decimal rawTotal = inv.Lines != null && inv.Lines.Any()
+                        ? inv.Lines.Sum(l => l.Quantity * l.Price)
+                        : 0m;
+
+                    decimal baseDocTotal = ConvertToBaseCurrency(rawTotal, inv.DisplayCurrencyId ?? defaultCurrencyId, docDate);
+
+                    if (baseDocTotal > 0)
+                    {
+                        decimal income = isIncome ? baseDocTotal : 0m;
+                        decimal expense = !isIncome ? baseDocTotal : 0m;
+
+                        actions.Add(new
+                        {
+                            TransactionId = inv.Id.ToString(),
+                            TransactionCode = inv.Code ?? "",
+                            TransactionDate = inv.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
+                            TransactionType = inv.InvoiceType ?? "Sales",
+                            TransactionUserId = inv.UserId?.ToString(),
+                            TransactionUserName = inv.UserName,
+                            TransactionIsCompleted = inv.IsCompleted,
+                            TransactionIsDisabled = inv.IsDisabled,
+                            TransactionGroup = inv.Group ?? "",
+                            TransactionTags = inv.Tags ?? Array.Empty<string>(),
+
+                            ActionRelatedPartnerId = inv.PartnerId?.ToString(),
+                            ActionRelatedDepositoryId = (string?)null,
+                            ActionRelatedObjectName = partnerName,
+
+                            ActionDepositoryId = inv.DepositoryId?.ToString(),
+                            ActionCurrencyId = defaultCurrencyId?.ToString(),
+                            ActionAmount = baseDocTotal,
+                            ActionIncome = income,
+                            ActionExpense = expense,
+                            ActionEffect = income - expense
                         });
                     }
                 }

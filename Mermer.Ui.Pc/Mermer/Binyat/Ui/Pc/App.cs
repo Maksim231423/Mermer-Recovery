@@ -9,7 +9,9 @@ using MvvmCross.Platform;
 using MvvmCross.Wpf.Views.Presenters;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -21,6 +23,7 @@ namespace Mermer.Ui.Pc;
 public partial class App : System.Windows.Application
 {
     private bool _setupComplete;
+    private static Process _serverProcess;
 
     public App()
     {
@@ -89,8 +92,121 @@ public partial class App : System.Windows.Application
     {
         base.OnStartup(e);
 
+        // Запуск локального API без консольного окна (для одиночной точки)
+        TryStartLocalServer();
+
         // Запуск MvvmCross-оболочки приложения
         DoSetup();
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        // Остановка процесса сервера при закрытии программы кассы
+        StopLocalServer();
+
+        base.OnExit(e);
+    }
+
+    private void TryStartLocalServer()
+    {
+        try
+        {
+            string appDir = AppDomain.CurrentDomain.BaseDirectory;
+
+            // 1. Проверяем рабочий путь после установки инсталлятором (папка Server рядом с exe)
+            string installedServerDir = Path.Combine(appDir, "Server");
+            string installedBat = Path.Combine(installedServerDir, "RUN_SERVER.bat");
+            string installedExe = Path.Combine(installedServerDir, "Mermer.Api.exe");
+
+            // 2. Путь для разработки и тестов в Visual Studio
+            string devBat = @"D:\Программирование\Mermer_Server_Manual\Api\RUN_SERVER.bat";
+
+            string targetFile = null;
+            string workingDir = null;
+
+            if (File.Exists(installedExe))
+            {
+                targetFile = installedExe;
+                workingDir = installedServerDir;
+            }
+            else if (File.Exists(installedBat))
+            {
+                targetFile = installedBat;
+                workingDir = installedServerDir;
+            }
+            else if (File.Exists(devBat)) // Сработает, когда вы запускаете проект из студии
+            {
+                targetFile = devBat;
+                workingDir = Path.GetDirectoryName(devBat);
+            }
+
+            // Если ни один путь не найден — выходим (сетевой режим)
+            if (targetFile == null)
+                return;
+
+            // Проверяем, не запущен ли уже сервер
+            var running = Process.GetProcessesByName("Mermer.Api");
+            if (running.Length > 0)
+                return;
+
+            ProcessStartInfo startInfo;
+
+            // Если это .bat файл — его скрытый запуск выполняется строго через cmd.exe /c
+            if (targetFile.EndsWith(".bat", StringComparison.OrdinalIgnoreCase))
+            {
+                startInfo = new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = $"/c \"{targetFile}\"",
+                    WorkingDirectory = workingDir,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+            }
+            else
+            {
+                // Если это напрямую скомпилированный .exe
+                startInfo = new ProcessStartInfo
+                {
+                    FileName = targetFile,
+                    WorkingDirectory = workingDir,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+            }
+
+            _serverProcess = Process.Start(startInfo);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[ServerAutoStart] Ошибка запуска сервера: {ex.Message}");
+        }
+    }
+
+    private void StopLocalServer()
+    {
+        try
+        {
+            if (_serverProcess != null && !_serverProcess.HasExited)
+            {
+                _serverProcess.Kill();
+                _serverProcess.Dispose();
+                _serverProcess = null;
+            }
+
+            // Дополнительная зачистка на случай, если процесс был запущен через bat-скрипт
+            foreach (var proc in Process.GetProcessesByName("Mermer.Api"))
+            {
+                try
+                {
+                    proc.Kill();
+                }
+                catch { }
+            }
+        }
+        catch { }
     }
 
     private void LoadMvxAssemblyResources()

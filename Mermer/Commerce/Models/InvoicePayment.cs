@@ -45,18 +45,22 @@ public class InvoicePayment : RequestCurrencyConverter
     }
   }
 
-  public Decimal ActionAmount
-  {
-    get
+    public Decimal ActionAmount
     {
-      if (string.IsNullOrEmpty(this.CurrencyId))
-        return 0M;
-      CurrencyConvertion currencyConvertion = this.GetCurrencyConvertion(this.CurrencyId);
-      return currencyConvertion == null ? 0M : this.Amount * currencyConvertion.Multiplier / currencyConvertion.Divider;
-    }
-  }
+        get
+        {
+            if (string.IsNullOrEmpty(this.CurrencyId))
+                return 0M;
+            CurrencyConvertion currencyConvertion = this.GetCurrencyConvertion(this.CurrencyId);
+            if (currencyConvertion == null || currencyConvertion.Divider == 0M)
+                return 0M;
 
-  public Decimal DisplayAmount => this.GetDisplayAmount(this.ActionAmount);
+            decimal calculated = this.Amount * currencyConvertion.Multiplier / currencyConvertion.Divider;
+            return Math.Round(calculated, 2, MidpointRounding.AwayFromZero);
+        }
+    }
+
+    public Decimal DisplayAmount => this.GetDisplayAmount(this.ActionAmount);
 
   public string DisplayAmountString => this.GetDisplayAmountString(this.DisplayAmount);
 

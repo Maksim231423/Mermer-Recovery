@@ -21,7 +21,7 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                var query = $"?dateFrom={dateFrom.ToUniversalTime():O}&dateTill={dateTill.ToUniversalTime():O}";
+                var query = $"?dateFrom={dateFrom:yyyy-MM-ddTHH:mm:ss}&dateTill={dateTill:yyyy-MM-ddTHH:mm:ss}";
                 if (officeIds != null)
                 {
                     foreach (var id in officeIds.Where(x => !string.IsNullOrEmpty(x)))

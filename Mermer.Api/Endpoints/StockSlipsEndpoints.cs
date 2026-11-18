@@ -57,7 +57,7 @@ public static class StockSlipsEndpoints
                     : DateTimeOffset.MinValue;
 
                 DateTimeOffset endDate = !string.IsNullOrEmpty(tillStr)
-                    ? ParseSafeFilterOffset(tillStr, isTill: true)
+                    ? ParseSafeFilterOffset(tillStr, isTill: true, fromRaw: fromStr)
                     : DateTimeOffset.MaxValue;
 
                 var slipsQuery = db.StockSlips
@@ -187,7 +187,7 @@ public static class StockSlipsEndpoints
                     {
                         Id = s.Id.ToString(),
                         Code = s.Code ?? string.Empty,
-                        Date = s.Date.ToString("yyyy-MM-ddTHH:mm:ss"), // Без искажения таймзоны
+                        Date = s.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                         SlipType = s.SlipType,
                         Type = s.SlipType,
                         WarehouseId = s.WarehouseId?.ToString(),
@@ -300,17 +300,17 @@ public static class StockSlipsEndpoints
             using var doc = JsonDocument.Parse(body);
             var root = doc.RootElement;
 
-            string? idStr = GetStringProperty(root, "id", "Id");
+            string? idStr = GetStringProp(root, "id", "Id");
             Guid slipId = Guid.TryParse(idStr, out var parsedGuid) && parsedGuid != Guid.Empty ? parsedGuid : Guid.NewGuid();
 
             var existing = await db.StockSlips.Include(s => s.Lines).FirstOrDefaultAsync(p => p.Id == slipId);
 
-            string code = GetStringProperty(root, "code", "Code") ?? $"SSLIP-{DateTime.UtcNow:yyMMddHHmmss}";
-            string desc = GetStringProperty(root, "description", "Description") ?? "";
-            string slipType = GetStringProperty(root, "slipType", "SlipType", "type", "Type") ?? "StockOpening";
-            string groupName = GetStringProperty(root, "group", "Group", "groupName", "GroupName") ?? "";
+            string code = GetStringProp(root, "code", "Code") ?? $"SSLIP-{DateTime.UtcNow:yyMMddHHmmss}";
+            string desc = GetStringProp(root, "description", "Description") ?? "";
+            string slipType = GetStringProp(root, "slipType", "SlipType", "type", "Type") ?? "StockOpening";
+            string groupName = GetStringProp(root, "group", "Group", "groupName", "GroupName") ?? "";
 
-            string? wIdStr = GetStringProperty(root, "warehouseId", "WarehouseId");
+            string? wIdStr = GetStringProp(root, "warehouseId", "WarehouseId");
             Guid? wId = Guid.TryParse(wIdStr, out var parsedW) && parsedW != Guid.Empty ? parsedW : null;
 
             if (!wId.HasValue)
@@ -324,38 +324,37 @@ public static class StockSlipsEndpoints
                 wId = defWh?.Id;
             }
 
-            // ИСПРАВЛЕННЫЙ ПАРСИНГ: Сохраняем реальную дату без срезки -2 часа
-            DateTimeOffset date = DateTimeOffset.Now;
-            string? dateStr = GetStringProperty(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr))
+            DateTimeOffset date = new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
+            string? dateStr = GetStringProp(root, "date", "Date");
+            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate))
             {
-                date = ParseCleanDateOffset(dateStr);
+                date = new DateTimeOffset(DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc), TimeSpan.Zero);
             }
 
-            bool isCompleted = GetBoolProperty(root, "isCompleted", "IsCompleted");
-            decimal displayTotal = GetDecimalProperty(root, "displayTotal", "DisplayTotal", "actionTotal", "ActionTotal", "total", "Total");
+            bool isCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
+            decimal displayTotal = GetDecimalProp(root, "displayTotal", "DisplayTotal", "actionTotal", "ActionTotal", "total", "Total");
 
             var tagsList = ExtractTagsFromRawJson(root);
 
             var linesList = new List<StockSlipLineEntity>();
-            if (TryGetPropertyCaseInsensitive(root, "lines", out var linesProp) && linesProp.ValueKind == JsonValueKind.Array)
+            if (TryGetPropCaseInsensitive(root, "lines", out var linesProp) && linesProp.ValueKind == JsonValueKind.Array)
             {
                 int sortOrder = 0;
                 foreach (var lJson in linesProp.EnumerateArray())
                 {
-                    decimal qty = GetDecimalProperty(lJson, "quantity", "Quantity");
-                    decimal price = GetDecimalProperty(lJson, "price", "Price");
+                    decimal qty = GetDecimalProp(lJson, "quantity", "Quantity");
+                    decimal price = GetDecimalProp(lJson, "price", "Price");
 
-                    string? lineIdStr = GetStringProperty(lJson, "id", "Id");
+                    string? lineIdStr = GetStringProp(lJson, "id", "Id");
                     Guid lineGuid = Guid.TryParse(lineIdStr, out var lG) && lG != Guid.Empty ? lG : Guid.NewGuid();
 
-                    string? stockIdStr = GetStringProperty(lJson, "stockId", "StockId");
+                    string? stockIdStr = GetStringProp(lJson, "stockId", "StockId");
                     Guid? stockGuid = Guid.TryParse(stockIdStr, out var sG) ? sG : null;
 
-                    string? unitIdStr = GetStringProperty(lJson, "unitId", "UnitId");
+                    string? unitIdStr = GetStringProp(lJson, "unitId", "UnitId");
                     Guid? unitGuid = Guid.TryParse(unitIdStr, out var uG) ? uG : null;
 
-                    decimal lineTotal = GetDecimalProperty(lJson, "total", "Total", "actionTotal", "ActionTotal");
+                    decimal lineTotal = GetDecimalProp(lJson, "total", "Total", "actionTotal", "ActionTotal");
                     if (lineTotal == 0m) lineTotal = qty * price;
 
                     linesList.Add(new StockSlipLineEntity
@@ -401,7 +400,6 @@ public static class StockSlipsEndpoints
             {
                 existing.Code = code;
                 existing.SlipType = slipType;
-                existing.Date = date;
                 existing.WarehouseId = wId;
                 existing.Description = desc;
                 existing.GroupName = groupName;
@@ -410,9 +408,17 @@ public static class StockSlipsEndpoints
                 existing.DisplayTotal = displayTotal;
                 existing.UpdatedAt = DateTimeOffset.UtcNow;
 
-                if (existing.Lines != null) db.StockSlipLines.RemoveRange(existing.Lines);
-                existing.Lines = linesList;
-                db.StockSlips.Update(existing);
+                // 1. Удаляем старые строки из контекста
+                if (existing.Lines != null && existing.Lines.Any())
+                {
+                    db.StockSlipLines.RemoveRange(existing.Lines);
+                }
+
+                // 2. Добавляем новые строки в DbSet, чтобы EF пометил их как Added, а не Modified
+                if (linesList.Any())
+                {
+                    await db.StockSlipLines.AddRangeAsync(linesList);
+                }
             }
 
             await db.SaveChangesAsync();
@@ -449,7 +455,7 @@ public static class StockSlipsEndpoints
 
             if (!string.IsNullOrEmpty(tillStr))
             {
-                var tDate = ParseSafeFilterOffset(tillStr, isTill: true);
+                var tDate = ParseSafeFilterOffset(tillStr, isTill: true, fromRaw: fromStr);
                 query = query.Where(s => s.Date <= tDate);
             }
 
@@ -502,21 +508,35 @@ public static class StockSlipsEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var now = DateTimeOffset.Now;
-                    var todayStart = new DateTimeOffset(now.Year, now.Month, now.Day, 0, 0, 0, now.Offset);
-                    var weekStart = todayStart.AddDays(-7);
-                    var monthStart = new DateTimeOffset(now.Year, now.Month, 1, 0, 0, 0, now.Offset);
+                    var today = DateTime.Today;
+                    var todayStart = new DateTimeOffset(DateTime.SpecifyKind(today, DateTimeKind.Utc), TimeSpan.Zero);
+                    var tomorrowStart = todayStart.AddDays(1);
+                    var yesterdayStart = todayStart.AddDays(-1);
 
-                    var countToday = await db.StockSlips.CountAsync(s => s.Date >= todayStart, ct);
-                    var countWeek = await db.StockSlips.CountAsync(s => s.Date >= weekStart, ct);
-                    var countMonth = await db.StockSlips.CountAsync(s => s.Date >= monthStart, ct);
+                    int diff = (7 + (today.DayOfWeek - DayOfWeek.Monday)) % 7;
+                    var weekStart = todayStart.AddDays(-1 * diff);
+                    var pastWeekStart = weekStart.AddDays(-7);
+
+                    var monthStart = new DateTimeOffset(DateTime.SpecifyKind(new DateTime(today.Year, today.Month, 1), DateTimeKind.Utc), TimeSpan.Zero);
+                    var pastMonthStart = monthStart.AddMonths(-1);
+
+                    var countToday = await db.StockSlips.CountAsync(s => s.Date >= todayStart && s.Date < tomorrowStart, ct);
+                    var countYesterday = await db.StockSlips.CountAsync(s => s.Date >= yesterdayStart && s.Date < todayStart, ct);
+                    var countWeek = await db.StockSlips.CountAsync(s => s.Date >= weekStart && s.Date < tomorrowStart, ct);
+                    var countPastWeek = await db.StockSlips.CountAsync(s => s.Date >= pastWeekStart && s.Date < weekStart, ct);
+                    var countMonth = await db.StockSlips.CountAsync(s => s.Date >= monthStart && s.Date < tomorrowStart, ct);
+                    var countPastMonth = await db.StockSlips.CountAsync(s => s.Date >= pastMonthStart && s.Date < monthStart, ct);
                     var countAll = await db.StockSlips.CountAsync(ct);
 
                     var dateFacets = new Dictionary<string, int>
                     {
                         { "#Today", countToday },
+                        { "#Yesturday", countYesterday },
+                        { "#Yesterday", countYesterday },
                         { "#This Week", countWeek },
+                        { "#Past Week", countPastWeek },
                         { "#This Month", countMonth },
+                        { "#Past Month", countPastMonth },
                         { "#All Records", countAll }
                     };
                     result[field] = dateFacets;
@@ -534,41 +554,46 @@ public static class StockSlipsEndpoints
     #region Safe Date Helpers
     private static DateTimeOffset ParseCleanDateOffset(string raw)
     {
+        if (string.IsNullOrWhiteSpace(raw))
+            return new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
+
         raw = raw.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            return dto;
-        }
         if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            return new DateTimeOffset(dt, DateTimeOffset.Now.Offset);
+            return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc), TimeSpan.Zero);
         }
-        return DateTimeOffset.Now;
+        return new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
     }
 
-    private static DateTimeOffset ParseSafeFilterOffset(string raw, bool isTill = false)
+    private static DateTimeOffset ParseSafeFilterOffset(string raw, bool isTill = false, string? fromRaw = null)
     {
-        raw = raw.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
-            {
-                return new DateTimeOffset(dto.Year, dto.Month, dto.Day, 23, 59, 59, dto.Offset);
-            }
-            return dto;
-        }
+        if (string.IsNullOrWhiteSpace(raw))
+            return isTill
+                ? new DateTimeOffset(DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc), TimeSpan.Zero)
+                : new DateTimeOffset(DateTime.SpecifyKind(new DateTime(2000, 1, 1, 0, 0, 0), DateTimeKind.Utc), TimeSpan.Zero);
 
+        raw = raw.Replace(" ", "+").Trim();
         if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            var offset = DateTimeOffset.Now.Offset;
             if (isTill && dt.TimeOfDay == TimeSpan.Zero)
             {
-                return new DateTimeOffset(dt.Year, dt.Month, dt.Day, 23, 59, 59, offset);
+                if (!string.IsNullOrWhiteSpace(fromRaw) &&
+                    DateTime.TryParse(fromRaw.Replace(" ", "+").Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var fDt) &&
+                    dt.Date > fDt.Date)
+                {
+                    dt = dt.AddTicks(-1);
+                }
+                else
+                {
+                    dt = dt.Date.AddDays(1).AddTicks(-1);
+                }
             }
-            return new DateTimeOffset(dt, offset);
+            return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc), TimeSpan.Zero);
         }
 
-        return isTill ? DateTimeOffset.UtcNow.AddYears(10) : DateTimeOffset.UtcNow.AddYears(-10);
+        return isTill
+            ? new DateTimeOffset(DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc), TimeSpan.Zero)
+            : new DateTimeOffset(DateTime.SpecifyKind(new DateTime(2000, 1, 1, 0, 0, 0), DateTimeKind.Utc), TimeSpan.Zero);
     }
 
     private static async Task<object[]> GetCurrencyConvertionsAsync(MermerDbContext db, DateTime docDate, CancellationToken ct)
@@ -624,7 +649,7 @@ public static class StockSlipsEndpoints
         return list.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    private static bool TryGetPropertyCaseInsensitive(JsonElement element, string propName, out JsonElement value)
+    private static bool TryGetPropCaseInsensitive(JsonElement element, string propName, out JsonElement value)
     {
         foreach (var prop in element.EnumerateObject())
         {
@@ -638,33 +663,35 @@ public static class StockSlipsEndpoints
         return false;
     }
 
-    private static string? GetStringProperty(JsonElement element, params string[] propNames)
+    private static string? GetStringProp(JsonElement element, params string[] propNames)
     {
         foreach (var name in propNames)
         {
-            if (TryGetPropertyCaseInsensitive(element, name, out var prop) && prop.ValueKind == JsonValueKind.String) return prop.GetString();
+            if (TryGetPropCaseInsensitive(element, name, out var prop) && prop.ValueKind == JsonValueKind.String)
+                return prop.GetString();
         }
         return null;
     }
 
-    private static decimal GetDecimalProperty(JsonElement element, params string[] propNames)
+    private static decimal GetDecimalProp(JsonElement element, params string[] propNames)
     {
         foreach (var name in propNames)
         {
-            if (TryGetPropertyCaseInsensitive(element, name, out var prop))
+            if (TryGetPropCaseInsensitive(element, name, out var prop))
             {
                 if (prop.ValueKind == JsonValueKind.Number) return prop.GetDecimal();
-                if (prop.ValueKind == JsonValueKind.String && decimal.TryParse(prop.GetString(), out var val)) return val;
+                if (prop.ValueKind == JsonValueKind.String && decimal.TryParse(prop.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var val))
+                    return val;
             }
         }
         return 0m;
     }
 
-    private static bool GetBoolProperty(JsonElement element, params string[] propNames)
+    private static bool GetBoolProp(JsonElement element, params string[] propNames)
     {
         foreach (var name in propNames)
         {
-            if (TryGetPropertyCaseInsensitive(element, name, out var prop))
+            if (TryGetPropCaseInsensitive(element, name, out var prop))
             {
                 if (prop.ValueKind == JsonValueKind.True) return true;
                 if (prop.ValueKind == JsonValueKind.False) return false;

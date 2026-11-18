@@ -58,12 +58,12 @@
     </FrameworkElement.Resources>
 
     <dxwui:HamburgerMenu x:Name="Menu" 
-                     dx:ThemeManager.ThemeName="Office2016Black"
-                     Margin="0" Padding="0" Loaded="OnMenuLoaded"
-                     PaneBackground="{StaticResource appBarBackgroundBrush}"
-                     BottomBarBackground="{StaticResource appBarBackgroundBrush}"
-                     Foreground="White"
-                     BorderThickness="0">
+                         dx:ThemeManager.ThemeName="Office2016Black"
+                         Margin="0" Padding="0" Loaded="OnMenuLoaded"
+                         PaneBackground="{StaticResource appBarBackgroundBrush}"
+                         BottomBarBackground="{StaticResource appBarBackgroundBrush}"
+                         Foreground="White"
+                         BorderThickness="0">
 
         <dxwui:HamburgerMenu.Style>
             <Style TargetType="dxwui:HamburgerMenu">
@@ -78,7 +78,7 @@
 
         <dxwui:HamburgerMenu.Items>
             <dxwui:HamburgerMenuNavigationButton Glyph="pack://application:,,,/DevExpress.Images.v21.2;component/DevAV/Actions/Buy_32x32.png"
-                                         Content="{Localize Pos}" Command="{Binding ShowPosCommand}"/>
+                                                 Content="{Localize Pos}" Command="{Binding ShowPosCommand}"/>
             <dxwui:HamburgerMenuItemSeparator/>
             <dxwui:HamburgerSubMenu Glyph="pack://application:,,,/DevExpress.Images.v21.2;component/DevAV/Sales/SalesAnalysis_32x32.png"
                             Content="{Localize Commerce}" FlyoutHeader="{Localize Commerce}">
@@ -86,9 +86,9 @@
                 <dxwui:HamburgerSubMenuNavigationButton Content="{Localize Invoices}" Command="{Binding ShowInvoicesCommand}"/>
                 <dxwui:HamburgerSubMenuNavigationButton Content="{Localize Bills}" Command="{Binding ShowBillsCommand}"/>
                 <dxwui:HamburgerSubMenuNavigationButton Style="{StaticResource Group}" Content="{Localize Reports}"
-                                                Visibility="{Binding AllowReporting, Converter={dx:BooleanToVisibilityConverter}}"/>
+                                                        Visibility="{Binding AllowReporting, Converter={dx:BooleanToVisibilityConverter}}"/>
                 <dxwui:HamburgerSubMenuNavigationButton Content="{Localize 'Sales Payment Info'}" Command="{Binding ShowInvoicePaymentDataCommand}"
-                                                Visibility="{Binding AllowReporting, Converter={dx:BooleanToVisibilityConverter}}"/>
+                                                        Visibility="{Binding AllowReporting, Converter={dx:BooleanToVisibilityConverter}}"/>
 
                 <dxwui:HamburgerSubMenuNavigationButton Style="{StaticResource Group}" Content="{Localize Sales}"/>
                 <dxwui:HamburgerSubMenuNavigationButton Content="{Localize 'New Sales Invoice'}" Command="{Binding ShowNewInvoiceCommand}" CommandParameter="Sales"/>
@@ -191,7 +191,7 @@
 
                 <StackPanel VerticalAlignment="Bottom" HorizontalAlignment="Right" Panel.ZIndex="0">
                     <TextBlock Style="{StaticResource HeaderCaption}" HorizontalAlignment="Right" Padding="0, 0, 10, 0"
-                       Text="{Localize AppCreator, FallBackText='Mermer Creation Studio'}"/>
+                               Text="{Localize AppCreator, FallBackText='Mermer Creation Studio'}"/>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                         <TextBlock Style="{StaticResource WelcomeMessage}" Text="{Localize Mermer}"/>
                         <TextBlock Style="{StaticResource WelcomeMessage}"/>
@@ -204,11 +204,16 @@
                         <Style TargetType="{x:Type dx:DXTabItem}">
                             <Setter Property="Focusable" Value="false"/>
                             <Setter Property="Header" Value="{Binding DataContext}"/>
+                            <Setter Property="Margin" Value="0,0,2,0"/>
 
                             <Setter Property="Template">
                                 <Setter.Value>
                                     <ControlTemplate TargetType="{x:Type dx:DXTabItem}">
-                                        <Border x:Name="RootBorder" Background="Transparent" BorderThickness="0" CornerRadius="0">
+                                        <Border x:Name="RootBorder" 
+                    Background="#D8D8DC" 
+                    BorderBrush="#7A7A80" 
+                    BorderThickness="0,0,1,0" 
+                    CornerRadius="0">
                                             <Grid Margin="15,6,15,0">
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="*"/>
@@ -218,22 +223,22 @@
                                                 <ContentPresenter ContentSource="Header" VerticalAlignment="Center" Margin="0,0,15,0"/>
 
                                                 <Button x:Name="PART_CloseButton" 
-        Grid.Column="1" 
-        VerticalAlignment="Center" 
-        Width="16" Height="16" 
-        Cursor="Hand" 
-        Margin="8,0,0,0"
-        Focusable="False"
-        Click="TabCloseButton_Click">
+                            Grid.Column="1" 
+                            VerticalAlignment="Center" 
+                            Width="16" Height="16" 
+                            Cursor="Hand" 
+                            Margin="8,0,0,0"
+                            Focusable="False"
+                            Click="TabCloseButton_Click">
                                                     <Button.Template>
                                                         <ControlTemplate TargetType="Button">
                                                             <Grid Background="Transparent">
                                                                 <Path Data="M0,0 L8,8 M8,0 L0,8" 
-                      Stroke="{TemplateBinding Foreground}" 
-                      StrokeThickness="1.5" 
-                      VerticalAlignment="Center" 
-                      HorizontalAlignment="Center"
-                      IsHitTestVisible="False"/>
+                                          Stroke="{TemplateBinding Foreground}" 
+                                          StrokeThickness="1.5" 
+                                          VerticalAlignment="Center" 
+                                          HorizontalAlignment="Center"
+                                          IsHitTestVisible="False"/>
                                                             </Grid>
                                                         </ControlTemplate>
                                                     </Button.Template>
@@ -243,14 +248,26 @@
 
                                         <ControlTemplate.Triggers>
                                             <Trigger Property="IsSelected" Value="True">
-                                                <Setter TargetName="RootBorder" Property="Background" Value="#F0F0F0"/>
+                                                <Setter TargetName="RootBorder" Property="Background" Value="#FFFFFF"/>
+                                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="#7A7A80"/>
+                                                <Setter TargetName="RootBorder" Property="BorderThickness" Value="0,0,1,0"/>
                                                 <Setter TargetName="PART_CloseButton" Property="Foreground" Value="#505050"/>
                                                 <Setter TargetName="PART_CloseButton" Property="Visibility" Value="Visible"/>
                                             </Trigger>
 
                                             <Trigger Property="IsSelected" Value="False">
-                                                <Setter TargetName="RootBorder" Property="Background" Value="Transparent"/>
+                                                <Setter TargetName="RootBorder" Property="Background" Value="#D8D8DC"/>
+                                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="#7A7A80"/>
+                                                <Setter TargetName="RootBorder" Property="BorderThickness" Value="0,0,1,0"/>
                                             </Trigger>
+
+                                            <MultiTrigger>
+                                                <MultiTrigger.Conditions>
+                                                    <Condition Property="IsSelected" Value="False"/>
+                                                    <Condition Property="IsMouseOver" Value="True"/>
+                                                </MultiTrigger.Conditions>
+                                                <Setter TargetName="RootBorder" Property="Background" Value="#E5E5EA"/>
+                                            </MultiTrigger>
 
                                             <Trigger SourceName="PART_CloseButton" Property="IsMouseOver" Value="True">
                                                 <Setter TargetName="PART_CloseButton" Property="Foreground" Value="#FF4C4C"/>
@@ -274,8 +291,8 @@
                                             </DataTrigger>
 
                                             <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=dx:DXTabItem}}" Value="False">
-                                                <Setter TargetName="TabCaption" Property="Foreground" Value="#D6D6D6"/>
-                                                <Setter TargetName="TabSubCaption" Property="Foreground" Value="#90A4AE"/>
+                                                <Setter TargetName="TabCaption" Property="Foreground" Value="#4A4A4F"/>
+                                                <Setter TargetName="TabSubCaption" Property="Foreground" Value="#686870"/>
                                             </DataTrigger>
                                         </DataTemplate.Triggers>
                                     </DataTemplate>

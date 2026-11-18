@@ -65,8 +65,9 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
 
             if (hasDates)
             {
-                var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                // СТАЛО:
+                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ss");
+                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ss");
                 queryParams.Add($"from={fromStr}&till={tillStr}");
             }
 
@@ -112,8 +113,8 @@ public class ApiFundsTransfersRepository : IRepositoryWithFacets<FundsTransfer>,
 
             if (hasDates)
             {
-                var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ss");
+                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ss");
                 queryParams.Add($"from={fromStr}&till={tillStr}");
             }
 

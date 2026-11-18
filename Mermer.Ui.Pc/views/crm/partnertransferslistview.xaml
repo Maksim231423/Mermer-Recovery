@@ -12,72 +12,74 @@
                 xmlns:ctrl="clr-namespace:Mermer.Ui.Pc.Controls"
                 xmlns:menu="clr-namespace:Mermer.Ui.Pc.Controls.MenuItems"
                 xmlns:vm="clr-namespace:Mermer.Ui.Core.ViewModels.CRM;assembly=Mermer.Ui.Core">
-  <DockPanel>
-    <dxwui:AppBar DockPanel.Dock="Bottom" Style="{StaticResource MenuStyle}">
-      <ctrl:StyledGridSearchControl x:Name="SearchControl" View="{Binding View, ElementName=GridControl}"/>
-      <menu:ListCreateNew/>
-      <menu:ListViewDetails/>
-      <dxwui:AppBarSeparator/>
-      <menu:CommonReload/>
-      <menu:ListPrint x:Name="PrintButton"/>
-      <menu:ListFilter x:Name="FilterButton"/>
-      <menu:CommonClose/>
-    </dxwui:AppBar>
-    <ctrl:ListFilterControl DockPanel.Dock="Left"
+    <DockPanel>
+        <dxwui:AppBar DockPanel.Dock="Bottom" Style="{StaticResource MenuStyle}">
+            <ctrl:StyledGridSearchControl x:Name="SearchControl" View="{Binding View, ElementName=GridControl}"/>
+            <menu:ListCreateNew/>
+            <menu:ListViewDetails/>
+            <dxwui:AppBarSeparator/>
+            <menu:CommonReload/>
+            <menu:ListPrint x:Name="PrintButton"/>
+            <menu:ListFilter x:Name="FilterButton"/>
+            <menu:CommonClose/>
+        </dxwui:AppBar>
+        <ctrl:ListFilterControl DockPanel.Dock="Left"
                             Visibility="{Binding ElementName=ExpandButton, Path=IsChecked, Converter={dxmvvm:BooleanToVisibilityConverter}}"/>
-    <ToggleButton x:Name="ExpandButton" DockPanel.Dock="Left" Style="{StaticResource HideButtonStyle}"
+        <ToggleButton x:Name="ExpandButton" DockPanel.Dock="Left" Style="{StaticResource HideButtonStyle}"
                   IsChecked="True" VerticalAlignment="Center"/>
-    <ctrl:StyledGridControl x:Name="GridControl" PrintButton="{Binding ElementName=PrintButton, Mode=OneWay}"
+        <ctrl:StyledGridControl x:Name="GridControl" PrintButton="{Binding ElementName=PrintButton, Mode=OneWay}"
                             FilterButton="{Binding ElementName=FilterButton, Mode=OneWay}"
                             SearchControl="{Binding ElementName=SearchControl, Mode=OneWay}">
             <dxg:GridControl.Columns>
-        <dxg:GridColumn FieldName="Date" Header="{Localize Date}">
-          <dxg:ColumnBase.EditSettings>
-            <dxe:DateEditSettings DisplayFormat="g"/>
-          </dxg:ColumnBase.EditSettings>
-        </dxg:GridColumn>
-        <dxg:GridColumn FieldName="Code" Header="{Localize Code}"/>
-        <dxg:GridColumn Binding="{Binding OfficeIds, Converter={cnv:TokenConverter}}" Header="{Localize Offices}">
-          <dxg:ColumnBase.EditSettings>
-            <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Offices.List}">
-              <dxe:BaseEditSettings.StyleSettings>
-                <dxg:MultiSelectLookUpEditStyleSettings/>
-              </dxe:BaseEditSettings.StyleSettings>
-            </dxg:LookUpEditSettings>
-          </dxg:ColumnBase.EditSettings>
-        </dxg:GridColumn>
-        <dxg:GridColumn Binding="{Binding PartnerIds, Converter={cnv:TokenConverter}}" Header="{Localize Partners}">
-          <dxg:ColumnBase.EditSettings>
-            <dxg:LookUpEditSettings DisplayMember="Fullname" ValueMember="Id" ItemsSource="{Binding Partners.List}">
-              <dxe:BaseEditSettings.StyleSettings>
-                <dxg:MultiSelectLookUpEditStyleSettings/>
-              </dxe:BaseEditSettings.StyleSettings>
-            </dxg:LookUpEditSettings>
-          </dxg:ColumnBase.EditSettings>
-        </dxg:GridColumn>
-        <dxg:GridColumn FieldName="TotalCredit" Header="{Localize TotalCredit}"/>
-        <dxg:GridColumn FieldName="TotalDebit" Header="{Localize TotalDebit}"/>
-        <dxg:GridColumn FieldName="IsConflicted" Width="50" Header="{Localize Conflicted}"/>
-        <dxg:GridColumn FieldName="IsCompleted" Width="50" Header="{Localize Completed}"/>
-        <dxg:GridColumn FieldName="IsDisabled" Width="50" Header="{Localize Deleted}"/>
-        <dxg:GridColumn FieldName="UserName" Header="{Localize Author}"/>
-
-        <!-- Вывод тегов через TokenConverter -->
-        <dxg:GridColumn FieldName="Tags" Header="{Localize Tags}" Width="150">
-          <dxg:GridColumn.CellTemplate>
-            <DataTemplate>
-              <TextBlock Text="{Binding RowData.Row.Tags, Converter={cnv:TokenConverter}}"
-                         VerticalAlignment="Center"
-                         Margin="4,0"
-                         TextTrimming="CharacterEllipsis"/>
-            </DataTemplate>
-          </dxg:GridColumn.CellTemplate>
-        </dxg:GridColumn>
-
-        <!-- Колонка с группой -->
-                <!-- Колонка с группой -->
-                <dxg:GridColumn FieldName="Group" GroupIndex="0" SortIndex="0" SortOrder="Ascending" Header="{Localize Group}"/>
+                <dxg:GridColumn FieldName="Date" SortOrder="Ascending" Header="{Localize Date}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxe:DateEditSettings DisplayFormat="g"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="Code" Header="{Localize Code}"/>
+                <dxg:GridColumn Binding="{Binding OfficeIds, Converter={cnv:TokenConverter}}" Header="{Localize Offices}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Offices.List}">
+                            <dxe:BaseEditSettings.StyleSettings>
+                                <dxg:MultiSelectLookUpEditStyleSettings/>
+                            </dxe:BaseEditSettings.StyleSettings>
+                        </dxg:LookUpEditSettings>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn Binding="{Binding PartnerIds, Converter={cnv:TokenConverter}}" Header="{Localize Partners}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxg:LookUpEditSettings DisplayMember="Fullname" ValueMember="Id" ItemsSource="{Binding Partners.List}">
+                            <dxe:BaseEditSettings.StyleSettings>
+                                <dxg:MultiSelectLookUpEditStyleSettings/>
+                            </dxe:BaseEditSettings.StyleSettings>
+                        </dxg:LookUpEditSettings>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="TotalCredit" Header="{Localize TotalCredit}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxe:TextEditSettings DisplayFormat="n2" MaskType="Numeric" Mask="n2"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="TotalDebit" Header="{Localize TotalDebit}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxe:TextEditSettings DisplayFormat="n2" MaskType="Numeric" Mask="n2"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="IsConflicted" Width="50" Header="{Localize Conflicted}"/>
+                <dxg:GridColumn FieldName="IsCompleted" Width="50" Header="{Localize Completed}"/>
+                <dxg:GridColumn FieldName="IsDisabled" Width="50" Header="{Localize Deleted}"/>
+                <dxg:GridColumn FieldName="UserName" Header="{Localize Author}"/>
+                <dxg:GridColumn Binding="{Binding Tags, Converter={cnv:TokenConverter}}" Header="{Localize Tags}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxg:LookUpEditSettings>
+                            <dxe:BaseEditSettings.StyleSettings>
+                                <dxg:TokenLookUpEditStyleSettings/>
+                            </dxe:BaseEditSettings.StyleSettings>
+                        </dxg:LookUpEditSettings>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="Group" GroupIndex="0" Header="{Localize Group}"/>
             </dxg:GridControl.Columns>
         </ctrl:StyledGridControl>
-  </DockPanel>
+    </DockPanel>
 </mvx:MvxWpfView>

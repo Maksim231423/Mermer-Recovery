@@ -13,97 +13,94 @@
                 xmlns:ctrl="clr-namespace:Mermer.Ui.Pc.Controls"
                 xmlns:menu="clr-namespace:Mermer.Ui.Pc.Controls.MenuItems"
                 xmlns:vm="clr-namespace:Mermer.Ui.Core.ViewModels.FundsManagement;assembly=Mermer.Ui.Core">
-  <DockPanel>
-    <dxwui:AppBar DockPanel.Dock="Bottom" Style="{StaticResource MenuStyle}">
-      <ctrl:StyledGridSearchControl x:Name="SearchControl" View="{Binding View, ElementName=GridControl}"/>
-      <menu:CommonReload/>
+    <DockPanel>
+        <dxwui:AppBar DockPanel.Dock="Bottom" Style="{StaticResource MenuStyle}">
+            <ctrl:StyledGridSearchControl x:Name="SearchControl" View="{Binding View, ElementName=GridControl}"/>
+            <menu:CommonReload/>
             <menu:ListPrint x:Name="PrintButton" IsEnabled="{DXBinding '@e(GridControl).VisibleRowCount != 0'}"/>
             <menu:ListFilter x:Name="FilterButton"/>
-      <menu:CommonClose/>
-    </dxwui:AppBar>
-    <ctrl:ListFilterControl DockPanel.Dock="Left"
+            <menu:CommonClose/>
+        </dxwui:AppBar>
+        <ctrl:ListFilterControl DockPanel.Dock="Left"
                             Visibility="{Binding ElementName=ExpandButton, Path=IsChecked, Converter={dxmvvm:BooleanToVisibilityConverter}}"/>
-    <ToggleButton x:Name="ExpandButton" DockPanel.Dock="Left" Style="{StaticResource HideButtonStyle}"
+        <ToggleButton x:Name="ExpandButton" DockPanel.Dock="Left" Style="{StaticResource HideButtonStyle}"
                   IsChecked="True" VerticalAlignment="Center"/>
-    <dxlc:LayoutControl Margin="0" Orientation="Vertical">
-      <dxlc:LayoutGroup Orientation="Vertical" Margin="10, 10, 10, 0">
-        <dxlc:LayoutItem HorizontalAlignment="Left" Width="300" Label="{Localize Depository}">
-          <dxe:ComboBoxEdit ShowCustomItems="True" DisplayMember="Name" ValueMember="Id"
+        <dxlc:LayoutControl Margin="0" Orientation="Vertical">
+            <dxlc:LayoutGroup Orientation="Vertical" Margin="10, 10, 10, 0">
+                <dxlc:LayoutItem HorizontalAlignment="Left" Width="300" Label="{Localize Depository}">
+                    <dxe:ComboBoxEdit ShowCustomItems="True" DisplayMember="Name" ValueMember="Id"
                             EditValue="{Binding SelectedDepositoryIds, UpdateSourceTrigger=PropertyChanged}"
                             ItemsSource="{Binding Depositories.List}">
-            <dxe:BaseEdit.StyleSettings>
-              <dxe:CheckedComboBoxStyleSettings/>
-            </dxe:BaseEdit.StyleSettings>
-          </dxe:ComboBoxEdit>
-        </dxlc:LayoutItem>
+                        <dxe:BaseEdit.StyleSettings>
+                            <dxe:CheckedComboBoxStyleSettings/>
+                        </dxe:BaseEdit.StyleSettings>
+                    </dxe:ComboBoxEdit>
+                </dxlc:LayoutItem>
                 <dxlc:LayoutItem HorizontalAlignment="Left" Width="300" Label="{Localize 'Balance Currency'}">
                     <dxe:ComboBoxEdit ShowCustomItems="True" 
-                              DisplayMember="Name" 
-                              ValueMember="Id"
-                              EditValue="{Binding CurrencyId, UpdateSourceTrigger=PropertyChanged}"
-                              ItemsSource="{Binding Currencies.List}"
-                              NullValueButtonPlacement="EditBox"
-                              NullText="(none)"
-                              AllowNullInput="True"/>
+                      DisplayMember="Name" 
+                      ValueMember="Id"
+                      EditValue="{Binding CurrencyId, UpdateSourceTrigger=PropertyChanged}"
+                      ItemsSource="{Binding Currencies.List}"/>
                 </dxlc:LayoutItem>
             </dxlc:LayoutGroup>
-      <ctrl:StyledGridControl x:Name="GridControl" FilterString="[TransactionIsCompleted] And ![TransactionIsDisabled]"
+            <ctrl:StyledGridControl x:Name="GridControl" FilterString="[TransactionIsCompleted] And ![TransactionIsDisabled]"
                               PrintButton="{Binding ElementName=PrintButton, Mode=OneWay}"
                               FilterButton="{Binding ElementName=FilterButton, Mode=OneWay}"
                               SearchControl="{Binding ElementName=SearchControl, Mode=OneWay}">
-        <dxg:GridControl.Bands>
-          <dxg:GridControlBand Header="{Localize Transaction}">
-            <dxg:GridColumn FieldName="TransactionDate" SortOrder="Ascending" Header="{Localize Date}">
-              <dxg:ColumnBase.EditSettings>
-                <dxe:DateEditSettings DisplayFormat="g"/>
-              </dxg:ColumnBase.EditSettings>
-            </dxg:GridColumn>
-            <dxg:GridColumn FieldName="TransactionCode" Header="{Localize Code}"/>
-            <dxg:GridColumn FieldName="TransactionType" Header="{Localize Type}">
-              <dxg:ColumnBase.EditSettings>
-                <dxg:LookUpEditSettings DisplayMember="Text" ValueMember="Value" ItemsSource="{Binding Types.List}"/>
-              </dxg:ColumnBase.EditSettings>
-            </dxg:GridColumn>
-            <dxg:GridColumn FieldName="TransactionUserName" Header="{Localize Author}"/>
-            <dxg:GridColumn FieldName="TransactionIsCompleted" Width="50" Visible="false" Header="{Localize Completed}"/>
-            <dxg:GridColumn FieldName="TransactionIsDisabled" Width="50" Visible="false" Header="{Localize Deleted}"/>
-            <dxg:GridColumn Visible="false" Binding="{Binding TransactionTags, Converter={cnv:TokenConverter}}"
+                <dxg:GridControl.Bands>
+                    <dxg:GridControlBand Header="{Localize Transaction}">
+                        <dxg:GridColumn FieldName="TransactionDate" SortOrder="Ascending" Header="{Localize Date}">
+                            <dxg:ColumnBase.EditSettings>
+                                <dxe:DateEditSettings DisplayFormat="g"/>
+                            </dxg:ColumnBase.EditSettings>
+                        </dxg:GridColumn>
+                        <dxg:GridColumn FieldName="TransactionCode" Header="{Localize Code}"/>
+                        <dxg:GridColumn FieldName="TransactionType" Header="{Localize Type}">
+                            <dxg:ColumnBase.EditSettings>
+                                <dxg:LookUpEditSettings DisplayMember="Text" ValueMember="Value" ItemsSource="{Binding Types.List}"/>
+                            </dxg:ColumnBase.EditSettings>
+                        </dxg:GridColumn>
+                        <dxg:GridColumn FieldName="TransactionUserName" Header="{Localize Author}"/>
+                        <dxg:GridColumn FieldName="TransactionIsCompleted" Width="50" Visible="false" Header="{Localize Completed}"/>
+                        <dxg:GridColumn FieldName="TransactionIsDisabled" Width="50" Visible="false" Header="{Localize Deleted}"/>
+                        <dxg:GridColumn Visible="false" Binding="{Binding TransactionTags, Converter={cnv:TokenConverter}}"
                             Header="{Localize Tags}">
-              <dxg:ColumnBase.EditSettings>
-                <dxg:LookUpEditSettings>
-                  <dxe:BaseEditSettings.StyleSettings>
-                    <dxg:TokenLookUpEditStyleSettings/>
-                  </dxe:BaseEditSettings.StyleSettings>
-                </dxg:LookUpEditSettings>
-              </dxg:ColumnBase.EditSettings>
-            </dxg:GridColumn>
-            <dxg:GridColumn FieldName="TransactionGroup" Visible="false" Header="{Localize Group}"/>
-          </dxg:GridControlBand>
-          <dxg:GridControlBand Header="{Localize Action}">
-            <dxg:GridColumn FieldName="ActionDepositoryId" Header="{Localize Depository}">
-              <dxg:ColumnBase.EditSettings>
-                <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Depositories.List}"/>
-              </dxg:ColumnBase.EditSettings>
-            </dxg:GridColumn>
-            <dxg:GridColumn FieldName="ActionRelatedObjectName" Header="{Localize 'Related Object'}"/>
-            <dxg:GridColumn FieldName="ActionIncome" Style="{StaticResource AmountDisplayFormat}" Width="80"
+                            <dxg:ColumnBase.EditSettings>
+                                <dxg:LookUpEditSettings>
+                                    <dxe:BaseEditSettings.StyleSettings>
+                                        <dxg:TokenLookUpEditStyleSettings/>
+                                    </dxe:BaseEditSettings.StyleSettings>
+                                </dxg:LookUpEditSettings>
+                            </dxg:ColumnBase.EditSettings>
+                        </dxg:GridColumn>
+                        <dxg:GridColumn FieldName="TransactionGroup" Visible="false" Header="{Localize Group}"/>
+                    </dxg:GridControlBand>
+                    <dxg:GridControlBand Header="{Localize Action}">
+                        <dxg:GridColumn FieldName="ActionDepositoryId" Header="{Localize Depository}">
+                            <dxg:ColumnBase.EditSettings>
+                                <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Depositories.List}"/>
+                            </dxg:ColumnBase.EditSettings>
+                        </dxg:GridColumn>
+                        <dxg:GridColumn FieldName="ActionRelatedObjectName" Header="{Localize 'Related Object'}"/>
+                        <dxg:GridColumn FieldName="ActionIncome" Style="{StaticResource AmountDisplayFormat}" Width="80"
                             Header="{Localize Income}"/>
-            <dxg:GridColumn FieldName="ActionExpense" Style="{StaticResource AmountDisplayFormat}" Width="80"
+                        <dxg:GridColumn FieldName="ActionExpense" Style="{StaticResource AmountDisplayFormat}" Width="80"
                             Header="{Localize Expense}"/>
-            <dxg:GridColumn FieldName="ActionEffect" Style="{StaticResource AmountDisplayFormat}" Width="80"
+                        <dxg:GridColumn FieldName="ActionEffect" Style="{StaticResource AmountDisplayFormat}" Width="80"
                             Header="{Localize Effect}"/>
                         <dxg:GridColumn FieldName="ActionEffectInCustomCurrency" Width="100" Style="{StaticResource AmountDisplayFormat}"
                             Header="{Localize 'In Selected Currency'}"/>
                     </dxg:GridControlBand>
-        </dxg:GridControl.Bands>
-        <dxg:GridControl.TotalSummary>
-          <dxg:GridSummaryItem FieldName="TransactionDate" DisplayFormat="{}{0}" SummaryType="Count"/>
-          <dxg:GridSummaryItem FieldName="ActionIncome" DisplayFormat="#,##0.00" SummaryType="Sum"/>
-          <dxg:GridSummaryItem FieldName="ActionExpense" DisplayFormat="#,##0.00" SummaryType="Sum"/>
-          <dxg:GridSummaryItem FieldName="ActionEffect" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                </dxg:GridControl.Bands>
+                <dxg:GridControl.TotalSummary>
+                    <dxg:GridSummaryItem FieldName="TransactionDate" DisplayFormat="{}{0}" SummaryType="Count"/>
+                    <dxg:GridSummaryItem FieldName="ActionIncome" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                    <dxg:GridSummaryItem FieldName="ActionExpense" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                    <dxg:GridSummaryItem FieldName="ActionEffect" DisplayFormat="#,##0.00" SummaryType="Sum"/>
                     <dxg:GridSummaryItem FieldName="ActionEffectInCustomCurrency" DisplayFormat="#,##0.00" SummaryType="Sum"/>
                 </dxg:GridControl.TotalSummary>
-      </ctrl:StyledGridControl>
-    </dxlc:LayoutControl>
-  </DockPanel>
+            </ctrl:StyledGridControl>
+        </dxlc:LayoutControl>
+    </DockPanel>
 </mvx:MvxWpfView>

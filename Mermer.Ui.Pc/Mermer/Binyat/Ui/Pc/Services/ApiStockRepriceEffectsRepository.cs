@@ -21,7 +21,8 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                var query = $"?from={from.ToUniversalTime():O}&till={till.ToUniversalTime():O}";
+                // СТАЛО:
+                var query = $"?from={from:yyyy-MM-ddTHH:mm:ss}&till={till:yyyy-MM-ddTHH:mm:ss}";
                 if (warehouseIds != null)
                     foreach (var w in warehouseIds.Where(x => !string.IsNullOrEmpty(x)))
                         query += $"&warehouseId={w}";
@@ -35,7 +36,8 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                var query = $"?from={from.ToUniversalTime():O}&till={till.ToUniversalTime():O}";
+                // СТАЛО:
+                var query = $"?from={from:yyyy-MM-ddTHH:mm:ss}&till={till:yyyy-MM-ddTHH:mm:ss}";
                 var res = await _restClient.GetAsync<List<DateTime>>($"/api/stock-reprice-effects/dates{query}");
                 return res ?? new List<DateTime>();
             }
@@ -46,7 +48,8 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                var query = $"?from={from.ToUniversalTime():O}&till={till.ToUniversalTime():O}";
+                // СТАЛО:
+                var query = $"?from={from:yyyy-MM-ddTHH:mm:ss}&till={till:yyyy-MM-ddTHH:mm:ss}";
                 if (warehouses != null)
                     foreach (var w in warehouses.Where(x => !string.IsNullOrEmpty(x)))
                         query += $"&warehouseId={w}";

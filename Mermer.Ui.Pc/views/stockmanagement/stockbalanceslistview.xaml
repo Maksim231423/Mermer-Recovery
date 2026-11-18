@@ -17,7 +17,6 @@
                 xmlns:helpers="clr-namespace:Mermer.Ui.Pc.Helpers"
                 xmlns:dxb="http://schemas.devexpress.com/winfx/2008/xaml/bars">
 
-    <!-- ДОДАНО: Ресурси вікна з нашим конвертером для ігнорування NotLoadedObject -->
     <mvx:MvxWpfView.Resources>
         <cnv:IgnoreNotLoadedConverter x:Key="IgnoreNotLoadedConverter"/>
     </mvx:MvxWpfView.Resources>
@@ -34,27 +33,26 @@
         </dxwui:AppBar>
 
         <ctrl:ListFilterControl DockPanel.Dock="Left"
-                            Visibility="{Binding ElementName=ExpandButton, Path=IsChecked, Converter={dxmvvm:BooleanToVisibilityConverter}}"/>
+                                Visibility="{Binding ElementName=ExpandButton, Path=IsChecked, Converter={dxmvvm:BooleanToVisibilityConverter}}"/>
 
         <ToggleButton x:Name="ExpandButton" DockPanel.Dock="Left" Style="{StaticResource HideButtonStyle}"
-                  IsChecked="True" VerticalAlignment="Center"/>
+                      IsChecked="True" VerticalAlignment="Center"/>
 
         <dxlc:LayoutControl Margin="0" Orientation="Vertical">
             <dxlc:LayoutGroup Orientation="Vertical" Margin="10, 10, 10, 0">
                 <dxlc:LayoutItem HorizontalAlignment="Left" Width="500" Label="{Localize Warehouse}">
                     <dxlc:LayoutGroup>
-                        <!-- УБРАНО: ShowCustomItems="True" -->
                         <dxe:ComboBoxEdit DisplayMember="Name" ValueMember="Id"
-                          IsTextEditable="False" SeparatorString=", " NullText="{Localize 'All Warehouses'}"
-                          EditValue="{Binding SelectedWarehouseIds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                          ItemsSource="{Binding Warehouses.List}">
+                                          IsTextEditable="False" SeparatorString=", " NullText="{Localize 'All Warehouses'}"
+                                          EditValue="{Binding SelectedWarehouseIds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          ItemsSource="{Binding Warehouses.List}">
                             <dxe:ComboBoxEdit.StyleSettings>
                                 <dxe:CheckedComboBoxStyleSettings/>
                             </dxe:ComboBoxEdit.StyleSettings>
                         </dxe:ComboBoxEdit>
                         <dxe:CheckEdit HorizontalAlignment="Right" Margin="10,0,0,0"
-                       EditValue="{Binding AggregateWarehouses, UpdateSourceTrigger=PropertyChanged}"
-                       Content="{Localize Aggregate}"/>
+                                       EditValue="{Binding AggregateWarehouses, UpdateSourceTrigger=PropertyChanged}"
+                                       Content="{Localize Aggregate}"/>
                     </dxlc:LayoutGroup>
                 </dxlc:LayoutItem>
                 <dxlc:LayoutItem HorizontalAlignment="Left" Width="730" Label="{Localize Stock}">
@@ -63,83 +61,107 @@
                 <dxlc:LayoutItem/>
                 <dxlc:LayoutGroup VerticalAlignment="Top">
                     <Button Content="X" HorizontalAlignment="Left" Command="{Binding RemoveSelectedStockId}"
-                  Visibility="{Binding StockIdSelected, Converter={dxmvvm:BooleanToVisibilityConverter}}"/>
+                            Visibility="{Binding StockIdSelected, Converter={dxmvvm:BooleanToVisibilityConverter}}"/>
                     <Label VerticalContentAlignment="Center" MinHeight="24" Content="{Binding SelectedStockMessage}"/>
                 </dxlc:LayoutGroup>
             </dxlc:LayoutGroup>
 
-            
-
-            <!-- ДОДАНО: SelectedItem з підключеним конвертером -->
             <ctrl:StyledGridControl x:Name="GridControl" 
                                     ItemsSource="{Binding List}"
                                     SelectedItem="{Binding SelectedItem, Converter={StaticResource IgnoreNotLoadedConverter}}"
                                     PrintButton="{Binding ElementName=PrintButton, Mode=OneWay}"
                                     FilterButton="{Binding ElementName=FilterButton, Mode=OneWay}"
                                     SearchControl="{Binding ElementName=SearchControl, Mode=OneWay}">
-                
-                <!-- ДОБАВЛЕНО: Обработка двойного клика мыши по строке таблицы -->
+
                 <dxg:GridControl.View>
-                    <dxg:TableView AutoWidth="False" 
+                    <dxg:TableView AutoWidth="True" 
+                                   AllowResizing="True"
                                    ShowTotalSummary="True" 
                                    AllowEditing="False" 
-                                   NavigationStyle="Row" />
+                                   NavigationStyle="Row">
+                        <dxg:TableView.ColumnHeaderContentStyle>
+                            <Style TargetType="{x:Type ContentControl}">
+                                <Setter Property="TextBlock.TextWrapping" Value="Wrap"/>
+                                <Setter Property="TextBlock.TextAlignment" Value="Center"/>
+                            </Style>
+                        </dxg:TableView.ColumnHeaderContentStyle>
+                    </dxg:TableView>
                 </dxg:GridControl.View>
 
                 <dxg:GridControl.Bands>
+                    <!-- ТОВАР И СКЛАД -->
                     <dxg:GridControlBand Header="{Localize Stock}">
-                        <dxg:GridColumn FieldName="StockCode" ReadOnly="true" AllowEditing="False" AllowCellMerge="True"
-                            Header="{Localize Code}"/>
-                        <dxg:GridColumn FieldName="StockName" Width="600" ReadOnly="true" AllowEditing="False" AllowCellMerge="True"
-                            Header="{Localize Name}"/>
+                        <dxg:GridColumn FieldName="StockCode" Width="75"
+                                        ReadOnly="true" AllowEditing="False" AllowCellMerge="True"
+                                        Header="{Localize Code}"/>
+                        <dxg:GridColumn FieldName="StockName" Width="220"
+                                        ReadOnly="true" AllowEditing="False" AllowCellMerge="True"
+                                        Header="{Localize Name}"/>
                         <dxg:GridColumn FieldName="StockGroup" ReadOnly="true" AllowEditing="False" Visible="false"
-                            Header="{Localize Group}"/>
-                        <dxg:GridColumn FieldName="StockType" ReadOnly="true" AllowEditing="False" Visible="false" Header="{Localize Type}"/>
-                        <dxg:GridColumn FieldName="WarehouseId" ReadOnly="true" AllowEditing="False" AllowCellMerge="True"
-                            Header="{Localize Warehouse}"
-                            Visible="{Binding AggregateWarehouses, Converter={dxmvvm:BooleanNegationConverter}}">
+                                        Header="{Localize Group}"/>
+                        <dxg:GridColumn FieldName="StockType" ReadOnly="true" AllowEditing="False" Visible="false" 
+                                        Header="{Localize Type}"/>
+                        <dxg:GridColumn FieldName="WarehouseId" Width="90"
+                                        ReadOnly="true" AllowEditing="False" AllowCellMerge="True"
+                                        Header="{Localize Warehouse}"
+                                        Visible="{Binding AggregateWarehouses, Converter={dxmvvm:BooleanNegationConverter}}">
                             <dxg:ColumnBase.EditSettings>
                                 <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Warehouses.List}"/>
                             </dxg:ColumnBase.EditSettings>
                         </dxg:GridColumn>
                     </dxg:GridControlBand>
+
+                    <!-- НАЧАЛЬНЫЙ ОСТАТОК -->
                     <dxg:GridControlBand Header="{Localize Starting}">
-                        <dxg:GridColumn FieldName="StartingBalance" Style="{StaticResource QuantityDisplayFormat}" Width="90"
-                            Header="{Localize Balance}"/>
-                        <dxg:GridColumn FieldName="StockUnit" Width="70" ReadOnly="true" AllowEditing="False" Header="{Localize Unit}"/>
+                        <dxg:GridColumn FieldName="StartingBalance" Width="65"
+                                        Style="{StaticResource QuantityDisplayFormat}"
+                                        Header="{Localize Balance}"/>
+                        <dxg:GridColumn FieldName="StockUnit" Width="40"
+                                        ReadOnly="true" AllowEditing="False" 
+                                        Header="{Localize Unit}"/>
                     </dxg:GridControlBand>
+
+                    <!-- ПРИХОД -->
                     <dxg:GridControlBand Header="{Localize Income}">
-                        <dxg:GridColumn FieldName="StockOpening" Width="80" Style="{StaticResource QuantityDisplayFormat}"
-                            Header="{Localize Opening}"/>
-                        <dxg:GridColumn FieldName="RevisionExceed" Width="80" Style="{StaticResource QuantityDisplayFormat}"
-                            Header="{Localize 'Rev. Exc.'}"/>
-                        <dxg:GridColumn FieldName="StockTransferDestination" Width="80" Style="{StaticResource QuantityDisplayFormat}"
-                            Header="{Localize 'Transfer Destination'}"/>
-                        <dxg:GridColumn FieldName="SalesReturn" Width="80" Style="{StaticResource QuantityDisplayFormat}"
-                            Header="{Localize 'Sales Return'}"/>
-                        <dxg:GridColumn FieldName="Purchase" Width="80" Style="{StaticResource QuantityDisplayFormat}"
-                            Header="{Localize Purchase}"/>
+                        <dxg:GridColumn FieldName="StockOpening" Width="55" Style="{StaticResource QuantityDisplayFormat}"
+                                        Header="{Localize Opening}"/>
+                        <dxg:GridColumn FieldName="RevisionExceed" Width="55" Style="{StaticResource QuantityDisplayFormat}"
+                                        Header="{Localize 'Rev. Exc.'}"/>
+                        <dxg:GridColumn FieldName="StockTransferDestination" Width="65" Style="{StaticResource QuantityDisplayFormat}"
+                                        Header="{Localize 'Transfer Destination'}"/>
+                        <dxg:GridColumn FieldName="SalesReturn" Width="55" Style="{StaticResource QuantityDisplayFormat}"
+                                        Header="{Localize 'Sales Return'}"/>
+                        <dxg:GridColumn FieldName="Purchase" Width="55" Style="{StaticResource QuantityDisplayFormat}"
+                                        Header="{Localize Purchase}"/>
                     </dxg:GridControlBand>
+
+                    <!-- РАСХОД -->
                     <dxg:GridControlBand Header="{Localize Expense}">
-                        <dxg:GridColumn FieldName="StockSpoilage" Width="80" Style="{StaticResource QuantityDisplayFormat}"
-                            Header="{Localize Spoilage}"/>
-                        <dxg:GridColumn FieldName="StockUsage" Width="80" Style="{StaticResource QuantityDisplayFormat}"
-                            Header="{Localize Usage}"/>
-                        <dxg:GridColumn FieldName="RevisionDeficit" Width="80" Style="{StaticResource QuantityDisplayFormat}"
-                            Header="{Localize 'Rev. Def.'}"/>
-                        <dxg:GridColumn FieldName="StockTransferSource" Width="80" Style="{StaticResource QuantityDisplayFormat}"
-                            Header="{Localize 'Transfer Source'}"/>
-                        <dxg:GridColumn FieldName="Sales" Width="80" Style="{StaticResource QuantityDisplayFormat}"
-                            Header="{Localize Sales}"/>
-                        <dxg:GridColumn FieldName="PurchaseReturn" Width="80" Style="{StaticResource QuantityDisplayFormat}"
-                            Header="{Localize 'Purchase Return'}"/>
+                        <dxg:GridColumn FieldName="StockSpoilage" Width="55" Style="{StaticResource QuantityDisplayFormat}"
+                                        Header="{Localize Spoilage}"/>
+                        <dxg:GridColumn FieldName="StockUsage" Width="55" Style="{StaticResource QuantityDisplayFormat}"
+                                        Header="{Localize Usage}"/>
+                        <dxg:GridColumn FieldName="RevisionDeficit" Width="55" Style="{StaticResource QuantityDisplayFormat}"
+                                        Header="{Localize 'Rev. Def.'}"/>
+                        <dxg:GridColumn FieldName="StockTransferSource" Width="65" Style="{StaticResource QuantityDisplayFormat}"
+                                        Header="{Localize 'Transfer Source'}"/>
+                        <dxg:GridColumn FieldName="Sales" Width="55" Style="{StaticResource QuantityDisplayFormat}"
+                                        Header="{Localize Sales}"/>
+                        <dxg:GridColumn FieldName="PurchaseReturn" Width="55" Style="{StaticResource QuantityDisplayFormat}"
+                                        Header="{Localize 'Purchase Return'}"/>
                     </dxg:GridControlBand>
+
+                    <!-- КОНЕЧНЫЙ ОСТАТОК -->
                     <dxg:GridControlBand Header="{Localize Resulting}">
-                        <dxg:GridColumn FieldName="ResultingBalance" Style="{StaticResource QuantityDisplayFormat}" Width="90"
-                            Header="{Localize Balance}"/>
-                        <dxg:GridColumn FieldName="StockUnit" Width="70" ReadOnly="true" AllowEditing="False" Header="{Localize Unit}"/>
+                        <dxg:GridColumn FieldName="ResultingBalance" Width="70"
+                                        Style="{StaticResource QuantityDisplayFormat}"
+                                        Header="{Localize Balance}"/>
+                        <dxg:GridColumn FieldName="StockUnit" Width="40"
+                                        ReadOnly="true" AllowEditing="False" 
+                                        Header="{Localize Unit}"/>
                     </dxg:GridControlBand>
                 </dxg:GridControl.Bands>
+
                 <dxg:GridControl.TotalSummary>
                     <dxg:GridSummaryItem FieldName="StockCode" DisplayFormat="{}{0}" SummaryType="Count"/>
                     <dxg:GridSummaryItem FieldName="StartingBalance" DisplayFormat="#,##0.##" SummaryType="Sum"/>

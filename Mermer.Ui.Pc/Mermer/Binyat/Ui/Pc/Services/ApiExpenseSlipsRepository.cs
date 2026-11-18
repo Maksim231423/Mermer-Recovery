@@ -62,8 +62,9 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
             string url = "/api/spending/slips";
             if (hasDates)
             {
-                var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                // СТАЛО:
+                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ss");
+                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ss");
                 url += $"?from={fromStr}&till={tillStr}";
             }
 
@@ -100,8 +101,9 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
             string url = "/api/spending/slips/count";
             if (hasDates)
             {
-                var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                // СТАЛО:
+                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ss");
+                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ss");
                 url += $"?from={fromStr}&till={tillStr}";
             }
 
@@ -238,7 +240,7 @@ public class ApiExpenseSlipsRepository : IRepositoryWithFacets<ExpenseSlip>, IRe
         {
             Id = entity.Id,
             Code = entity.Code ?? "",
-            Date = entity.Date.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            Date = entity.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
             DepositoryId = entity.DepositoryId,
             DisplayCurrencyId = entity.DisplayCurrencyId,
             UserId = entity.UserId,

@@ -600,9 +600,9 @@ public class CommerceImportService
     private static bool TryGetDateTime(JsonElement body, string name, out DateTimeOffset res)
     {
         res = default;
-        if (TryGetPropAnywhere(body, name, out var v) && v.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(v.GetString(), out var dt))
+        if (TryGetPropAnywhere(body, name, out var v) && v.ValueKind == JsonValueKind.String && DateTime.TryParse(v.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            res = dt.ToUniversalTime();
+            res = new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc), TimeSpan.Zero);
             return true;
         }
         return false;

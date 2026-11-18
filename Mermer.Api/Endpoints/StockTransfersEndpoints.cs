@@ -38,7 +38,7 @@ public static class StockTransfersEndpoints
                 : DateTimeOffset.MinValue;
 
             DateTimeOffset endDate = !string.IsNullOrEmpty(tillStr)
-                ? ParseSafeFilterOffset(tillStr, isTill: true)
+                ? ParseSafeFilterOffset(tillStr, isTill: true, fromRaw: fromStr)
                 : DateTimeOffset.MaxValue;
 
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
@@ -48,7 +48,7 @@ public static class StockTransfersEndpoints
 
             var query = db.StockTransfers
                 .AsNoTracking()
-                .Where(t => !t.IsDisabled && t.Date >= startDate && t.Date <= endDate);
+                .Where(t => t.Date >= startDate && t.Date <= endDate);
 
             if (Guid.TryParse(warehouseId, out var srcGuid))
                 query = query.Where(t => t.WarehouseId == srcGuid);
@@ -145,7 +145,7 @@ public static class StockTransfersEndpoints
                 {
                     Id = t.Id.ToString(),
                     Code = t.Code ?? string.Empty,
-                    Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                    Date = t.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                     Type = "StockTransfer",
                     WarehouseId = t.WarehouseId?.ToString(),
                     DestinationWarehouseId = t.DestinationWarehouseId?.ToString(),
@@ -179,7 +179,7 @@ public static class StockTransfersEndpoints
         // 1.1. БЫСТРЫЙ ПОДСЧЕТ ДЛЯ ПЛИТОК ДАТ
         group.MapGet("/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            var query = db.StockTransfers.AsNoTracking().Where(t => !t.IsDisabled);
+            var query = db.StockTransfers.AsNoTracking();
 
             string? fromStr = req.Query["from"].FirstOrDefault();
             string? tillStr = req.Query["till"].FirstOrDefault();
@@ -195,7 +195,7 @@ public static class StockTransfersEndpoints
 
             if (!string.IsNullOrEmpty(tillStr))
             {
-                var endDate = ParseSafeFilterOffset(tillStr, isTill: true);
+                var endDate = ParseSafeFilterOffset(tillStr, isTill: true, fromStr);
                 query = query.Where(t => t.Date <= endDate);
             }
 
@@ -221,10 +221,48 @@ public static class StockTransfersEndpoints
             var t = await db.StockTransfers.Include(x => x.Lines).AsNoTracking().FirstOrDefaultAsync(x => x.Id == guid, ct);
             if (t == null) return Results.NotFound();
 
-            var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
-                         ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
+            var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
+                         ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => !c.IsDisabled, ct);
             var defCurId = defCur?.Id.ToString() ?? string.Empty;
+            var docCurId = t.DisplayCurrencyId?.ToString() ?? defCurId;
+
             var convertions = await GetCurrencyConvertionsAsync(db, t.Date.UtcDateTime, ct);
+
+            // Собираем конвертации единиц измерения (StockUnitConvertions)
+            var unitConvertionsDict = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            if (t.Lines != null)
+            {
+                foreach (var l in t.Lines)
+                {
+                    var sId = l.StockId?.ToString() ?? Guid.Empty.ToString();
+                    var uId = l.UnitId?.ToString() ?? Guid.Empty.ToString();
+                    var ruId = l.ReceivedUnitId?.ToString() ?? uId;
+
+                    string keySent = $"{sId}_{uId}";
+                    if (!unitConvertionsDict.ContainsKey(keySent))
+                    {
+                        unitConvertionsDict[keySent] = new
+                        {
+                            StockId = sId,
+                            UnitId = uId,
+                            Multiplier = 1m,
+                            Divider = 1m
+                        };
+                    }
+
+                    string keyRec = $"{sId}_{ruId}";
+                    if (!unitConvertionsDict.ContainsKey(keyRec))
+                    {
+                        unitConvertionsDict[keyRec] = new
+                        {
+                            StockId = sId,
+                            UnitId = ruId,
+                            Multiplier = 1m,
+                            Divider = 1m
+                        };
+                    }
+                }
+            }
 
             decimal linesSent = t.Lines != null && t.Lines.Any() ? t.Lines.Sum(l => l.ActionTotal) : 0m;
             decimal linesReceived = t.Lines != null && t.Lines.Any() ? t.Lines.Sum(l => l.ActionReceivedTotal) : 0m;
@@ -232,19 +270,24 @@ public static class StockTransfersEndpoints
             decimal sentTotal = linesSent != 0m ? linesSent : t.ActionTotal;
             decimal receivedTotal = linesReceived != 0m ? linesReceived : t.ActionReceivedTotal;
 
+            bool hasQuantityConflict = t.Lines != null && t.Lines.Any(l => l.Quantity != l.ReceivedQuantity);
+            bool isConflicted = hasQuantityConflict || (sentTotal != receivedTotal);
+
             return Results.Ok(new
             {
                 Id = t.Id.ToString(),
                 Code = t.Code ?? string.Empty,
-                Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                Date = t.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                 Type = "StockTransfer",
                 WarehouseId = t.WarehouseId?.ToString(),
                 DestinationWarehouseId = t.DestinationWarehouseId?.ToString(),
-                DisplayCurrencyId = t.DisplayCurrencyId?.ToString() ?? defCurId,
+                DisplayCurrencyId = docCurId,
                 CurrencyConvertions = convertions,
+                StockUnitConvertions = unitConvertionsDict.Values.ToList(), // <-- ДОБАВЛЕНО
                 UserName = t.UserName ?? "admin",
                 IsCompleted = t.IsCompleted,
                 IsDisabled = t.IsDisabled,
+                IsConflicted = isConflicted,
                 Group = t.GroupName ?? string.Empty,
                 Tags = t.Tags != null ? t.Tags.ToList() : new List<string>(),
                 Description = t.Description ?? string.Empty,
@@ -252,6 +295,7 @@ public static class StockTransfersEndpoints
                 ActionReceivedTotal = receivedTotal,
                 DisplayTotal = sentTotal,
                 DisplayReceivedTotal = receivedTotal,
+                Total = sentTotal,
                 Lines = t.Lines != null ? t.Lines.Select(l => (object)new
                 {
                     Id = l.Id.ToString(),
@@ -259,11 +303,13 @@ public static class StockTransfersEndpoints
                     StockId = l.StockId?.ToString(),
                     UnitId = l.UnitId?.ToString(),
                     ReceivedUnitId = l.ReceivedUnitId?.ToString() ?? l.UnitId?.ToString(),
+                    CurrencyId = docCurId, // <-- ВОТ ЗДЕСЬ БЫЛА ОШИБКА: CurrencyId не отдавался клиенту!
                     Quantity = l.Quantity,
                     ReceivedQuantity = l.ReceivedQuantity,
                     Price = l.Price,
-                    ActionTotal = l.ActionTotal,
-                    ActionReceivedTotal = l.ActionReceivedTotal,
+                    Total = l.ActionTotal != 0m ? l.ActionTotal : (l.Quantity * l.Price),
+                    ActionTotal = l.ActionTotal != 0m ? l.ActionTotal : (l.Quantity * l.Price),
+                    ActionReceivedTotal = l.ActionReceivedTotal != 0m ? l.ActionReceivedTotal : (l.ReceivedQuantity * l.Price),
                     SortOrder = l.SortOrder
                 }).ToList() : new List<object>()
             });
@@ -307,11 +353,11 @@ public static class StockTransfersEndpoints
                 dispCurId = defCur?.Id;
             }
 
-            DateTimeOffset date = DateTimeOffset.UtcNow;
+            DateTimeOffset date = new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
             string? dateStr = GetStringProp(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr))
+            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate))
             {
-                date = ParseCleanDateOffset(dateStr);
+                date = new DateTimeOffset(DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc), TimeSpan.Zero);
             }
 
             var tagsList = ExtractTagsFromRawJson(root);
@@ -374,10 +420,15 @@ public static class StockTransfersEndpoints
             else
             {
                 existing.Code = code;
-                existing.Date = date;
                 existing.WarehouseId = srcWhId;
                 existing.DestinationWarehouseId = dstWhId;
-                existing.DisplayCurrencyId = dispCurId;
+
+                // Если валюта в базе ранее не была сохранена — заполняем её
+                if (!existing.DisplayCurrencyId.HasValue && dispCurId.HasValue)
+                {
+                    existing.DisplayCurrencyId = dispCurId;
+                }
+
                 existing.IsCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
                 existing.IsDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
                 existing.GroupName = groupName;
@@ -465,21 +516,35 @@ public static class StockTransfersEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var now = DateTimeOffset.Now;
-                    var todayStart = new DateTimeOffset(now.Year, now.Month, now.Day, 0, 0, 0, now.Offset);
-                    var weekStart = todayStart.AddDays(-7);
-                    var monthStart = new DateTimeOffset(now.Year, now.Month, 1, 0, 0, 0, now.Offset);
+                    var today = DateTime.Today;
+                    var todayStart = new DateTimeOffset(DateTime.SpecifyKind(today, DateTimeKind.Utc), TimeSpan.Zero);
+                    var tomorrowStart = todayStart.AddDays(1);
+                    var yesterdayStart = todayStart.AddDays(-1);
 
-                    var countToday = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= todayStart, ct);
-                    var countWeek = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= weekStart, ct);
-                    var countMonth = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= monthStart, ct);
+                    int diff = (7 + (today.DayOfWeek - DayOfWeek.Monday)) % 7;
+                    var weekStart = todayStart.AddDays(-1 * diff);
+                    var pastWeekStart = weekStart.AddDays(-7);
+
+                    var monthStart = new DateTimeOffset(DateTime.SpecifyKind(new DateTime(today.Year, today.Month, 1), DateTimeKind.Utc), TimeSpan.Zero);
+                    var pastMonthStart = monthStart.AddMonths(-1);
+
+                    var countToday = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= todayStart && r.Date < tomorrowStart, ct);
+                    var countYesterday = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= yesterdayStart && r.Date < todayStart, ct);
+                    var countWeek = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= weekStart && r.Date < tomorrowStart, ct);
+                    var countPastWeek = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= pastWeekStart && r.Date < weekStart, ct);
+                    var countMonth = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= monthStart && r.Date < tomorrowStart, ct);
+                    var countPastMonth = await db.StockTransfers.CountAsync(r => !r.IsDisabled && r.Date >= pastMonthStart && r.Date < monthStart, ct);
                     var countAll = await db.StockTransfers.CountAsync(r => !r.IsDisabled, ct);
 
                     result[field] = new Dictionary<string, int>
                     {
                         { "#Today", countToday },
+                        { "#Yesturday", countYesterday },
+                        { "#Yesterday", countYesterday },
                         { "#This Week", countWeek },
+                        { "#Past Week", countPastWeek },
                         { "#This Month", countMonth },
+                        { "#Past Month", countPastMonth },
                         { "#All Records", countAll }
                     };
                 }
@@ -496,41 +561,44 @@ public static class StockTransfersEndpoints
     #region Helpers
     private static DateTimeOffset ParseCleanDateOffset(string raw)
     {
+        if (string.IsNullOrWhiteSpace(raw)) return new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
         raw = raw.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            return dto.ToUniversalTime();
-        }
+
         if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            return new DateTimeOffset(dt.ToUniversalTime());
+            return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc), TimeSpan.Zero);
         }
-        return DateTimeOffset.UtcNow;
+        return new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
     }
 
-    private static DateTimeOffset ParseSafeFilterOffset(string raw, bool isTill = false)
+    private static DateTimeOffset ParseSafeFilterOffset(string raw, bool isTill = false, string? fromRaw = null)
     {
+        if (string.IsNullOrWhiteSpace(raw))
+            return isTill ? new DateTimeOffset(new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc), TimeSpan.Zero)
+                          : new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc), TimeSpan.Zero);
+
         raw = raw.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
-            {
-                return new DateTimeOffset(dto.Year, dto.Month, dto.Day, 23, 59, 59, dto.Offset).ToUniversalTime();
-            }
-            return dto.ToUniversalTime();
-        }
 
         if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            var offset = DateTimeOffset.Now.Offset;
             if (isTill && dt.TimeOfDay == TimeSpan.Zero)
             {
-                return new DateTimeOffset(dt.Year, dt.Month, dt.Day, 23, 59, 59, offset).ToUniversalTime();
+                if (!string.IsNullOrWhiteSpace(fromRaw) &&
+                    DateTime.TryParse(fromRaw.Replace(" ", "+").Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var fDt) &&
+                    dt.Date > fDt.Date)
+                {
+                    dt = dt.AddTicks(-1);
+                }
+                else
+                {
+                    dt = dt.Date.AddDays(1).AddTicks(-1);
+                }
             }
-            return new DateTimeOffset(dt, offset).ToUniversalTime();
+            return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc), TimeSpan.Zero);
         }
 
-        return isTill ? DateTimeOffset.UtcNow.AddYears(10) : DateTimeOffset.UtcNow.AddYears(-10);
+        return isTill ? new DateTimeOffset(new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc), TimeSpan.Zero)
+                      : new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc), TimeSpan.Zero);
     }
 
     private static List<string> ExtractTagsFromRawJson(JsonElement root)

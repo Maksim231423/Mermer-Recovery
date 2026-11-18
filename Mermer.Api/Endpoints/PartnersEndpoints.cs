@@ -23,15 +23,72 @@ public static class PartnersEndpoints
     {
         var group = routes.MapGroup("/api/partners").WithTags("Partners");
 
-        // 1. СПИСОК ПАРТНЕРОВ
+        // 0. СПИСОК ПАРТНЕРОВ (ГАРАНТИРОВАННАЯ СОВМЕСТИМОСТЬ С КЛИЕНТОМ)
         group.MapGet("/", async (MermerDbContext db, CancellationToken ct) =>
         {
             var partners = await db.Partners
                 .AsNoTracking()
+                .Where(p => !p.IsDisabled)
                 .OrderBy(p => p.Name)
                 .ToListAsync(ct);
-            return Results.Ok(partners);
+
+            var jsonOptions = new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = null, // PascalCase для WPF-клиента
+                PropertyNameCaseInsensitive = true
+            };
+
+            return Results.Json(partners, jsonOptions);
         });
+
+        // 1. БЫСТРЫЙ СЕРВЕРНЫЙ ПОИСК ПАРТНЕРОВ (БЕЗ ОГРАНИЧЕНИЙ)
+        group.MapGet("/search", async (string? q, MermerDbContext db, CancellationToken ct) =>
+        {
+            var connStr = db.Database.GetConnectionString();
+            await using var conn = new NpgsqlConnection(connStr);
+
+            string? term = string.IsNullOrWhiteSpace(q) ? null : q.Trim();
+
+            // SQL без LIMIT: возвращает все совпадения по коду, имени или телефону
+            const string sql = """
+                SELECT 
+                    p.id::text AS "Id",
+                    COALESCE(p.code, '') AS "Code",
+                    COALESCE(p.name, '') AS "Name",
+                    TRIM(COALESCE(p.code, '') || ' ' || COALESCE(p.name, '')) AS "Fullname",
+                    COALESCE(p.phone, '') AS "Phone"
+                FROM partners p
+                WHERE p.is_disabled = false
+                  AND (
+                      @term IS NULL 
+                      OR p.name ILIKE @query 
+                      OR p.code ILIKE @query 
+                      OR (p.phone IS NOT NULL AND p.phone ILIKE @query)
+                  )
+                ORDER BY 
+                    CASE 
+                        WHEN @exact IS NOT NULL AND p.code ILIKE @exact THEN 1
+                        WHEN @startsWith IS NOT NULL AND p.name ILIKE @startsWith THEN 2
+                        ELSE 3 
+                    END,
+                    p.name;
+            """;
+
+            var results = await conn.QueryAsync(new CommandDefinition(
+                sql,
+                new
+                {
+                    term,
+                    query = term != null ? $"%{term}%" : null,
+                    exact = term,
+                    startsWith = term != null ? $"{term}%" : null
+                },
+                cancellationToken: ct));
+
+            var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = null };
+            return Results.Json(results, jsonOptions);
+        })
+        .WithName("PartnersSearchFast");
 
         // 2. СЛИЯНИЕ КОНТРАГЕНТОВ (MERGE)
         group.MapPost("/merge", async (PartnerMergeDto dto, MermerDbContext db, CancellationToken ct) =>
@@ -445,14 +502,25 @@ public static class PartnersEndpoints
                 return Results.Ok(facets);
             }
 
-            var todayUtc = DateTime.UtcNow.Date;
-            var weekStart = todayUtc.AddDays(-7);
-            var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+            var todayLocal = DateTime.Today;
+            var todayUtc = DateTime.SpecifyKind(todayLocal, DateTimeKind.Utc);
+            var tomorrowUtc = todayUtc.AddDays(1);
+            var yesterdayUtc = todayUtc.AddDays(-1);
 
-            var countToday = await db.PartnerSlips.CountAsync(s => !s.IsDisabled && s.Date >= todayUtc, ct);
-            var countWeek = await db.PartnerSlips.CountAsync(s => !s.IsDisabled && s.Date >= weekStart, ct);
-            var countMonth = await db.PartnerSlips.CountAsync(s => !s.IsDisabled && s.Date >= monthStart, ct);
-            var countAll = await db.PartnerSlips.CountAsync(s => !s.IsDisabled, ct);
+            int diff = (7 + (todayLocal.DayOfWeek - DayOfWeek.Monday)) % 7;
+            var weekStart = DateTime.SpecifyKind(todayLocal.AddDays(-1 * diff), DateTimeKind.Utc);
+            var pastWeekStart = weekStart.AddDays(-7);
+
+            var monthStart = new DateTime(todayLocal.Year, todayLocal.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+            var pastMonthStart = monthStart.AddMonths(-1);
+
+            var countToday = await db.PartnerSlips.CountAsync(s => s.Date >= todayUtc && s.Date < tomorrowUtc, ct);
+            var countYesterday = await db.PartnerSlips.CountAsync(s => s.Date >= yesterdayUtc && s.Date < todayUtc, ct);
+            var countWeek = await db.PartnerSlips.CountAsync(s => s.Date >= weekStart && s.Date < tomorrowUtc, ct);
+            var countPastWeek = await db.PartnerSlips.CountAsync(s => s.Date >= pastWeekStart && s.Date < weekStart, ct);
+            var countMonth = await db.PartnerSlips.CountAsync(s => s.Date >= monthStart && s.Date < tomorrowUtc, ct);
+            var countPastMonth = await db.PartnerSlips.CountAsync(s => s.Date >= pastMonthStart && s.Date < monthStart, ct);
+            var countAll = await db.PartnerSlips.CountAsync(ct);
 
             var entityFacets = await FacetsHelper.GetEntityFacetsAsync(connStr, "partner_slips", "GroupNames,TagNames,Group,Tags", ct);
             var groups = entityFacets.TryGetValue("Group", out var g) ? g : new Dictionary<string, int>();
@@ -464,8 +532,12 @@ public static class PartnersEndpoints
                 ["Date"] = new Dictionary<string, int>
                 {
                     { "#Today", countToday },
+                    { "#Yesturday", countYesterday },
+                    { "#Yesterday", countYesterday },
                     { "#This Week", countWeek },
+                    { "#Past Week", countPastWeek },
                     { "#This Month", countMonth },
+                    { "#Past Month", countPastMonth },
                     { "#All Records", countAll }
                 }
             });
@@ -478,11 +550,11 @@ public static class PartnersEndpoints
             string? tillStr = req.Query["till"].FirstOrDefault();
 
             DateTime fDate = ParseSafeDate(fromStr, isTill: false);
-            DateTime tDate = ParseSafeDate(tillStr, isTill: true);
+            DateTime tDate = ParseSafeDate(tillStr, isTill: true, fromStr);
 
             var count = await db.PartnerSlips
                 .AsNoTracking()
-                .Where(s => !s.IsDisabled && s.Date >= fDate && s.Date <= tDate)
+                .Where(s => s.Date >= fDate && s.Date <= tDate)
                 .CountAsync(ct);
 
             return Results.Ok(new { count });
@@ -504,12 +576,12 @@ public static class PartnersEndpoints
             string? tillStr = req.Query["till"].FirstOrDefault();
 
             DateTime fDate = ParseSafeDate(fromStr, isTill: false);
-            DateTime tDate = ParseSafeDate(tillStr, isTill: true);
+            DateTime tDate = ParseSafeDate(tillStr, isTill: true, fromStr);
 
             var slips = await db.PartnerSlips
-                .AsNoTracking()
-                .Where(s => !s.IsDisabled && s.Date >= fDate && s.Date <= tDate)
-                .OrderByDescending(s => s.Date)
+                 .AsNoTracking()
+                 .Where(s => s.Date >= fDate && s.Date <= tDate)
+                 .OrderByDescending(s => s.Date)
                 .Skip(skip)
                 .Take(take)
                 .Include(s => s.Lines)
@@ -520,7 +592,7 @@ public static class PartnersEndpoints
             {
                 Id = s.Id.ToString(),
                 Code = s.Code,
-                Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                Date = s.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                 SlipType = s.SlipType == "PartnerOpeningBalance" ? 0 : 1,
                 Type = s.SlipType,
                 OfficeId = s.OfficeId?.ToString(),
@@ -582,7 +654,9 @@ public static class PartnersEndpoints
             }
 
             string dateStr = GetJsonString(root, "date", "Date");
-            DateTime slipDate = ParseCleanDate(dateStr);
+            DateTime slipDate = !string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var parsedDate)
+                ? DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc)
+                : DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
 
             string groupName = GetJsonString(root, "group", "Group") ?? string.Empty;
             string description = GetJsonString(root, "description", "Description") ?? string.Empty;
@@ -593,11 +667,21 @@ public static class PartnersEndpoints
                 .Include(s => s.Lines)
                 .FirstOrDefaultAsync(s => s.Id == slipId);
 
+            // Создаем словарь существующих строк для сохранения их оригинальной валюты
+            var existingLinesMap = existing?.Lines?
+                .Where(l => l.Id != Guid.Empty)
+                .ToDictionary(l => l.Id) ?? new Dictionary<Guid, PartnerSlipLineEntity>();
+
             var linesList = new List<PartnerSlipLineEntity>();
             if (TryGetPropertyCaseInsensitive(root, "lines", out var linesProp) && linesProp.ValueKind == JsonValueKind.Array)
             {
                 foreach (var l in linesProp.EnumerateArray())
                 {
+                    string lineIdStr = GetJsonString(l, "id", "Id");
+                    Guid lineId = Guid.TryParse(lineIdStr, out var parsedLineGuid) && parsedLineGuid != Guid.Empty
+                        ? parsedLineGuid
+                        : Guid.NewGuid();
+
                     string partnerIdStr = GetJsonString(l, "partnerId", "PartnerId");
                     Guid? pGuid = Guid.TryParse(partnerIdStr, out var parsedP) ? parsedP : null;
 
@@ -610,9 +694,19 @@ public static class PartnersEndpoints
                     decimal debit = GetJsonDecimal(l, "debitAmount", "DebitAmount");
                     decimal credit = GetJsonDecimal(l, "creditAmount", "CreditAmount");
 
+                    // ЕСЛИ СТРОКА УЖЕ СУЩЕСТВОВАЛА — СОХРАНЯЕМ ЕЁ ИСХОДНУЮ ВАЛЮТУ ИЗ БАЗЫ:
+                    if (existingLinesMap.TryGetValue(lineId, out var oldLine))
+                    {
+                        if (oldLine.DebitCurrencyId.HasValue)
+                            debitCurGuid = oldLine.DebitCurrencyId;
+
+                        if (oldLine.CreditCurrencyId.HasValue)
+                            creditCurGuid = oldLine.CreditCurrencyId;
+                    }
+
                     linesList.Add(new PartnerSlipLineEntity
                     {
-                        Id = Guid.NewGuid(),
+                        Id = lineId,
                         PartnerSlipId = slipId,
                         PartnerId = pGuid,
                         DebitAmount = debit,
@@ -647,13 +741,19 @@ public static class PartnersEndpoints
             else
             {
                 existing.Code = code;
-                existing.Date = slipDate;
                 existing.SlipType = slipType;
                 existing.OfficeId = officeGuid;
                 existing.UserName = userName;
                 existing.Group = groupName;
                 existing.Tags = tagsList.ToArray();
                 existing.Description = description;
+
+                if (TryGetPropertyCaseInsensitive(root, "isCompleted", out var compProp) && (compProp.ValueKind == JsonValueKind.True || compProp.ValueKind == JsonValueKind.False))
+                    existing.IsCompleted = compProp.GetBoolean();
+
+                if (TryGetPropertyCaseInsensitive(root, "isDisabled", out var disProp) && (disProp.ValueKind == JsonValueKind.True || disProp.ValueKind == JsonValueKind.False))
+                    existing.IsDisabled = disProp.GetBoolean();
+
                 existing.UpdatedAt = DateTime.UtcNow;
 
                 if (existing.Lines != null && existing.Lines.Any())
@@ -677,16 +777,27 @@ public static class PartnersEndpoints
         // 9. ФАСЕТЫ ДЛЯ PARTNER TRANSFERS
         group.MapGet("/transfers/facets", async (string? fields, MermerDbContext db, CancellationToken ct) =>
         {
-            var todayUtc = DateTime.UtcNow.Date;
-            var weekStart = todayUtc.AddDays(-7);
-            var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
-            var yearStart = new DateTime(todayUtc.Year, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            var todayLocal = DateTime.Today;
+            var todayUtc = DateTime.SpecifyKind(todayLocal, DateTimeKind.Utc);
+            var tomorrowUtc = todayUtc.AddDays(1);
+            var yesterdayUtc = todayUtc.AddDays(-1);
 
-            var countToday = await db.PartnerTransfers.CountAsync(t => !t.IsDisabled && t.Date >= todayUtc, ct);
-            var countWeek = await db.PartnerTransfers.CountAsync(t => !t.IsDisabled && t.Date >= weekStart, ct);
-            var countMonth = await db.PartnerTransfers.CountAsync(t => !t.IsDisabled && t.Date >= monthStart, ct);
-            var countYear = await db.PartnerTransfers.CountAsync(t => !t.IsDisabled && t.Date >= yearStart, ct);
-            var countAll = await db.PartnerTransfers.CountAsync(t => !t.IsDisabled, ct);
+            int diff = (7 + (todayLocal.DayOfWeek - DayOfWeek.Monday)) % 7;
+            var weekStart = DateTime.SpecifyKind(todayLocal.AddDays(-1 * diff), DateTimeKind.Utc);
+            var pastWeekStart = weekStart.AddDays(-7);
+
+            var monthStart = new DateTime(todayLocal.Year, todayLocal.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+            var pastMonthStart = monthStart.AddMonths(-1);
+            var yearStart = new DateTime(todayLocal.Year, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+            var countToday = await db.PartnerTransfers.CountAsync(t => t.Date >= todayUtc && t.Date < tomorrowUtc, ct);
+            var countYesterday = await db.PartnerTransfers.CountAsync(t => t.Date >= yesterdayUtc && t.Date < todayUtc, ct);
+            var countWeek = await db.PartnerTransfers.CountAsync(t => t.Date >= weekStart && t.Date < tomorrowUtc, ct);
+            var countPastWeek = await db.PartnerTransfers.CountAsync(t => t.Date >= pastWeekStart && t.Date < weekStart, ct);
+            var countMonth = await db.PartnerTransfers.CountAsync(t => t.Date >= monthStart && t.Date < tomorrowUtc, ct);
+            var countPastMonth = await db.PartnerTransfers.CountAsync(t => t.Date >= pastMonthStart && t.Date < monthStart, ct);
+            var countYear = await db.PartnerTransfers.CountAsync(t => t.Date >= yearStart, ct);
+            var countAll = await db.PartnerTransfers.CountAsync(ct);
 
             var connStr = db.Database.GetConnectionString()!;
             var entityFacets = await FacetsHelper.GetEntityFacetsAsync(connStr, "partner_transfers", fields ?? "GroupNames,TagNames,Group,Tags", ct);
@@ -699,8 +810,12 @@ public static class PartnersEndpoints
                 ["Date"] = new Dictionary<string, int>
                 {
                     { "#Today", countToday },
+                    { "#Yesturday", countYesterday },
+                    { "#Yesterday", countYesterday },
                     { "#This Week", countWeek },
+                    { "#Past Week", countPastWeek },
                     { "#This Month", countMonth },
+                    { "#Past Month", countPastMonth },
                     { "#This Year", countYear },
                     { "#All Records", countAll }
                 }
@@ -714,12 +829,12 @@ public static class PartnersEndpoints
             string? tillStr = req.Query["till"].FirstOrDefault();
 
             DateTime fDate = ParseSafeDate(fromStr, isTill: false);
-            DateTime tDate = ParseSafeDate(tillStr, isTill: true);
+            DateTime tDate = ParseSafeDate(tillStr, isTill: true, fromStr); // <-- передаем fromStr
 
             var count = await db.PartnerTransfers
-                .AsNoTracking()
-                .Where(t => !t.IsDisabled && t.Date >= fDate && t.Date <= tDate)
-                .CountAsync(ct);
+             .AsNoTracking()
+             .Where(t => t.Date >= fDate && t.Date <= tDate)
+             .CountAsync(ct);
 
             return Results.Ok(new { count });
         })
@@ -735,11 +850,11 @@ public static class PartnersEndpoints
             string? tillStr = req.Query["till"].FirstOrDefault();
 
             DateTime fDate = ParseSafeDate(fromStr, isTill: false);
-            DateTime tDate = ParseSafeDate(tillStr, isTill: true);
+            DateTime tDate = ParseSafeDate(tillStr, isTill: true, fromStr);
 
             var transfers = await db.PartnerTransfers
                 .AsNoTracking()
-                .Where(t => !t.IsDisabled && t.Date >= fDate && t.Date <= tDate)
+                .Where(t => t.Date >= fDate && t.Date <= tDate)
                 .OrderBy(t => t.Group == null ? string.Empty : t.Group.Trim())
                 .ThenByDescending(t => t.Date)
                 .Skip(skip)
@@ -779,18 +894,28 @@ public static class PartnersEndpoints
 
                 string normalizedGroup = string.IsNullOrWhiteSpace(t.Group) ? string.Empty : t.Group.Trim();
 
+                // Считаем суммы Дебета и Кредита строк перевода
+                decimal totalDebit = t.Lines?.Sum(l => l.DebitAmount) ?? 0m;
+                decimal totalCredit = t.Lines?.Sum(l => l.CreditAmount) ?? 0m;
+
+                // Конфликт возникает при любом расхождении (больше или меньше)
+                bool isConflicted = totalDebit != totalCredit;
+
                 return new
                 {
                     Id = t.Id.ToString(),
                     Code = t.Code,
-                    Date = t.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                    Date = t.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                     Type = "PartnerTransfer",
                     UserName = t.UserName ?? "admin",
                     Group = normalizedGroup,
                     Tags = t.Tags != null ? t.Tags.ToList() : new List<string>(),
                     Description = t.Description ?? string.Empty,
+                    TotalDebit = totalDebit,
+                    TotalCredit = totalCredit,
                     IsDisabled = t.IsDisabled,
                     IsCompleted = t.IsCompleted,
+                    IsConflicted = isConflicted, // ДОБАВЛЕНО: передача флага конфликта в клиент
                     DocType = "PartnerTransfer",
                     Lines = t.Lines != null && t.Lines.Any()
                         ? t.Lines.Select(l => (object)new
@@ -818,7 +943,7 @@ public static class PartnersEndpoints
         });
 
         // 11. СОХРАНЕНИЕ ПЕРЕВОДОВ PARTNER TRANSFERS
-        group.MapPost("/transfers", async (HttpRequest request, MermerDbContext db) =>
+        Func<HttpRequest, MermerDbContext, Task<IResult>> savePartnerTransferHandler = async (request, db) =>
         {
             using var reader = new StreamReader(request.Body);
             var body = await reader.ReadToEndAsync();
@@ -832,7 +957,9 @@ public static class PartnersEndpoints
 
             string code = GetJsonString(root, "code", "Code") ?? $"DOC-{DateTime.UtcNow:yyMMddHHmmss}";
             string dateStr = GetJsonString(root, "date", "Date");
-            DateTime transferDate = ParseCleanDate(dateStr);
+            DateTime transferDate = !string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate)
+                ? DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc)
+                : DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
 
             string rawGroup = GetJsonString(root, "group", "Group");
             string groupName = string.IsNullOrWhiteSpace(rawGroup) ? string.Empty : rawGroup.Trim();
@@ -840,6 +967,21 @@ public static class PartnersEndpoints
             string description = GetJsonString(root, "description", "Description") ?? string.Empty;
             string userName = GetJsonString(root, "userName", "UserName") ?? "admin";
             var tagsList = ExtractTagsFromRawJson(root);
+
+            // ИСПРАВЛЕНИЕ: считываем флаги IsDisabled и IsCompleted из JSON
+            bool isCompleted = true;
+            if (TryGetPropertyCaseInsensitive(root, "isCompleted", out var compProp) || TryGetPropertyCaseInsensitive(root, "IsCompleted", out compProp))
+            {
+                if (compProp.ValueKind == JsonValueKind.True) isCompleted = true;
+                else if (compProp.ValueKind == JsonValueKind.False) isCompleted = false;
+            }
+
+            bool isDisabled = false;
+            if (TryGetPropertyCaseInsensitive(root, "isDisabled", out var disProp) || TryGetPropertyCaseInsensitive(root, "IsDisabled", out disProp))
+            {
+                if (disProp.ValueKind == JsonValueKind.True) isDisabled = true;
+                else if (disProp.ValueKind == JsonValueKind.False) isDisabled = false;
+            }
 
             var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled);
             Guid? defaultOfficeId = defOffice?.Id;
@@ -852,11 +994,21 @@ public static class PartnersEndpoints
                 .Include(t => t.Lines)
                 .FirstOrDefaultAsync(t => t.Id == transferId);
 
+            // Сохраняем словарь существующих строк для фиксации их оригинальной валюты
+            var existingLinesMap = existing?.Lines?
+                .Where(l => l.Id != Guid.Empty)
+                .ToDictionary(l => l.Id) ?? new Dictionary<Guid, PartnerTransferLineEntity>();
+
             var linesList = new List<PartnerTransferLineEntity>();
             if (TryGetPropertyCaseInsensitive(root, "lines", out var linesProp) && linesProp.ValueKind == JsonValueKind.Array)
             {
                 foreach (var l in linesProp.EnumerateArray())
                 {
+                    string lineIdStr = GetJsonString(l, "id", "Id");
+                    Guid lineId = Guid.TryParse(lineIdStr, out var parsedLineGuid) && parsedLineGuid != Guid.Empty
+                        ? parsedLineGuid
+                        : Guid.NewGuid();
+
                     string officeIdStr = GetJsonString(l, "officeId", "OfficeId");
                     Guid? oGuid = Guid.TryParse(officeIdStr, out var parsedO) && parsedO != Guid.Empty
                         ? parsedO
@@ -878,9 +1030,19 @@ public static class PartnersEndpoints
                     decimal debit = GetJsonDecimal(l, "debitAmount", "DebitAmount");
                     decimal credit = GetJsonDecimal(l, "creditAmount", "CreditAmount");
 
+                    // Если строка уже сохранена в базе — фиксируем её исходную валюту
+                    if (existingLinesMap.TryGetValue(lineId, out var oldLine))
+                    {
+                        if (oldLine.DebitCurrencyId.HasValue)
+                            debitCurGuid = oldLine.DebitCurrencyId;
+
+                        if (oldLine.CreditCurrencyId.HasValue)
+                            creditCurGuid = oldLine.CreditCurrencyId;
+                    }
+
                     linesList.Add(new PartnerTransferLineEntity
                     {
-                        Id = Guid.NewGuid(),
+                        Id = lineId,
                         PartnerTransferId = transferId,
                         OfficeId = oGuid,
                         PartnerId = pGuid,
@@ -903,8 +1065,8 @@ public static class PartnersEndpoints
                     Group = groupName,
                     Tags = tagsList.ToArray(),
                     Description = description,
-                    IsCompleted = true,
-                    IsDisabled = false,
+                    IsCompleted = isCompleted,
+                    IsDisabled = isDisabled,
                     Lines = linesList,
                     CreatedAt = DateTime.UtcNow,
                     UpdatedAt = DateTime.UtcNow
@@ -914,18 +1076,14 @@ public static class PartnersEndpoints
             else
             {
                 existing.Code = code;
-                existing.Date = transferDate;
                 existing.UserName = userName;
                 existing.Group = groupName;
                 existing.Tags = tagsList.ToArray();
                 existing.Description = description;
+                existing.IsCompleted = isCompleted; // ИСПРАВЛЕНО
+                existing.IsDisabled = isDisabled;   // ИСПРАВЛЕНО
                 existing.UpdatedAt = DateTime.UtcNow;
-            }
 
-            await db.SaveChangesAsync();
-
-            if (existing != null)
-            {
                 if (existing.Lines != null && existing.Lines.Any())
                 {
                     db.PartnerTransferLines.RemoveRange(existing.Lines);
@@ -934,11 +1092,15 @@ public static class PartnersEndpoints
                 {
                     await db.PartnerTransferLines.AddRangeAsync(linesList);
                 }
-                await db.SaveChangesAsync();
             }
 
+            await db.SaveChangesAsync();
             return Results.Content($"{{\"id\":\"{transferId}\",\"code\":\"{code}\"}}", "application/json");
-        });
+        };
+
+        // регистрируем оба роута:
+        group.MapPost("/transfers", savePartnerTransferHandler);
+        group.MapPut("/transfers/{id}", savePartnerTransferHandler);
 
         // 12. ПОДСЧЕТ КОЛИЧЕСТВА ДВИЖЕНИЙ ДЛЯ ПЛИТОК ДАТ
         group.MapGet("/actions/count", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
@@ -1038,7 +1200,7 @@ public static class PartnersEndpoints
             return Results.Ok(new { count = totalCount });
         });
 
-        // 13. РЕЕСТР ДВИЖЕНИЙ ПО ПАРТНЕРАМ
+        // 13. РЕЕСТР ДВИЖЕНИЙ ПО ПАРТНЕРАМ (СОРТИРОВКА ОТ РАННИХ К ПОЗДНИМ)
         group.MapGet("/actions", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             int take = int.TryParse(req.Query["limit"], out var lVal) ? Math.Clamp(lVal, 1, 50000) : 10000;
@@ -1066,7 +1228,6 @@ public static class PartnersEndpoints
             var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled, ct);
             Guid defaultOfficeGuid = defOffice?.Id ?? Guid.Empty;
 
-            // Считываем фильтр Completed (поддерживает completed, isCompleted, IsCompleted)
             string? compStr = req.Query["completed"].FirstOrDefault()
                            ?? req.Query["isCompleted"].FirstOrDefault()
                            ?? req.Query["IsCompleted"].FirstOrDefault();
@@ -1096,7 +1257,7 @@ public static class PartnersEndpoints
                       AND (cardinality(@offices::uuid[]) = 0 OR COALESCE(i.office_id, @defOffice) = ANY(@offices))
                       AND i.date >= @from AND i.date <= @till
                       AND (@completed::bool IS NULL OR i.is_completed = @completed)
-                    ORDER BY i.date DESC
+                    ORDER BY i.date ASC
                     LIMIT @take
                 ),
                 raw_actions AS (
@@ -1243,7 +1404,7 @@ public static class PartnersEndpoints
                     '' AS "TransactionGroup",
                     ARRAY[]::text[] AS "TransactionTags"
                 FROM raw_actions
-                ORDER BY "TransactionDate" DESC
+                ORDER BY "TransactionDate" ASC
                 LIMIT @take;
                 """;
 
@@ -1259,7 +1420,7 @@ public static class PartnersEndpoints
                 TransactionId = (string)r.TransactionId,
                 TransactionCode = (string)r.TransactionCode,
                 TransactionType = (string)r.TransactionType,
-                TransactionDate = ((DateTime)r.TransactionDate).ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                TransactionDate = ((DateTime)r.TransactionDate).ToString("yyyy-MM-ddTHH:mm:ss"),
                 ActionOfficeId = (string)r.ActionOfficeId,
                 ActionPartnerId = (string)r.ActionPartnerId,
                 ActionDebit = (decimal)r.ActionDebit,
@@ -1300,7 +1461,7 @@ public static class PartnersEndpoints
             if (!pGuid.HasValue)
                 return Results.Ok(new { Balance = 0m });
 
-            DateTime dUtc = !string.IsNullOrEmpty(dateStr) ? ParseSafeDate(dateStr, isTill: false) : DateTime.UtcNow;
+            DateTime dUtc = !string.IsNullOrEmpty(dateStr) ? ParseSafeDate(dateStr, isTill: false) : DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
 
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
                          ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
@@ -1428,46 +1589,45 @@ public static class PartnersEndpoints
     #region Helpers
     private static DateTime ParseCleanDate(string? dateStr)
     {
-        if (string.IsNullOrWhiteSpace(dateStr)) return DateTime.UtcNow;
+        if (string.IsNullOrWhiteSpace(dateStr)) return DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
         dateStr = dateStr.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            return dto.UtcDateTime;
-        }
+
         if (DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            return dt.ToUniversalTime();
+            return DateTime.SpecifyKind(dt, DateTimeKind.Utc);
         }
-        return DateTime.UtcNow;
+        return DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
     }
 
-    private static DateTime ParseSafeDate(string? raw, bool isTill)
+    private static DateTime ParseSafeDate(string? raw, bool isTill, string? fromRaw = null)
     {
         if (string.IsNullOrWhiteSpace(raw))
-            return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+            return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc)
+                          : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
 
         raw = raw.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            var res = dto.UtcDateTime;
-            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
-            {
-                res = res.Date.AddDays(1).AddTicks(-1);
-            }
-            return res;
-        }
-
         if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            var res = dt.ToUniversalTime();
             if (isTill && dt.TimeOfDay == TimeSpan.Zero)
             {
-                res = res.Date.AddDays(1).AddTicks(-1);
+                // Если клиент передал till > from (например from=17.11, till=18.11), 
+                // значит till — это уже полночь следующего дня, не накидываем лишние сутки!
+                if (!string.IsNullOrWhiteSpace(fromRaw) &&
+                    DateTime.TryParse(fromRaw.Replace(" ", "+").Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var fDt) &&
+                    dt.Date > fDt.Date)
+                {
+                    dt = dt.AddTicks(-1);
+                }
+                else
+                {
+                    dt = dt.Date.AddDays(1).AddTicks(-1);
+                }
             }
-            return res;
+            return DateTime.SpecifyKind(dt, DateTimeKind.Utc);
         }
 
-        return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+        return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc)
+                      : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
     }
 
     private static List<string> ExtractTagsFromRawJson(JsonElement root)

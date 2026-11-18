@@ -244,9 +244,14 @@ public class UniversalDateTimeOffsetConverter : JsonConverter<DateTimeOffset>
 {
     public override DateTimeOffset Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
+        if (reader.TryGetDateTime(out var dt))
+        {
+            return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc), TimeSpan.Zero);
+        }
         if (reader.TryGetDateTimeOffset(out var dto))
         {
-            return dto.ToUniversalTime();
+            // Сохраняем исходные часы и минуты, обнуляя смещение
+            return new DateTimeOffset(dto.DateTime, TimeSpan.Zero);
         }
         return DateTimeOffset.UtcNow;
     }

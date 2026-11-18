@@ -64,8 +64,8 @@ public class ApiFundsActionRepository : IFundsActionsRepository
     {
         var queryParams = new List<string>();
 
-        if (startDate.HasValue) queryParams.Add($"from={startDate.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
-        if (endDate.HasValue) queryParams.Add($"till={endDate.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
+        if (startDate.HasValue) queryParams.Add($"from={startDate.Value:yyyy-MM-ddTHH:mm:ss}");
+        if (endDate.HasValue) queryParams.Add($"till={endDate.Value:yyyy-MM-ddTHH:mm:ss}");
         if (!string.IsNullOrEmpty(currencyId)) queryParams.Add($"currencyId={currencyId}");
         if (isCompleted.HasValue) queryParams.Add($"isCompleted={isCompleted.Value.ToString().ToLower()}");
 

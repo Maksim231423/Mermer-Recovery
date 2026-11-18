@@ -70,11 +70,8 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
         {
             try
             {
-                var fromUtc = from.Kind == DateTimeKind.Utc ? from : from.ToUniversalTime();
-                var tillUtc = till.Kind == DateTimeKind.Utc ? till : till.ToUniversalTime();
-
-                var fromStr = fromUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = tillUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ss");
+                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ss");
 
                 var remoteSlice = await _restClient.GetAsync<List<Bill>>($"/api/bills?from={fromStr}&till={tillStr}&limit=50000");
                 if (remoteSlice != null)
@@ -114,11 +111,8 @@ public class ApiBillsRepository : IRepositoryWithFacets<Bill>, IRepository<Bill>
         {
             try
             {
-                var fromUtc = from.Kind == DateTimeKind.Utc ? from : from.ToUniversalTime();
-                var tillUtc = till.Kind == DateTimeKind.Utc ? till : till.ToUniversalTime();
-
-                var fromStr = fromUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = tillUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ss");
+                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ss");
 
                 var res = await _restClient.GetAsync<CountResponse>($"/api/bills/count?from={fromStr}&till={tillStr}");
                 if (res != null) return res.Count;

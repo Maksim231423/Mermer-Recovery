@@ -12,22 +12,22 @@
                 xmlns:ctrl="clr-namespace:Mermer.Ui.Pc.Controls"
                 xmlns:menu="clr-namespace:Mermer.Ui.Pc.Controls.MenuItems"
                 xmlns:vm="clr-namespace:Mermer.Ui.Core.ViewModels.Warehousing;assembly=Mermer.Ui.Core">
-  <DockPanel>
-    <dxwui:AppBar DockPanel.Dock="Bottom" Style="{StaticResource MenuStyle}">
-      <ctrl:StyledGridSearchControl x:Name="SearchControl" View="{Binding View, ElementName=GridControl}"/>
-      <menu:ListCreateNew/>
-      <menu:ListViewDetails/>
-      <dxwui:AppBarSeparator/>
-      <menu:CommonReload/>
-      <menu:ListPrint x:Name="PrintButton" IsEnabled="{DXBinding '@e(GridControl).VisibleRowCount != 0'}"/>
-      <menu:ListFilter x:Name="FilterButton"/>
-      <menu:CommonClose/>
-    </dxwui:AppBar>
-    <ctrl:ListFilterControl DockPanel.Dock="Left"
+    <DockPanel>
+        <dxwui:AppBar DockPanel.Dock="Bottom" Style="{StaticResource MenuStyle}">
+            <ctrl:StyledGridSearchControl x:Name="SearchControl" View="{Binding View, ElementName=GridControl}"/>
+            <menu:ListCreateNew/>
+            <menu:ListViewDetails/>
+            <dxwui:AppBarSeparator/>
+            <menu:CommonReload/>
+            <menu:ListPrint x:Name="PrintButton" IsEnabled="{DXBinding '@e(GridControl).VisibleRowCount != 0'}"/>
+            <menu:ListFilter x:Name="FilterButton"/>
+            <menu:CommonClose/>
+        </dxwui:AppBar>
+        <ctrl:ListFilterControl DockPanel.Dock="Left"
                             Visibility="{Binding ElementName=ExpandButton, Path=IsChecked, Converter={dxmvvm:BooleanToVisibilityConverter}}"/>
-    <ToggleButton x:Name="ExpandButton" DockPanel.Dock="Left" Style="{StaticResource HideButtonStyle}"
+        <ToggleButton x:Name="ExpandButton" DockPanel.Dock="Left" Style="{StaticResource HideButtonStyle}"
                   IsChecked="True" VerticalAlignment="Center"/>
-    <ctrl:StyledGridControl x:Name="GridControl" PrintButton="{Binding ElementName=PrintButton, Mode=OneWay}"
+        <ctrl:StyledGridControl x:Name="GridControl" PrintButton="{Binding ElementName=PrintButton, Mode=OneWay}"
                             FilterButton="{Binding ElementName=FilterButton, Mode=OneWay}"
                             SearchControl="{Binding ElementName=SearchControl, Mode=OneWay}">
             <dxg:GridControl.Columns>
@@ -47,15 +47,24 @@
                         <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Warehouses.List}"/>
                     </dxg:ColumnBase.EditSettings>
                 </dxg:GridColumn>
-                <dxg:GridColumn FieldName="ActionTotal" Style="{StaticResource AmountDisplayFormat}"
-                        Header="{Localize 'Sent Total'}"/>
-                <dxg:GridColumn FieldName="ActionReceivedTotal" Style="{StaticResource AmountDisplayFormat}"
-                        Header="{Localize 'Received Total'}"/>
+
+                <dxg:GridColumn FieldName="ActionTotal" Header="{Localize 'Sent Total'}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxe:TextEditSettings DisplayFormat="n2" MaskType="Numeric" Mask="n2"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="ActionReceivedTotal" Header="{Localize 'Received Total'}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxe:TextEditSettings DisplayFormat="n2" MaskType="Numeric" Mask="n2"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+
                 <dxg:GridColumn FieldName="IsConflicted" Width="50" Header="{Localize Conflicted}"/>
                 <dxg:GridColumn FieldName="IsCompleted" Width="50" Header="{Localize Completed}"/>
                 <dxg:GridColumn FieldName="IsDisabled" Width="50" Header="{Localize Deleted}"/>
                 <dxg:GridColumn FieldName="UserName" Header="{Localize Author}"/>
-                <!-- Колонка с тегами через CellTemplate -->
+
+                <!-- Колонка с тегами -->
                 <dxg:GridColumn FieldName="Tags" Header="{Localize Tags}" Width="150">
                     <dxg:GridColumn.CellTemplate>
                         <DataTemplate>
@@ -67,9 +76,8 @@
                     </dxg:GridColumn.CellTemplate>
                 </dxg:GridColumn>
 
-                <!-- Колонка с группой -->
                 <dxg:GridColumn FieldName="Group" GroupIndex="0" Header="{Localize Group}"/>
             </dxg:GridControl.Columns>
         </ctrl:StyledGridControl>
-  </DockPanel>
+    </DockPanel>
 </mvx:MvxWpfView>

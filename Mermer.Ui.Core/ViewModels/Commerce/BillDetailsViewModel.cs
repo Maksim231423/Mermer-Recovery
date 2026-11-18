@@ -255,13 +255,16 @@ public class BillDetailsViewModel :
             Details.Lines.CollectionChanged -= Lines_CollectionChanged;
             Details.Lines.CollectionChanged += Lines_CollectionChanged;
 
-            // Если документ новый и в таблице уже создана пустая строка — ставим ей валюту из шапки
+            // Если открыт новый документ, в пустых строках (где сумма 0) ставим валюту шапки
             if (string.IsNullOrEmpty(ItemId) && !string.IsNullOrEmpty(Details.DisplayCurrencyId))
             {
                 foreach (var line in Details.Lines)
                 {
-                    line.CurrencyId = Details.DisplayCurrencyId;
-                    line.UpdateCurrencyConvertion();
+                    if (line.Amount == 0m)
+                    {
+                        line.CurrencyId = Details.DisplayCurrencyId;
+                        line.UpdateCurrencyConvertion();
+                    }
                 }
             }
         }
@@ -303,9 +306,36 @@ public class BillDetailsViewModel :
     {
         try
         {
+            // 1. Проверка контрагента
             if (string.IsNullOrEmpty(Details.PartnerId))
             {
                 throw new Exception(this["Field '{0}' is required", this["Partner"]]);
+            }
+
+            // 2. Проверка кассы
+            if (string.IsNullOrEmpty(Details.DepositoryId))
+            {
+                throw new Exception(this["Field '{0}' is required", this["Depository"]]);
+            }
+
+            // 3. Проверка наличия строк
+            if (Details.Lines == null || !Details.Lines.Any())
+            {
+                throw new Exception(this["Document cannot be empty"]);
+            }
+
+            // 4. Проверка колонок каждой строки: Amount, Currency, Total
+            foreach (var line in Details.Lines)
+            {
+                if (line.Amount <= 0m)
+                {
+                    throw new Exception(this["Field '{0}' is required and must be greater than zero", this["Amount"]]);
+                }
+
+                if (string.IsNullOrEmpty(line.CurrencyId))
+                {
+                    throw new Exception(this["Field '{0}' is required", this["Currency"]]);
+                }
             }
         }
         catch (Exception ex)
@@ -333,12 +363,14 @@ public class BillDetailsViewModel :
 
         if (e.PropertyName == "DisplayCurrencyId")
         {
-            // При смене валюты в шапке нового документа автоматически переключаем валюту всех строк
             if (Details.Lines != null)
             {
                 foreach (var line in Details.Lines)
                 {
-                    if (string.IsNullOrEmpty(ItemId))
+                    // Меняем валюту строки ТОЛЬКО если это новый документ и строка пустая (Amount == 0).
+                    // Если сумма уже прописана (Amount > 0), валюта строки НЕ меняется,
+                    // а UpdateCurrencyConvertion пересчитывает только ТОТАЛ по новой валюте шапки.
+                    if (string.IsNullOrEmpty(ItemId) && line.Amount == 0m)
                     {
                         line.CurrencyId = Details.DisplayCurrencyId;
                     }

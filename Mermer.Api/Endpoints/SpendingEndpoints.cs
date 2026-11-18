@@ -36,7 +36,7 @@ public static class SpendingEndpoints
                 : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
 
             DateTime endDate = !string.IsNullOrEmpty(tillStr)
-                ? ParseSafeFilterDate(tillStr, isTill: true)
+                ? ParseSafeFilterDate(tillStr, isTill: true, fromRaw: fromStr)
                 : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
             var defaultCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault, ct)
@@ -69,7 +69,7 @@ public static class SpendingEndpoints
                 {
                     Id = s.Id.ToString(),
                     Code = s.Code ?? "",
-                    Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                    Date = s.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                     Type = "ExpenseSlip",
                     FundsSlipType = "ExpenseSlip",
                     DepositoryId = s.DepositoryId?.ToString(),
@@ -119,7 +119,7 @@ public static class SpendingEndpoints
                 : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
 
             DateTime endDate = !string.IsNullOrEmpty(tillStr)
-                ? ParseSafeFilterDate(tillStr, isTill: true)
+                ? ParseSafeFilterDate(tillStr, isTill: true, fromRaw: fromStr)
                 : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
             var query = db.ExpenseSlips
@@ -141,7 +141,6 @@ public static class SpendingEndpoints
             if (s == null) return Results.NotFound();
 
             var docCurrencyId = s.DisplayCurrencyId?.ToString() ?? (await db.Currencies.FirstOrDefaultAsync(c => c.IsDefault))?.Id.ToString();
-            // ИСПРАВЛЕНО: s.Date имеет тип DateTime, поэтому UtcDateTime не вызывается
             var convertions = await GetCurrencyConvertionsAsync(db, s.Date, ct);
             decimal total = s.Lines?.Sum(l => l.Amount) ?? 0m;
 
@@ -149,7 +148,7 @@ public static class SpendingEndpoints
             {
                 Id = s.Id.ToString(),
                 Code = s.Code ?? "",
-                Date = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                Date = s.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                 Type = "ExpenseSlip",
                 FundsSlipType = "ExpenseSlip",
                 DepositoryId = s.DepositoryId?.ToString(),
@@ -235,13 +234,19 @@ public static class SpendingEndpoints
 
             Guid? userId = Guid.TryParse(GetStringProp(root, "userId", "UserId"), out var uG) ? uG : null;
 
-            // ИСПРАВЛЕНО: Парсим напрямую в DateTime с типом Utc
             string? dateStr = GetStringProp(root, "date", "Date");
-            DateTime date = !string.IsNullOrEmpty(dateStr) ? ParseCleanDate(dateStr) : DateTime.UtcNow;
+            DateTime date = !string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var parsedDate)
+                ? DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc)
+                : DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
 
             var tagsList = ExtractTagsFromRawJson(root);
             string groupName = GetStringProp(root, "group", "Group", "groupName", "GroupName") ?? "";
             string description = GetStringProp(root, "description", "Description") ?? "";
+
+            // Сохраняем словарь существующих строк документа для защиты их валюты
+            var existingLinesMap = existing?.Lines?
+                .Where(l => l.Id != Guid.Empty)
+                .ToDictionary(l => l.Id) ?? new Dictionary<Guid, ExpenseSlipLineEntity>();
 
             var linesList = new List<ExpenseSlipLineEntity>();
             if (TryGetPropCaseInsensitive(root, "lines", out var linesProp) && linesProp.ValueKind == JsonValueKind.Array)
@@ -249,10 +254,16 @@ public static class SpendingEndpoints
                 int order = 0;
                 foreach (var l in linesProp.EnumerateArray())
                 {
+                    Guid lineId = Guid.TryParse(GetStringProp(l, "id", "Id"), out var lId) && lId != Guid.Empty ? lId : Guid.NewGuid();
                     decimal amount = GetDecimalProp(l, "amount", "Amount", "total", "Total", "actionTotal", "ActionTotal");
                     Guid? expId = Guid.TryParse(GetStringProp(l, "expenseId", "ExpenseId"), out var eG) ? eG : null;
                     Guid? lineCurId = Guid.TryParse(GetStringProp(l, "currencyId", "CurrencyId"), out var lcG) ? lcG : curId;
-                    Guid lineId = Guid.TryParse(GetStringProp(l, "id", "Id"), out var lId) && lId != Guid.Empty ? lId : Guid.NewGuid();
+
+                    // Если строка уже была сохранена в базе — фиксируем её исходную валюту
+                    if (existingLinesMap.TryGetValue(lineId, out var oldLine) && oldLine.CurrencyId.HasValue)
+                    {
+                        lineCurId = oldLine.CurrencyId;
+                    }
 
                     linesList.Add(new ExpenseSlipLineEntity
                     {
@@ -294,11 +305,10 @@ public static class SpendingEndpoints
                 else
                 {
                     existing.Code = code;
-                    existing.Date = date;
                     existing.UserId = userId;
                     existing.DepositoryId = depId;
                     existing.OfficeId = offId;
-                    existing.DisplayCurrencyId = curId;
+                    // Не перезаписываем DisplayCurrencyId при редактировании
                     existing.UserName = GetStringProp(root, "userName", "UserName") ?? existing.UserName;
                     existing.IsCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
                     existing.IsDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
@@ -346,8 +356,43 @@ public static class SpendingEndpoints
         // 6. ФАСЕТЫ
         group.MapGet("/facets", async (string? fields, MermerDbContext db, CancellationToken ct) =>
         {
+            var today = DateTime.Today;
+            var todayStart = DateTime.SpecifyKind(today, DateTimeKind.Utc);
+            var tomorrowStart = todayStart.AddDays(1);
+            var yesterdayStart = todayStart.AddDays(-1);
+
+            int diff = (7 + (today.DayOfWeek - DayOfWeek.Monday)) % 7;
+            var weekStart = DateTime.SpecifyKind(today.AddDays(-1 * diff), DateTimeKind.Utc);
+            var pastWeekStart = weekStart.AddDays(-7);
+
+            var monthStart = DateTime.SpecifyKind(new DateTime(today.Year, today.Month, 1), DateTimeKind.Utc);
+            var pastMonthStart = monthStart.AddMonths(-1);
+
+            var baseQuery = db.ExpenseSlips.AsNoTracking().Where(s => !s.IsDisabled);
+
+            var countToday = await baseQuery.CountAsync(s => s.Date >= todayStart && s.Date < tomorrowStart, ct);
+            var countYesterday = await baseQuery.CountAsync(s => s.Date >= yesterdayStart && s.Date < todayStart, ct);
+            var countWeek = await baseQuery.CountAsync(s => s.Date >= weekStart && s.Date < tomorrowStart, ct);
+            var countPastWeek = await baseQuery.CountAsync(s => s.Date >= pastWeekStart && s.Date < weekStart, ct);
+            var countMonth = await baseQuery.CountAsync(s => s.Date >= monthStart && s.Date < tomorrowStart, ct);
+            var countPastMonth = await baseQuery.CountAsync(s => s.Date >= pastMonthStart && s.Date < monthStart, ct);
+            var countAll = await baseQuery.CountAsync(ct);
+
             var connStr = db.Database.GetConnectionString()!;
             var facets = await FacetsHelper.GetEntityFacetsAsync(connStr, "expense_slips", fields, ct);
+
+            facets["Date"] = new Dictionary<string, int>
+            {
+                { "#Today", countToday },
+                { "#Yesturday", countYesterday },
+                { "#Yesterday", countYesterday },
+                { "#This Week", countWeek },
+                { "#Past Week", countPastWeek },
+                { "#This Month", countMonth },
+                { "#Past Month", countPastMonth },
+                { "#All Records", countAll }
+            };
+
             return Results.Ok(facets);
         });
 
@@ -363,7 +408,7 @@ public static class SpendingEndpoints
                 : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
 
             DateTime endDate = !string.IsNullOrEmpty(tillStr)
-                ? ParseSafeFilterDate(tillStr, isTill: true)
+                ? ParseSafeFilterDate(tillStr, isTill: true, fromRaw: fromStr)
                 : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
             var rawDeps = req.Query["depositoryId"].ToArray();
@@ -410,7 +455,7 @@ public static class SpendingEndpoints
                 : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
 
             DateTime endDate = !string.IsNullOrEmpty(tillStr)
-                ? ParseSafeFilterDate(tillStr, isTill: true)
+                ? ParseSafeFilterDate(tillStr, isTill: true, fromRaw: fromStr)
                 : DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc);
 
             var rawDeps = req.Query["depositoryId"].ToArray();
@@ -445,7 +490,7 @@ public static class SpendingEndpoints
                     {
                         TransactionId = s.Id.ToString(),
                         TransactionCode = s.Code ?? "",
-                        TransactionDate = s.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                        TransactionDate = s.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                         TransactionType = "ExpenseSlip",
                         TransactionUserId = s.UserId?.ToString(),
                         TransactionUserName = s.UserName,
@@ -467,42 +512,43 @@ public static class SpendingEndpoints
     #region Helpers
     private static DateTime ParseCleanDate(string raw)
     {
+        if (string.IsNullOrWhiteSpace(raw)) return DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
         raw = raw.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            return dto.UtcDateTime;
-        }
+
         if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            return dt.ToUniversalTime();
+            return DateTime.SpecifyKind(dt, DateTimeKind.Utc);
         }
-        return DateTime.UtcNow;
+        return DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
     }
 
-    private static DateTime ParseSafeFilterDate(string raw, bool isTill = false)
+    private static DateTime ParseSafeFilterDate(string raw, bool isTill = false, string? fromRaw = null)
     {
-        raw = raw.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            var res = dto.UtcDateTime;
-            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
-            {
-                res = res.Date.AddDays(1).AddTicks(-1);
-            }
-            return res;
-        }
+        if (string.IsNullOrWhiteSpace(raw))
+            return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc)
+                          : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
 
+        raw = raw.Replace(" ", "+").Trim();
         if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            var res = dt.ToUniversalTime();
             if (isTill && dt.TimeOfDay == TimeSpan.Zero)
             {
-                res = res.Date.AddDays(1).AddTicks(-1);
+                if (!string.IsNullOrWhiteSpace(fromRaw) &&
+                    DateTime.TryParse(fromRaw.Replace(" ", "+").Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var fDt) &&
+                    dt.Date > fDt.Date)
+                {
+                    dt = dt.AddTicks(-1);
+                }
+                else
+                {
+                    dt = dt.Date.AddDays(1).AddTicks(-1);
+                }
             }
-            return res;
+            return DateTime.SpecifyKind(dt, DateTimeKind.Utc);
         }
 
-        return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+        return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc)
+                      : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
     }
 
     private static async Task<object[]> GetCurrencyConvertionsAsync(MermerDbContext db, DateTime docDate, CancellationToken ct)

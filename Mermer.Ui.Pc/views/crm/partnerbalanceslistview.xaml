@@ -14,113 +14,130 @@
                 xmlns:ctrl="clr-namespace:Mermer.Ui.Pc.Controls"
                 xmlns:menu="clr-namespace:Mermer.Ui.Pc.Controls.MenuItems"
                 xmlns:vm="clr-namespace:Mermer.Ui.Core.ViewModels.CRM;assembly=Mermer.Ui.Core">
-  <DockPanel>
-    <dxwui:AppBar DockPanel.Dock="Bottom" Style="{StaticResource MenuStyle}">
-      <ctrl:StyledGridSearchControl x:Name="SearchControl" View="{Binding View, ElementName=GridControl}"/>
-      <menu:ShowActions/>
-      <dxwui:AppBarSeparator/>
-      <menu:CommonReload/>
+    <DockPanel>
+        <dxwui:AppBar DockPanel.Dock="Bottom" Style="{StaticResource MenuStyle}">
+            <ctrl:StyledGridSearchControl x:Name="SearchControl" View="{Binding View, ElementName=GridControl}"/>
+            <menu:ShowActions/>
+            <dxwui:AppBarSeparator/>
+            <menu:CommonReload/>
             <menu:ListPrint x:Name="PrintButton" IsEnabled="{DXBinding '@e(GridControl).VisibleRowCount != 0'}"/>
             <menu:ListFilter x:Name="FilterButton"/>
-      <menu:CommonClose/>
-    </dxwui:AppBar>
-    <ctrl:ListFilterControl DockPanel.Dock="Left"
+            <menu:CommonClose/>
+        </dxwui:AppBar>
+        <ctrl:ListFilterControl DockPanel.Dock="Left"
                             Visibility="{Binding ElementName=ExpandButton, Path=IsChecked, Converter={dxmvvm:BooleanToVisibilityConverter}}"/>
-    <ToggleButton x:Name="ExpandButton" DockPanel.Dock="Left" Style="{StaticResource HideButtonStyle}"
+        <ToggleButton x:Name="ExpandButton" DockPanel.Dock="Left" Style="{StaticResource HideButtonStyle}"
                   IsChecked="True" VerticalAlignment="Center"/>
-    <dxlc:LayoutControl Margin="0" Orientation="Vertical">
-      <dxlc:LayoutGroup Orientation="Vertical" Margin="10, 10, 10, 0">
+        <dxlc:LayoutControl Margin="0" Orientation="Vertical">
+            <dxlc:LayoutGroup Orientation="Vertical" Margin="10, 10, 10, 0">
                 <dxlc:LayoutItem HorizontalAlignment="Left" Width="300" Label="{Localize Office}">
                     <dxe:ComboBoxEdit ShowCustomItems="True"
-                      DisplayMember="Name"
-                      ValueMember="Id"
-                      NullText="{Localize 'All Offices'}"
-                      SeparatorString=", "
-                      EditValue="{Binding SelectedOfficeIds, UpdateSourceTrigger=PropertyChanged}"
-                      ItemsSource="{Binding Offices.List}">
+                            DisplayMember="Name"
+                            ValueMember="Id"
+                            NullText="{Localize 'All Offices'}"
+                            SeparatorString=", "
+                            EditValue="{Binding SelectedOfficeIds, UpdateSourceTrigger=PropertyChanged}"
+                            ItemsSource="{Binding Offices.List}">
                         <dxe:ComboBoxEdit.StyleSettings>
                             <dxe:CheckedComboBoxStyleSettings/>
                         </dxe:ComboBoxEdit.StyleSettings>
                     </dxe:ComboBoxEdit>
                 </dxlc:LayoutItem>
+
                 <dxlc:LayoutItem HorizontalAlignment="Left" Width="400" Label="{Localize Partner}">
-          <dxg:LookUpEdit NullValueButtonPlacement="EditBox" AutoPopulateColumns="false" DisplayMember="Fullname"
-                          ValueMember="Id" EditValue="{Binding PartnerId, UpdateSourceTrigger=PropertyChanged}"
-                          ItemsSource="{Binding Partners.List}" NullText="{Localize 'All Partners'}">
-            <dxe:PopupBaseEdit.PopupContentTemplate>
-              <ControlTemplate>
-                <dxg:GridControl Name="PART_GridControl" AutoExpandAllGroups="true">
-                  <dxg:GridControl.Columns>
-                    <dxg:GridColumn FieldName="Code" Header="{Localize Code}"/>
-                    <dxg:GridColumn FieldName="Name" Width="300" Header="{Localize Name}"/>
-                  </dxg:GridControl.Columns>
-                  <dxg:GridControl.View>
-                    <dxg:TableView AutoWidth="true"/>
-                  </dxg:GridControl.View>
-                </dxg:GridControl>
-              </ControlTemplate>
-            </dxe:PopupBaseEdit.PopupContentTemplate>
-            <dxg:LookUpEdit.StyleSettings>
-              <dxg:SearchLookUpEditStyleSettings/>
-            </dxg:LookUpEdit.StyleSettings>
-          </dxg:LookUpEdit>
-        </dxlc:LayoutItem>
-        <dxlc:LayoutItem HorizontalAlignment="Left" Width="300" Label="{Localize 'Balance Currency'}">
-          <dxe:ComboBoxEdit ShowCustomItems="True" DisplayMember="Name" ValueMember="Id"
+                    <dxg:LookUpEdit x:Name="PartnerEditor"
+                          DisplayMember="Fullname"
+                          ValueMember="Id"
+                          AutoPopulateColumns="False"
+                          IncrementalFiltering="True"
+                          ImmediatePopup="False"
+                          AutoComplete="False"
+                          FilterCondition="Contains"
+                          NullValueButtonPlacement="EditBox"
+                          NullText="{Localize 'All Partners'}"
+                          EditValue="{Binding PartnerId, UpdateSourceTrigger=PropertyChanged}"
+                          ItemsSource="{Binding Partners.List}">
+                        <dxe:PopupBaseEdit.PopupContentTemplate>
+                            <ControlTemplate>
+                                <dxg:GridControl Name="PART_GridControl" EnableSmartColumnsGeneration="False">
+                                    <dxg:GridControl.Columns>
+                                        <dxg:GridColumn FieldName="Code" Width="*" Header="{Localize Code}"/>
+                                        <dxg:GridColumn FieldName="Name" Width="*" Header="{Localize Name}"/>
+                                    </dxg:GridControl.Columns>
+                                    <dxg:GridControl.View>
+                                        <dxg:TableView AutoWidth="True"
+                                   ShowGroupPanel="False"
+                                   SearchDelay="200"
+                                   SearchPanelFindFilter="Contains"
+                                   ShowSearchPanelMode="Always"
+                                   VirtualizingPanel.IsVirtualizing="True"
+                                   VirtualizingPanel.VirtualizationMode="Recycling"/>
+                                    </dxg:GridControl.View>
+                                </dxg:GridControl>
+                            </ControlTemplate>
+                        </dxe:PopupBaseEdit.PopupContentTemplate>
+                        <dxg:LookUpEdit.StyleSettings>
+                            <dxg:SearchLookUpEditStyleSettings/>
+                        </dxg:LookUpEdit.StyleSettings>
+                    </dxg:LookUpEdit>
+                </dxlc:LayoutItem>
+
+                <dxlc:LayoutItem HorizontalAlignment="Left" Width="300" Label="{Localize 'Balance Currency'}">
+                    <dxe:ComboBoxEdit ShowCustomItems="True" DisplayMember="Name" ValueMember="Id"
                             EditValue="{Binding CurrencyId, UpdateSourceTrigger=PropertyChanged}"
                             ItemsSource="{Binding Currencies.List}"/>
-        </dxlc:LayoutItem>
-      </dxlc:LayoutGroup>
-      <ctrl:StyledGridControl x:Name="GridControl" PrintButton="{Binding ElementName=PrintButton, Mode=OneWay}"
+                </dxlc:LayoutItem>
+            </dxlc:LayoutGroup>
+            <ctrl:StyledGridControl x:Name="GridControl" PrintButton="{Binding ElementName=PrintButton, Mode=OneWay}"
                               FilterButton="{Binding ElementName=FilterButton, Mode=OneWay}"
                               SearchControl="{Binding ElementName=SearchControl, Mode=OneWay}">
-        <dxg:GridColumn FieldName="PartnerId" SortOrder="Ascending" SortIndex="0" Width="300" AllowCellMerge="True"
+                <dxg:GridColumn FieldName="PartnerId" SortOrder="Ascending" SortIndex="0" Width="300" AllowCellMerge="True"
                         Header="{Localize Partner}">
-          <dxg:ColumnBase.EditSettings>
-            <dxg:LookUpEditSettings DisplayMember="Fullname" ValueMember="Id" ItemsSource="{Binding Partners.List}"/>
-          </dxg:ColumnBase.EditSettings>
-        </dxg:GridColumn>
-        <dxg:GridColumn FieldName="OfficeId" SortOrder="Ascending" SortIndex="1" AllowCellMerge="True"
+                    <dxg:ColumnBase.EditSettings>
+                        <dxg:LookUpEditSettings DisplayMember="Fullname" ValueMember="Id" ItemsSource="{Binding Partners.List}"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="OfficeId" SortOrder="Ascending" SortIndex="1" AllowCellMerge="True"
                         Header="{Localize Office}">
-          <dxg:ColumnBase.EditSettings>
-            <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Offices.List}"/>
-          </dxg:ColumnBase.EditSettings>
-        </dxg:GridColumn>
-        <dxg:GridColumn FieldName="StartingBalance" Style="{StaticResource AmountDisplayFormat}"
+                    <dxg:ColumnBase.EditSettings>
+                        <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Offices.List}"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="StartingBalance" Style="{StaticResource AmountDisplayFormat}"
                         Header="{Localize Starting}"/>
-        <dxg:GridColumn FieldName="PartnerOpeningBalance" Style="{StaticResource AmountDisplayFormat}"
+                <dxg:GridColumn FieldName="PartnerOpeningBalance" Style="{StaticResource AmountDisplayFormat}"
                         Header="{Localize Opening}"/>
-        <dxg:GridColumn FieldName="PartnerBalanceRevision" Style="{StaticResource AmountDisplayFormat}"
+                <dxg:GridColumn FieldName="PartnerBalanceRevision" Style="{StaticResource AmountDisplayFormat}"
                         Header="{Localize Revision}"/>
-        <dxg:GridColumn FieldName="PartnerTransfer" Style="{StaticResource AmountDisplayFormat}"
+                <dxg:GridColumn FieldName="PartnerTransfer" Style="{StaticResource AmountDisplayFormat}"
                         Header="{Localize Transfer}"/>
-        <dxg:GridColumn FieldName="Sales" Style="{StaticResource AmountDisplayFormat}" Header="{Localize Sales}"/>
-        <dxg:GridColumn FieldName="SalesReturn" Style="{StaticResource AmountDisplayFormat}"
+                <dxg:GridColumn FieldName="Sales" Style="{StaticResource AmountDisplayFormat}" Header="{Localize Sales}"/>
+                <dxg:GridColumn FieldName="SalesReturn" Style="{StaticResource AmountDisplayFormat}"
                         Header="{Localize 'Sales Return'}"/>
-        <dxg:GridColumn FieldName="Purchase" Style="{StaticResource AmountDisplayFormat}" Header="{Localize Purchase}"/>
-        <dxg:GridColumn FieldName="PurchaseReturn" Style="{StaticResource AmountDisplayFormat}"
+                <dxg:GridColumn FieldName="Purchase" Style="{StaticResource AmountDisplayFormat}" Header="{Localize Purchase}"/>
+                <dxg:GridColumn FieldName="PurchaseReturn" Style="{StaticResource AmountDisplayFormat}"
                         Header="{Localize 'Purchase Return'}"/>
-        <dxg:GridColumn FieldName="Payment" Style="{StaticResource AmountDisplayFormat}" Header="{Localize Payment}"/>
-        <dxg:GridColumn FieldName="Collection" Style="{StaticResource AmountDisplayFormat}" Header="{Localize Collection}"/>
-        <dxg:GridColumn FieldName="ResultingBalance" Style="{StaticResource AmountDisplayFormat}"
+                <dxg:GridColumn FieldName="Payment" Style="{StaticResource AmountDisplayFormat}" Header="{Localize Payment}"/>
+                <dxg:GridColumn FieldName="Collection" Style="{StaticResource AmountDisplayFormat}" Header="{Localize Collection}"/>
+                <dxg:GridColumn FieldName="ResultingBalance" Style="{StaticResource AmountDisplayFormat}"
                         Header="{Localize Resulting}"/>
-        <dxg:GridColumn FieldName="ResultingBalanceInCustomCurrency" Style="{StaticResource AmountDisplayFormat}"
+                <dxg:GridColumn FieldName="ResultingBalanceInCustomCurrency" Style="{StaticResource AmountDisplayFormat}"
                         Header="{Localize 'In Selected Currency'}"/>
-        <dxg:GridControl.TotalSummary>
-          <dxg:GridSummaryItem FieldName="StartingBalance" DisplayFormat="#,##0.00" SummaryType="Sum"/>
-          <dxg:GridSummaryItem FieldName="PartnerOpeningBalance" DisplayFormat="#,##0.00" SummaryType="Sum"/>
-          <dxg:GridSummaryItem FieldName="PartnerBalanceRevision" DisplayFormat="#,##0.00" SummaryType="Sum"/>
-          <dxg:GridSummaryItem FieldName="PartnerTransfer" DisplayFormat="#,##0.00" SummaryType="Sum"/>
-          <dxg:GridSummaryItem FieldName="Sales" DisplayFormat="#,##0.00" SummaryType="Sum"/>
-          <dxg:GridSummaryItem FieldName="SalesReturn" DisplayFormat="#,##0.00" SummaryType="Sum"/>
-          <dxg:GridSummaryItem FieldName="Purchase" DisplayFormat="#,##0.00" SummaryType="Sum"/>
-          <dxg:GridSummaryItem FieldName="PurchaseReturn" DisplayFormat="#,##0.00" SummaryType="Sum"/>
-          <dxg:GridSummaryItem FieldName="Payment" DisplayFormat="#,##0.00" SummaryType="Sum"/>
-          <dxg:GridSummaryItem FieldName="Collection" DisplayFormat="#,##0.00" SummaryType="Sum"/>
-          <dxg:GridSummaryItem FieldName="ResultingBalance" DisplayFormat="#,##0.00" SummaryType="Sum"/>
-          <dxg:GridSummaryItem FieldName="ResultingBalanceInCustomCurrency" DisplayFormat="#,##0.00" SummaryType="Sum"/>
-        </dxg:GridControl.TotalSummary>
-      </ctrl:StyledGridControl>
-    </dxlc:LayoutControl>
-  </DockPanel>
+                <dxg:GridControl.TotalSummary>
+                    <dxg:GridSummaryItem FieldName="StartingBalance" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                    <dxg:GridSummaryItem FieldName="PartnerOpeningBalance" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                    <dxg:GridSummaryItem FieldName="PartnerBalanceRevision" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                    <dxg:GridSummaryItem FieldName="PartnerTransfer" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                    <dxg:GridSummaryItem FieldName="Sales" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                    <dxg:GridSummaryItem FieldName="SalesReturn" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                    <dxg:GridSummaryItem FieldName="Purchase" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                    <dxg:GridSummaryItem FieldName="PurchaseReturn" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                    <dxg:GridSummaryItem FieldName="Payment" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                    <dxg:GridSummaryItem FieldName="Collection" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                    <dxg:GridSummaryItem FieldName="ResultingBalance" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                    <dxg:GridSummaryItem FieldName="ResultingBalanceInCustomCurrency" DisplayFormat="#,##0.00" SummaryType="Sum"/>
+                </dxg:GridControl.TotalSummary>
+            </ctrl:StyledGridControl>
+        </dxlc:LayoutControl>
+    </DockPanel>
 </mvx:MvxWpfView>

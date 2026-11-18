@@ -80,7 +80,7 @@ public static class StockOrdersEndpoints
             {
                 Id = o.Id.ToString(),
                 Code = o.Code ?? "",
-                Date = o.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                Date = o.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                 WarehouseId = o.WarehouseId?.ToString(),
                 PartnerId = o.PartnerId?.ToString(),
                 UserId = o.UserId?.ToString(),
@@ -173,7 +173,7 @@ public static class StockOrdersEndpoints
             {
                 Id = o.Id.ToString(),
                 Code = o.Code ?? "",
-                Date = o.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                Date = o.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                 WarehouseId = o.WarehouseId?.ToString(),
                 PartnerId = o.PartnerId?.ToString(),
                 UserId = o.UserId?.ToString(),
@@ -243,10 +243,10 @@ public static class StockOrdersEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var now = DateTimeOffset.Now;
-                    var todayStart = new DateTimeOffset(now.Year, now.Month, now.Day, 0, 0, 0, now.Offset);
+                    var today = DateTime.Today;
+                    var todayStart = new DateTimeOffset(DateTime.SpecifyKind(today, DateTimeKind.Utc), TimeSpan.Zero);
                     var weekStart = todayStart.AddDays(-7);
-                    var monthStart = new DateTimeOffset(now.Year, now.Month, 1, 0, 0, 0, now.Offset);
+                    var monthStart = new DateTimeOffset(DateTime.SpecifyKind(new DateTime(today.Year, today.Month, 1), DateTimeKind.Utc), TimeSpan.Zero);
 
                     var countToday = await db.StockOrders.CountAsync(r => !r.IsDisabled && r.Date >= todayStart, ct);
                     var countWeek = await db.StockOrders.CountAsync(r => !r.IsDisabled && r.Date >= weekStart, ct);
@@ -307,11 +307,11 @@ public static class StockOrdersEndpoints
             bool isCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
             bool isDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
 
-            DateTimeOffset date = DateTimeOffset.UtcNow;
+            DateTimeOffset date = new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
             string? dateStr = GetStringProp(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr))
+            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate))
             {
-                date = ParseCleanDateOffset(dateStr);
+                date = new DateTimeOffset(DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc), TimeSpan.Zero);
             }
 
             var tagsList = ExtractTagsFromRawJson(root);
@@ -377,7 +377,6 @@ public static class StockOrdersEndpoints
             else
             {
                 existing.Code = code;
-                existing.Date = date;
                 existing.WarehouseId = wId;
                 existing.PartnerId = pId;
                 if (uId.HasValue) existing.UserId = uId;
@@ -429,41 +428,35 @@ public static class StockOrdersEndpoints
     #region Helpers
     private static DateTimeOffset ParseCleanDateOffset(string raw)
     {
+        if (string.IsNullOrWhiteSpace(raw)) return new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
         raw = raw.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            return dto.ToUniversalTime();
-        }
+
         if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            return new DateTimeOffset(dt.ToUniversalTime());
+            return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc), TimeSpan.Zero);
         }
-        return DateTimeOffset.UtcNow;
+        return new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
     }
 
     private static DateTimeOffset ParseSafeFilterOffset(string raw, bool isTill = false)
     {
+        if (string.IsNullOrWhiteSpace(raw))
+            return isTill ? new DateTimeOffset(new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc), TimeSpan.Zero)
+                          : new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc), TimeSpan.Zero);
+
         raw = raw.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
-            {
-                return new DateTimeOffset(dto.Year, dto.Month, dto.Day, 23, 59, 59, dto.Offset).ToUniversalTime();
-            }
-            return dto.ToUniversalTime();
-        }
 
         if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            var offset = DateTimeOffset.Now.Offset;
             if (isTill && dt.TimeOfDay == TimeSpan.Zero)
             {
-                return new DateTimeOffset(dt.Year, dt.Month, dt.Day, 23, 59, 59, offset).ToUniversalTime();
+                dt = dt.Date.AddDays(1).AddTicks(-1);
             }
-            return new DateTimeOffset(dt, offset).ToUniversalTime();
+            return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc), TimeSpan.Zero);
         }
 
-        return isTill ? DateTimeOffset.UtcNow.AddYears(10) : DateTimeOffset.UtcNow.AddYears(-10);
+        return isTill ? new DateTimeOffset(new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc), TimeSpan.Zero)
+                      : new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc), TimeSpan.Zero);
     }
 
     private static List<string> ExtractTagsFromRawJson(JsonElement root)

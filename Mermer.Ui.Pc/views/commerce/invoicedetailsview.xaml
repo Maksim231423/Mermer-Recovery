@@ -478,7 +478,7 @@
                             </Border>
                         </dxlc:LayoutGroup>
                         <dxlc:LayoutGroup Background="#FF00859C"
-                              Visibility="{Binding Details.CanDebitCredit, Converter={dxmvvm:BooleanToVisibilityConverter HiddenInsteadOfCollapsed=true}}">
+                  Visibility="{Binding CanShowPartnerBalance, Converter={dxmvvm:BooleanToVisibilityConverter HiddenInsteadOfCollapsed=true}}">
                             <Border BorderBrush="#FFD6D6D6" BorderThickness="1" Padding="5">
                                 <Grid>
                                     <TextBlock FontSize="100" Foreground="White" HorizontalAlignment="Left" VerticalAlignment="Top"

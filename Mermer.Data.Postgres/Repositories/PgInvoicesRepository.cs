@@ -219,29 +219,24 @@ public class PgInvoicesRepository : IInvoicesRepository
 
     private static DateTime ToSafeUtcFrom(DateTime dt)
     {
-        if (dt == default || dt == DateTime.MinValue)
+        if (dt == default || dt == DateTime.MinValue || dt.Year <= 2000)
             return new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
-        return dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
+        return DateTime.SpecifyKind(dt, DateTimeKind.Utc);
     }
 
     private static DateTime ToSafeUtcTill(DateTime dt)
     {
-        if (dt == default || dt >= DateTime.MaxValue.AddDays(-2))
+        if (dt == default || dt >= DateTime.MaxValue.AddDays(-2) || dt.Year >= 2099)
             return new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
-        var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
-
-        // Если клиент прислал строго полночь без времени (00:00:00.000), 
-        // значит это дата-фильтр по одному дню, и нужно взять до конца дня (+1 день).
-        // Если же клиент передал время (например 21:00:00Z или 23:59:59Z), 
-        // значит клиент УЖЕ сам рассчитал точную границу — сдвигать НЕЛЬЗЯ!
-        if (dt.TimeOfDay == TimeSpan.Zero && dt.Kind != DateTimeKind.Utc)
+        var safe = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+        if (dt.TimeOfDay == TimeSpan.Zero)
         {
-            return utc.AddDays(1);
+            return safe.AddDays(1);
         }
 
-        return utc;
+        return safe;
     }
 
     public async Task<IReadOnlyList<InvoicePaymentInfo>> GetPaymentInfoAsync(
@@ -451,8 +446,8 @@ public class PgInvoicesRepository : IInvoicesRepository
 
         // 1. Обновляем реквизиты шапки
         entity.Code = model.Code;
-        entity.Date = model.Date.ToUniversalTime();
-        entity.DueDate = model.DueDate?.ToUniversalTime();
+        entity.Date = new DateTimeOffset(DateTime.SpecifyKind(model.Date, DateTimeKind.Utc), TimeSpan.Zero);
+        entity.DueDate = model.DueDate.HasValue ? new DateTimeOffset(DateTime.SpecifyKind(model.DueDate.Value, DateTimeKind.Utc), TimeSpan.Zero) : null;
         entity.InvoiceType = model.InvoiceType.ToString();
         entity.IsCompleted = model.IsCompleted;
         entity.IsDisabled = model.IsDisabled;
@@ -541,7 +536,9 @@ public class PgInvoicesRepository : IInvoicesRepository
     {
         Guid? warehouseGuid = Guid.TryParse(warehouseId, out var wg) ? wg : null;
 
-        var safeTill = till >= DateTime.MaxValue.AddDays(-2) ? new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Utc) : till.AddDays(1).ToUniversalTime();
+        var safeTill = till >= DateTime.MaxValue.AddDays(-2)
+    ? new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Utc)
+    : DateTime.SpecifyKind(till.AddDays(1), DateTimeKind.Utc);
 
         const string sql = """
             SELECT
@@ -692,8 +689,8 @@ public class PgInvoicesRepository : IInvoicesRepository
         {
             Id = id == Guid.Empty ? Guid.NewGuid() : id,
             Code = m.Code,
-            Date = m.Date.ToUniversalTime(),
-            DueDate = m.DueDate?.ToUniversalTime(),
+            Date = new DateTimeOffset(DateTime.SpecifyKind(m.Date, DateTimeKind.Utc), TimeSpan.Zero),
+            DueDate = m.DueDate.HasValue ? new DateTimeOffset(DateTime.SpecifyKind(m.DueDate.Value, DateTimeKind.Utc), TimeSpan.Zero) : null,
             InvoiceType = m.InvoiceType.ToString(),
             IsCompleted = m.IsCompleted,
             IsDisabled = m.IsDisabled,

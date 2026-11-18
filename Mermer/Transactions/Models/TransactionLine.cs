@@ -45,12 +45,18 @@ public abstract class TransactionLine : BindableObject, IRequestCurrencyConverte
 
   public virtual string DisplayTotalString => this.GetDisplayAmountString(this.DisplayTotal);
 
-  public virtual void UpdateCurrencyConvertion()
-  {
-    this.RaisePropertyChanged<Decimal>((Expression<Func<Decimal>>) (() => this.ActionTotal));
-  }
+    // Добавляем свойство Total для строк
+    public virtual Decimal Total => this.DisplayTotal;
 
-  public event CurrencyConverter CurrencyConverterRequested;
+    public virtual void UpdateCurrencyConvertion()
+    {
+        this._displayCurrencyConvertion = null; // Сбрасываем старый кэш валюты
+        this.RaisePropertyChanged<Decimal>((Expression<Func<Decimal>>)(() => this.ActionTotal));
+        this.RaisePropertyChanged("DisplayTotal");
+        this.RaisePropertyChanged("Total");
+    }
+
+    public event CurrencyConverter CurrencyConverterRequested;
 
   protected CurrencyConvertion GetCurrencyConvertion(string currencyId)
   {
@@ -63,15 +69,17 @@ public abstract class TransactionLine : BindableObject, IRequestCurrencyConverte
     this.RaisePropertyChanged<Decimal>((Expression<Func<Decimal>>) (() => this.DisplayTotal));
   }
 
-  public void UpdateDisplayCurrencyConvertion(CurrencyConvertion convertion, bool raiseChangeEvent = false)
-  {
-    this._displayCurrencyConvertion = convertion;
-    if (!raiseChangeEvent)
-      return;
-    this.RaisePropertyChanged("DisplayTotal");
-  }
+    public void UpdateDisplayCurrencyConvertion(CurrencyConvertion convertion, bool raiseChangeEvent = false)
+    {
+        this._displayCurrencyConvertion = convertion;
+        if (!raiseChangeEvent)
+            return;
 
-  public event Mermer.Transactions.Models.CurrencyId DisplayCurrencyIdRequested;
+        this.RaisePropertyChanged("DisplayTotal");
+        this.RaisePropertyChanged("Total");
+    }
+
+    public event Mermer.Transactions.Models.CurrencyId DisplayCurrencyIdRequested;
 
   protected string GetDisplayCurrencyId()
   {
@@ -102,21 +110,25 @@ public abstract class TransactionLine : BindableObject, IRequestCurrencyConverte
     return formatterRequested == null ? (string) null : formatterRequested(amount, currencyId);
   }
 
-  public Decimal GetDisplayAmount(Decimal amount)
-  {
-    if (this._displayCurrencyConvertion == null)
+    public Decimal GetDisplayAmount(Decimal amount)
     {
-      string displayCurrencyId = this.GetDisplayCurrencyId();
-      if (string.IsNullOrEmpty(displayCurrencyId))
-        return 0M;
-      this._displayCurrencyConvertion = this.GetCurrencyConvertion(displayCurrencyId);
-      if (this._displayCurrencyConvertion == null)
-        return 0M;
-    }
-    return amount / this._displayCurrencyConvertion.Multiplier * this._displayCurrencyConvertion.Divider;
-  }
+        if (this._displayCurrencyConvertion == null)
+        {
+            string displayCurrencyId = this.GetDisplayCurrencyId();
+            if (string.IsNullOrEmpty(displayCurrencyId))
+                return 0M;
+            this._displayCurrencyConvertion = this.GetCurrencyConvertion(displayCurrencyId);
+            if (this._displayCurrencyConvertion == null)
+                return 0M;
+        }
+        if (this._displayCurrencyConvertion.Multiplier == 0M)
+            return 0M;
 
-  protected string GetDisplayAmountString(Decimal amount)
+        decimal calculated = amount / this._displayCurrencyConvertion.Multiplier * this._displayCurrencyConvertion.Divider;
+        return Math.Round(calculated, 2, MidpointRounding.AwayFromZero);
+    }
+
+    protected string GetDisplayAmountString(Decimal amount)
   {
     string displayCurrencyId = this.GetDisplayCurrencyId();
     return string.IsNullOrEmpty(displayCurrencyId) ? (string) null : this.GetAmountFormatter(amount, displayCurrencyId);

@@ -346,43 +346,51 @@ public class StockDetailsViewModel : DetailsViewModel<Stock>
         try
         {
             // 1. Проверка названия товара
-            if (string.IsNullOrEmpty(Details.Name))
+            if (string.IsNullOrWhiteSpace(Details.Name))
             {
                 throw new Exception(this["Field '{0}' is required", this["Name"]]);
             }
 
-            // 2. Проверка кода товара (если генератор кода почему-то не сработал)
-            if (string.IsNullOrEmpty(Details.Code))
+            // 2. Проверка кода товара
+            if (string.IsNullOrWhiteSpace(Details.Code))
             {
                 throw new Exception(this["Field '{0}' is required", this["Code"]]);
             }
 
-            // 3. Единица измерения (Unit) обязательна для складского учета
-            if (string.IsNullOrEmpty(Details.Unit))
+            // 3. Единица измерения (Unit)
+            if (string.IsNullOrWhiteSpace(Details.Unit))
             {
                 throw new Exception(this["Field '{0}' is required", this["Unit"]]);
             }
 
-            // 4. Проверка базовой цены
-            if (Details.Price < 0)
+            // 4. ПРОВЕРКА ЦЕНЫ: Обязательное поле, строго больше нуля
+            bool hasValidPrice = Details.Price > 0m
+                || (Details.Prices != null && Details.Prices.Any(p => p.Price > 0m));
+
+            if (!hasValidPrice)
             {
-                throw new Exception(this["Price cannot be negative"]);
+                throw new Exception(this["Field '{0}' is required and must be greater than zero", this["Price"]]);
             }
 
-            // 5. Если цена указана, обязательно должна быть выбрана валюта
-            if (Details.Price > 0 && string.IsNullOrEmpty(Details.CurrencyId))
+            // 5. Валюта обязательна
+            string effectiveCurrencyId = Details.CurrencyId;
+            if (string.IsNullOrEmpty(effectiveCurrencyId) && Details.Prices != null)
+            {
+                effectiveCurrencyId = Details.Prices.FirstOrDefault(p => p.Price > 0m)?.CurrencyId;
+            }
+
+            if (string.IsNullOrEmpty(effectiveCurrencyId))
             {
                 throw new Exception(this["Field '{0}' is required", this["Currency"]]);
             }
         }
         catch (Exception ex)
         {
-            // Показываем эррор-месседж пользователю и останавливаем сохранение
+            // Показываем сообщение об ошибке пользователю и прерываем сохранение
             UserInteractionService.ShowExceptionMessage(ex);
             return false;
         }
 
-        // Если валидация пройдена — вызываем сохранение в базу
         return await base.OnSaveAsync();
     }
 }

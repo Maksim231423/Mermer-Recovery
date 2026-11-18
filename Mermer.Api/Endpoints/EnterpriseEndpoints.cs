@@ -160,16 +160,11 @@ public static class EnterpriseEndpoints
                     if (multiplier == 0m) multiplier = 1m;
                     if (divider == 0m) divider = 1m;
 
-                    DateTime validFrom = DateTime.UtcNow.Date;
+                    DateTime validFrom = DateTime.SpecifyKind(DateTime.Now.Date, DateTimeKind.Utc);
                     string? validFromStr = GetStringProperty(rateJson, "validFrom", "ValidFrom", "rateValidFrom", "RateValidFrom");
                     if (!string.IsNullOrEmpty(validFromStr) && DateTime.TryParse(validFromStr, out var parsedDate))
                     {
-                        var utcDate = parsedDate.ToUniversalTime();
-                        validFrom = DateTime.SpecifyKind(utcDate.Date, DateTimeKind.Utc);
-                    }
-                    else
-                    {
-                        validFrom = DateTime.SpecifyKind(validFrom, DateTimeKind.Utc);
+                        validFrom = DateTime.SpecifyKind(parsedDate.Date, DateTimeKind.Utc);
                     }
 
                     incomingRates.Add(new

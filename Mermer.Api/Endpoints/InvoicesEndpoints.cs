@@ -30,8 +30,8 @@ public static class InvoicesEndpoints
              IInvoicesRepository repo,
              CancellationToken ct) =>
         {
-            var startDate = EnsureUtc(from ?? DateTime.UtcNow.AddMonths(-1));
-            var endDate = EnsureUtc(till ?? DateTime.UtcNow.AddDays(1));
+            var startDate = EnsureUtc(from ?? DateTime.Now.AddMonths(-1), isTill: false);
+            var endDate = EnsureUtc(till ?? DateTime.Now.AddDays(1), isTill: true, fromDt: from);
 
             var info = await repo.GetInfoAsync(startDate, endDate, displayCurrencyId, ct);
 
@@ -41,7 +41,7 @@ public static class InvoicesEndpoints
                 Code = i.Code,
                 Type = i.InvoiceType.ToString(),
                 InvoiceType = i.InvoiceType.ToString(),
-                Date = i.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                Date = i.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                 UserId = i.UserId,
                 UserName = i.UserName,
                 IsCash = true,
@@ -65,8 +65,8 @@ public static class InvoicesEndpoints
         // 2. КОЛИЧЕСТВО НАКЛАДНЫХ
         group.MapGet("/count", async (DateTime? from, DateTime? till, IInvoicesRepository repo, CancellationToken ct) =>
         {
-            var startDate = EnsureUtc(from ?? DateTime.UtcNow.AddYears(-10));
-            var endDate = EnsureUtc(till ?? DateTime.UtcNow.AddYears(10));
+            var startDate = EnsureUtc(from ?? DateTime.Now.AddYears(-10), isTill: false);
+            var endDate = EnsureUtc(till ?? DateTime.Now.AddYears(10), isTill: true, fromDt: from);
             var count = await repo.CountInfoAsync(startDate, endDate, ct);
             return Results.Json(new { count }, jsonOptions);
         })
@@ -76,9 +76,9 @@ public static class InvoicesEndpoints
         group.MapGet("/facets", async (string? fields, MermerDbContext db, CancellationToken ct) =>
         {
             var fieldList = fields?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                            ?? Array.Empty<string>();
+                            ?? new[] { "Date", "Group", "Tags" };
 
-            var result = new Dictionary<string, Dictionary<string, int>>();
+            var result = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var field in fieldList)
             {
@@ -108,6 +108,42 @@ public static class InvoicesEndpoints
 
                     result[field] = tagCounts;
                 }
+                else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
+                {
+                    var today = DateTime.Today;
+                    var todayStart = DateTime.SpecifyKind(today, DateTimeKind.Utc);
+                    var tomorrowStart = todayStart.AddDays(1);
+                    var yesterdayStart = todayStart.AddDays(-1);
+
+                    int diff = (7 + (today.DayOfWeek - DayOfWeek.Monday)) % 7;
+                    var weekStart = DateTime.SpecifyKind(today.AddDays(-1 * diff), DateTimeKind.Utc);
+                    var pastWeekStart = weekStart.AddDays(-7);
+
+                    var monthStart = DateTime.SpecifyKind(new DateTime(today.Year, today.Month, 1), DateTimeKind.Utc);
+                    var pastMonthStart = monthStart.AddMonths(-1);
+
+                    var baseQuery = db.Invoices.AsNoTracking().Where(i => !i.IsDisabled);
+
+                    var countToday = await baseQuery.CountAsync(i => i.Date >= todayStart && i.Date < tomorrowStart, ct);
+                    var countYesterday = await baseQuery.CountAsync(i => i.Date >= yesterdayStart && i.Date < todayStart, ct);
+                    var countWeek = await baseQuery.CountAsync(i => i.Date >= weekStart && i.Date < tomorrowStart, ct);
+                    var countPastWeek = await baseQuery.CountAsync(i => i.Date >= pastWeekStart && i.Date < weekStart, ct);
+                    var countMonth = await baseQuery.CountAsync(i => i.Date >= monthStart && i.Date < tomorrowStart, ct);
+                    var countPastMonth = await baseQuery.CountAsync(i => i.Date >= pastMonthStart && i.Date < monthStart, ct);
+                    var countAll = await baseQuery.CountAsync(ct);
+
+                    result[field] = new Dictionary<string, int>
+                    {
+                        { "#Today", countToday },
+                        { "#Yesturday", countYesterday },
+                        { "#Yesterday", countYesterday },
+                        { "#This Week", countWeek },
+                        { "#Past Week", countPastWeek },
+                        { "#This Month", countMonth },
+                        { "#Past Month", countPastMonth },
+                        { "#All Records", countAll }
+                    };
+                }
                 else
                 {
                     result[field] = new Dictionary<string, int>();
@@ -124,7 +160,6 @@ public static class InvoicesEndpoints
             var inv = await repo.GetAsync(id, ct);
             if (inv is null) return Results.NotFound();
 
-            inv.Date = inv.Date.ToLocalTime();
             return Results.Json(inv, jsonOptions);
         })
         .WithName("InvoicesGetById");
@@ -156,7 +191,7 @@ public static class InvoicesEndpoints
                 pgInvoice.Tags = extractedTags;
             }
 
-            pgInvoice.Date = EnsureUtc(pgInvoice.Date);
+            pgInvoice.Date = DateTime.SpecifyKind(pgInvoice.Date, DateTimeKind.Utc);
 
             var defOffice = await db.Offices.AsNoTracking().FirstOrDefaultAsync(o => !o.IsDisabled, ct);
             Guid? defaultOfficeId = defOffice?.Id;
@@ -237,6 +272,9 @@ public static class InvoicesEndpoints
                 }
                 else
                 {
+                    // Защита от перезаписи даты и валюты создания при редактировании:
+                    pgInvoice.Date = existing.Date;
+                    pgInvoice.DisplayCurrencyId = existing.DisplayCurrencyId;
                     await repo.UpdateAsync(pgInvoice, ct);
                 }
 
@@ -274,8 +312,8 @@ public static class InvoicesEndpoints
             IInvoicesRepository repo,
             CancellationToken ct) =>
         {
-            var startDate = EnsureUtc(from ?? DateTime.UtcNow.AddYears(-10));
-            var endDate = EnsureUtc(till ?? DateTime.UtcNow.AddYears(10));
+            var startDate = EnsureUtc(from ?? DateTime.Now.AddYears(-10), isTill: false);
+            var endDate = EnsureUtc(till ?? DateTime.Now.AddYears(10), isTill: true, fromDt: from);
 
             var result = await repo.GetPaymentInfoAsync(startDate, endDate, officeId, partnerId, displayCurrencyId, ct);
             return Results.Json(result, jsonOptions);
@@ -290,8 +328,8 @@ public static class InvoicesEndpoints
             IInvoicesRepository repo,
             CancellationToken ct) =>
         {
-            var startDate = EnsureUtc(from ?? DateTime.UtcNow.AddYears(-10));
-            var endDate = EnsureUtc(till ?? DateTime.UtcNow.AddYears(10));
+            var startDate = EnsureUtc(from ?? DateTime.Now.AddYears(-10), isTill: false);
+            var endDate = EnsureUtc(till ?? DateTime.Now.AddYears(10), isTill: true, fromDt: from);
 
             var count = await repo.CountPaymentInfoAsync(startDate, endDate, officeId, partnerId, ct);
             return Results.Json(new { count }, jsonOptions);
@@ -301,11 +339,23 @@ public static class InvoicesEndpoints
         return app;
     }
 
-    private static DateTime EnsureUtc(DateTime dt)
+    private static DateTime EnsureUtc(DateTime dt, bool isTill = false, DateTime? fromDt = null)
     {
         if (dt == DateTime.MinValue || dt.Year <= 2000) return DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
         if (dt == DateTime.MaxValue || dt.Year >= 2099) return DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc);
-        return dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
+
+        if (isTill && dt.TimeOfDay == TimeSpan.Zero)
+        {
+            if (fromDt.HasValue && dt.Date > fromDt.Value.Date)
+            {
+                dt = dt.AddTicks(-1);
+            }
+            else
+            {
+                dt = dt.Date.AddDays(1).AddTicks(-1);
+            }
+        }
+        return DateTime.SpecifyKind(dt, DateTimeKind.Utc);
     }
 
     private static List<string> ExtractTagsFromRawJson(JsonElement root)

@@ -1,10 +1,4 @@
-﻿// Decompiled with JetBrains decompiler
-// Type: Mermer.Ui.Core.ViewModels.CRM.PartnerBalancesListViewModel
-// Assembly: Mermer.Ui.Core, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
-// MVID: DC92D011-8413-44AC-9F10-F866D891CF66
-// Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.Ui.Core.dll
-
-using MvvmCross.Core.Navigation;
+﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
 using MvvmCross.Plugins.Messenger;
 using Mermer.Common.Settings;
@@ -27,44 +21,44 @@ using System.Windows.Input;
 #nullable disable
 namespace Mermer.Ui.Core.ViewModels.CRM;
 
-public class PartnerBalancesListViewModel : 
+public class PartnerBalancesListViewModel :
   ListViewModelBaseWithFilterDate<PartnerBalanceByTypeWithBalance>
 {
-  private readonly IConfigurator _configurator;
-  private readonly IPartnerBalancesRepository _repository;
-  private System.Collections.Generic.List<object> _selectedOfficeIds;
-  private string _partnerId;
-  private string _currencyId;
-  private bool _loaded;
+    private readonly IConfigurator _configurator;
+    private readonly IPartnerBalancesRepository _repository;
+    private System.Collections.Generic.List<object> _selectedOfficeIds;
+    private string _partnerId;
+    private string _currencyId;
+    private bool _loaded;
 
-  public PartnerBalancesListViewModel(
-    IMvxMessenger messenger,
-    IConfigurator configurator,
-    Reference<Office> offices,
-    Reference<Partner> partners,
-    Reference<Currency> currencies,
-    IPartnerBalancesRepository repository,
-    IMvxNavigationService navigationService,
-    IUserInteractionService userInteractionService)
-    : base(messenger, navigationService, userInteractionService)
-  {
-    this._configurator = configurator;
-    this._repository = repository;
-    this.Offices = offices;
-    this.Partners = partners;
-    this.Currencies = currencies;
-  }
-
-  public System.Collections.Generic.List<object> SelectedOfficeIds
-  {
-    get => this._selectedOfficeIds;
-    set
+    public PartnerBalancesListViewModel(
+      IMvxMessenger messenger,
+      IConfigurator configurator,
+      Reference<Office> offices,
+      Reference<Partner> partners,
+      Reference<Currency> currencies,
+      IPartnerBalancesRepository repository,
+      IMvxNavigationService navigationService,
+      IUserInteractionService userInteractionService)
+      : base(messenger, navigationService, userInteractionService)
     {
-      if (this._selectedOfficeIds != null && value != null && this._selectedOfficeIds.SequenceEqual<object>((IEnumerable<object>) value) || !this.SetProperty<System.Collections.Generic.List<object>>(ref this._selectedOfficeIds, value, nameof (SelectedOfficeIds)) || this.IsBusy)
-        return;
-      this.Initialize();
+        this._configurator = configurator;
+        this._repository = repository;
+        this.Offices = offices;
+        this.Partners = partners;
+        this.Currencies = currencies;
     }
-  }
+
+    public System.Collections.Generic.List<object> SelectedOfficeIds
+    {
+        get => this._selectedOfficeIds;
+        set
+        {
+            if (this._selectedOfficeIds != null && value != null && this._selectedOfficeIds.SequenceEqual<object>((IEnumerable<object>)value) || !this.SetProperty<System.Collections.Generic.List<object>>(ref this._selectedOfficeIds, value, nameof(SelectedOfficeIds)) || this.IsBusy)
+                return;
+            this.Initialize();
+        }
+    }
 
     private List<object> _selectedOfficesList;
     public List<object> SelectedOfficesList
@@ -83,44 +77,59 @@ public class PartnerBalancesListViewModel :
     }
 
     public string[] OfficeIds
-  {
-    get
     {
-      System.Collections.Generic.List<object> selectedOfficeIds = this.SelectedOfficeIds;
-      return (selectedOfficeIds != null ? selectedOfficeIds.Cast<string>().ToArray<string>() : (string[]) null) ?? Array.Empty<string>();
+        get
+        {
+            System.Collections.Generic.List<object> selectedOfficeIds = this.SelectedOfficeIds;
+            return (selectedOfficeIds != null ? selectedOfficeIds.Cast<string>().ToArray<string>() : (string[])null) ?? Array.Empty<string>();
+        }
     }
-  }
 
-  public virtual string PartnerId
-  {
-    get => this._partnerId;
-    set
+    public virtual string PartnerId
     {
-      if (!this.SetProperty<string>(ref this._partnerId, value, nameof (PartnerId)) || this.IsBusy)
-        return;
-      this.Initialize();
+        get => this._partnerId;
+        set
+        {
+            if (!this.SetProperty<string>(ref this._partnerId, value, nameof(PartnerId)) || this.IsBusy)
+                return;
+            this.Initialize();
+        }
     }
-  }
 
-  public virtual string CurrencyId
-  {
-    get => this._currencyId;
-    set
+    public virtual string CurrencyId
     {
-      if (!this.SetProperty<string>(ref this._currencyId, value, nameof (CurrencyId)) || this.IsBusy)
-        return;
-      this.ApplyCustomCurrencyRate();
+        get => this._currencyId;
+        set
+        {
+            if (!this.SetProperty<string>(ref this._currencyId, value, nameof(CurrencyId)) || this.IsBusy)
+                return;
+            this.ApplyCustomCurrencyRate();
+        }
     }
-  }
 
-  public Reference<Office> Offices { get; }
+    public Reference<Office> Offices { get; }
 
-  public Reference<Partner> Partners { get; }
+    public Reference<Partner> Partners { get; }
 
-  public Reference<Currency> Currencies { get; }
+    public Reference<Currency> Currencies { get; }
 
     protected override async Task PreLoad()
     {
+        if (this.Partners != null)
+        {
+            this.Partners.Filter = x => !x.IsDisabled;
+        }
+
+        if (this.Offices != null)
+        {
+            this.Offices.Filter = x => !x.IsDisabled;
+        }
+
+        if (this.Currencies != null)
+        {
+            this.Currencies.Filter = x => !x.IsDisabled;
+        }
+
         await Task.WhenAll(
             base.PreLoad(),
             Offices.Initialize(),
@@ -147,25 +156,21 @@ public class PartnerBalancesListViewModel :
             _loaded = true;
         }
 
-        // ИСПРАВЛЕНО: Валюта по умолчанию НЕ устанавливается (всегда null),
-        // даже если в настройках программы задан DefaultCurrencyId.
         CurrencyId = null;
     }
-
-
 
     protected override async Task<IEnumerable<PartnerBalanceByTypeWithBalance>> GetFilteredListByDateAsync(
     DateTime from,
     DateTime till)
-  {
-    return this.ApplyCustomCurrencyRate(await this._repository.GetByTypeAsync(from, till, this.PartnerId, this.OfficeIds));
-  }
+    {
+        return this.ApplyCustomCurrencyRate(await this._repository.GetByTypeAsync(from, till, this.PartnerId, this.OfficeIds));
+    }
 
-  protected override async Task<IEnumerable<PartnerBalanceByTypeWithBalance>> GetFilteredListAsync(
-    ListFilter filter)
-  {
-    return this.ApplyCustomCurrencyRate(await this._repository.GetByTypeAsync(DateTime.MinValue, DateTime.MaxValue, this.PartnerId, this.OfficeIds));
-  }
+    protected override async Task<IEnumerable<PartnerBalanceByTypeWithBalance>> GetFilteredListAsync(
+      ListFilter filter)
+    {
+        return this.ApplyCustomCurrencyRate(await this._repository.GetByTypeAsync(DateTime.MinValue, DateTime.MaxValue, this.PartnerId, this.OfficeIds));
+    }
 
     private void ApplyCustomCurrencyRate() => this.List = this.ApplyCustomCurrencyRate(this.List);
 
@@ -195,62 +200,62 @@ public class PartnerBalancesListViewModel :
     }
 
     public ICommand SelectOrViewDetailsCommand
-  {
-    get
     {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnSelectOrViewDetailsAsync), (Func<bool>) (() => !this.IsBusy && this.SelectedItem != null));
+        get
+        {
+            return (ICommand)new MvxAsyncCommand(new Func<Task>(this.OnSelectOrViewDetailsAsync), (Func<bool>)(() => !this.IsBusy && this.SelectedItem != null));
+        }
     }
-  }
 
-  private Task OnSelectOrViewDetailsAsync()
-  {
-    return this.NavigationService.Navigate<PartnerActionsListViewModel, PartnerActionsFilter>(new PartnerActionsFilter()
+    private Task OnSelectOrViewDetailsAsync()
     {
-      OfficeIds = new string[1]
-      {
+        return this.NavigationService.Navigate<PartnerActionsListViewModel, PartnerActionsFilter>(new PartnerActionsFilter()
+        {
+            OfficeIds = new string[1]
+          {
         this.SelectedItem.OfficeId
-      },
-      PartnerId = this.SelectedItem.PartnerId,
-      DateFrom = this.DateFilterFrom,
-      DateTill = this.DateFilterTill
-    });
-  }
-
-  public ICommand ShowActionsCommand
-  {
-    get
-    {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnShowActionsAsync), (Func<bool>) (() => !this.IsBusy));
+          },
+            PartnerId = this.SelectedItem.PartnerId,
+            DateFrom = this.DateFilterFrom,
+            DateTill = this.DateFilterTill
+        });
     }
-  }
 
-  private Task OnShowActionsAsync()
-  {
-    return this.NavigationService.Navigate<PartnerActionsListViewModel, PartnerActionsFilter>(new PartnerActionsFilter()
+    public ICommand ShowActionsCommand
     {
-      OfficeIds = this.OfficeIds,
-      PartnerId = this.PartnerId,
-      DateFrom = this.DateFilterFrom,
-      DateTill = this.DateFilterTill
-    });
-  }
+        get
+        {
+            return (ICommand)new MvxAsyncCommand(new Func<Task>(this.OnShowActionsAsync), (Func<bool>)(() => !this.IsBusy));
+        }
+    }
 
-  protected override Expression<Func<PartnerBalanceByTypeWithBalance, bool>> GetDateFilter(
-    DateTime from,
-    DateTime till)
-  {
-    throw new NotImplementedException();
-  }
+    private Task OnShowActionsAsync()
+    {
+        return this.NavigationService.Navigate<PartnerActionsListViewModel, PartnerActionsFilter>(new PartnerActionsFilter()
+        {
+            OfficeIds = this.OfficeIds,
+            PartnerId = this.PartnerId,
+            DateFrom = this.DateFilterFrom,
+            DateTill = this.DateFilterTill
+        });
+    }
 
-  protected override Task<int> CountListAsync(
-    params Expression<Func<PartnerBalanceByTypeWithBalance, bool>>[] predicates)
-  {
-    throw new NotImplementedException();
-  }
+    protected override Expression<Func<PartnerBalanceByTypeWithBalance, bool>> GetDateFilter(
+      DateTime from,
+      DateTime till)
+    {
+        throw new NotImplementedException();
+    }
 
-  protected override Task<IEnumerable<PartnerBalanceByTypeWithBalance>> GetListAsync(
-    params Expression<Func<PartnerBalanceByTypeWithBalance, bool>>[] predicates)
-  {
-    throw new NotImplementedException();
-  }
+    protected override Task<int> CountListAsync(
+      params Expression<Func<PartnerBalanceByTypeWithBalance, bool>>[] predicates)
+    {
+        throw new NotImplementedException();
+    }
+
+    protected override Task<IEnumerable<PartnerBalanceByTypeWithBalance>> GetListAsync(
+      params Expression<Func<PartnerBalanceByTypeWithBalance, bool>>[] predicates)
+    {
+        throw new NotImplementedException();
+    }
 }

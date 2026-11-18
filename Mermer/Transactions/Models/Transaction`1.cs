@@ -189,22 +189,31 @@ public class Transaction<T> : TransactionModel, IRequestCurrencyConverter where 
     return converterRequested == null ? (CurrencyConvertion) null : converterRequested(currencyId);
   }
 
-  public virtual void UpdateDisplayCurrencyId(bool raiseChangeEvent = false)
-  {
-    if (this.Lines == null)
-      return;
-    CurrencyConvertion displayCurrencyConvertion = this.CurrencyConverter(this.DisplayCurrencyId);
-    if (displayCurrencyConvertion == null)
-      return;
-    TaskScheduler scheduler = SynchronizationContext.Current == null ? TaskScheduler.Current : TaskScheduler.FromCurrentSynchronizationContext();
-    Task.Factory.StartNew((Action) (() =>
-    {
-      foreach (T line in (Collection<T>) this.Lines)
-        line.UpdateDisplayCurrencyConvertion(displayCurrencyConvertion, raiseChangeEvent);
-    }), TaskCreationOptions.LongRunning).ContinueWith((Action<Task>) (t => this.RaisePropertyChanged<Decimal>((Expression<Func<Decimal>>) (() => this.DisplayTotal))), scheduler);
-  }
+    // Добавляем свойство Total, возвращающее пересчитанную сумму
+    public virtual Decimal Total => this.DisplayTotal;
 
-  public void UpdateDisplayCurrencyConvertion(CurrencyConvertion convertion, bool raiseChangeEvent = false)
+    public virtual void UpdateDisplayCurrencyId(bool raiseChangeEvent = false)
+    {
+        if (this.Lines == null)
+            return;
+
+        CurrencyConvertion displayCurrencyConvertion = this.CurrencyConverter(this.DisplayCurrencyId);
+        if (displayCurrencyConvertion == null)
+            return;
+
+        // Синхронно и безопасно обновляем строки в UI-потоке
+        foreach (T line in this.Lines)
+        {
+            line.UpdateDisplayCurrencyConvertion(displayCurrencyConvertion, true);
+        }
+
+        this.RaisePropertyChanged("DisplayTotal");
+        this.RaisePropertyChanged("Total");
+        this.RaisePropertyChanged("ActionTotal");
+        this.RaisePropertyChanged("DisplayTotalString");
+    }
+
+    public void UpdateDisplayCurrencyConvertion(CurrencyConvertion convertion, bool raiseChangeEvent = false)
   {
   }
 
@@ -232,16 +241,20 @@ public class Transaction<T> : TransactionModel, IRequestCurrencyConverter where 
     return this.AmountFormatterRequested == null ? (string) null : this.AmountFormatterRequested(amount, currencyId);
   }
 
-  public Decimal GetDisplayAmount(Decimal amount)
-  {
-    string displayCurrencyId = this.GetDisplayCurrencyId();
-    if (string.IsNullOrEmpty(displayCurrencyId))
-      return 0M;
-    CurrencyConvertion currencyConvertion = this.CurrencyConverter(displayCurrencyId);
-    return currencyConvertion == null ? 0M : amount / currencyConvertion.Multiplier * currencyConvertion.Divider;
-  }
+    public Decimal GetDisplayAmount(Decimal amount)
+    {
+        string displayCurrencyId = this.GetDisplayCurrencyId();
+        if (string.IsNullOrEmpty(displayCurrencyId))
+            return 0M;
+        CurrencyConvertion currencyConvertion = this.CurrencyConverter(displayCurrencyId);
+        if (currencyConvertion == null || currencyConvertion.Multiplier == 0M)
+            return 0M;
 
-  protected string GetDisplayAmountString(Decimal amount)
+        decimal calculated = amount / currencyConvertion.Multiplier * currencyConvertion.Divider;
+        return Math.Round(calculated, 2, MidpointRounding.AwayFromZero);
+    }
+
+    protected string GetDisplayAmountString(Decimal amount)
   {
     string displayCurrencyId = this.GetDisplayCurrencyId();
     return string.IsNullOrEmpty(displayCurrencyId) ? (string) null : this.GetAmountFormatter(amount, displayCurrencyId);

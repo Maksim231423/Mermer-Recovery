@@ -46,7 +46,7 @@ public static class StockRepriceEndpoints
 
             var allDates = priceDates.Union(rateDates)
                 .OrderByDescending(d => d)
-                .Select(d => d.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"))
+                .Select(d => d.ToString("yyyy-MM-ddTHH:mm:ss"))
                 .ToList();
 
             return Results.Json(allDates, jsonOptions);
@@ -74,30 +74,22 @@ public static class StockRepriceEndpoints
     private static DateTime ParseSafeDate(string? raw, bool isTill)
     {
         if (string.IsNullOrWhiteSpace(raw))
-            return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+            return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc)
+                          : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
 
         raw = raw.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            var res = dto.UtcDateTime;
-            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
-            {
-                res = res.Date.AddDays(1).AddTicks(-1);
-            }
-            return res;
-        }
 
         if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            var res = dt.ToUniversalTime();
             if (isTill && dt.TimeOfDay == TimeSpan.Zero)
             {
-                res = res.Date.AddDays(1).AddTicks(-1);
+                dt = dt.Date.AddDays(1).AddTicks(-1);
             }
-            return res;
+            return DateTime.SpecifyKind(dt, DateTimeKind.Utc);
         }
 
-        return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31), DateTimeKind.Utc) : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+        return isTill ? DateTime.SpecifyKind(new DateTime(2099, 12, 31, 23, 59, 59), DateTimeKind.Utc)
+                      : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
     }
 
     private static async Task<List<StockRepriceEffectDto>> CalculateEffectsAsync(HttpRequest req, MermerDbContext db, CancellationToken ct)

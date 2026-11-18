@@ -84,7 +84,7 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                var query = $"?dateFrom={dateFrom.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}&dateTill={dateTill.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}&aggregate={aggregate}";
+                var query = $"?dateFrom={dateFrom:yyyy-MM-ddTHH:mm:ss}&dateTill={dateTill:yyyy-MM-ddTHH:mm:ss}&aggregate={aggregate}";
                 if (!string.IsNullOrEmpty(stockId)) query += $"&stockId={stockId}";
                 if (warehouseIds != null) foreach (var w in warehouseIds) query += $"&warehouseId={w}";
 
@@ -104,7 +104,7 @@ namespace Mermer.Ui.Pc.Services
 
             try
             {
-                var query = $"?date={date.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}&displayCurrencyId={displayCurrencyId}";
+                var query = $"?date={date:yyyy-MM-ddTHH:mm:ss}&displayCurrencyId={displayCurrencyId}";
                 foreach (var w in whList) query += $"&warehouseId={w}";
                 if (stockIds != null) foreach (var s in stockIds.Where(x => !string.IsNullOrWhiteSpace(x))) query += $"&stockId={s}";
 
@@ -128,7 +128,7 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                var query = $"?dateFrom={dateFrom.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}&dateTill={dateTill.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}";
+                var query = $"?dateFrom={dateFrom:yyyy-MM-ddTHH:mm:ss}&dateTill={dateTill:yyyy-MM-ddTHH:mm:ss}";
                 if (warehouseIds != null) foreach (var w in warehouseIds) query += $"&warehouseId={w}";
                 var remote = await _restClient.GetAsync<StockBalanceAggregated>($"/api/stock-balances/aggregated{query}");
                 return remote ?? new StockBalanceAggregated { Lines = Array.Empty<StockBalanceAggregatedLine>() };

@@ -12,14 +12,18 @@
       </Setter.Value>
     </Setter>
   </Style>
-  <Style x:Key="AmountDisplayFormat" TargetType="{x:Type dxg:GridColumn}">
-    <Setter Property="dxg:ColumnBase.EditSettings">
-      <Setter.Value>
-        <dxe:SpinEditSettings DisplayFormat="###,###,###,###,##0.00" AllowDefaultButton="False"/>
-      </Setter.Value>
-    </Setter>
-  </Style>
-  <Style x:Key="LinesCountSummaryStyle" TargetType="{x:Type ContentPresenter}">
+    <Style x:Key="AmountDisplayFormat" TargetType="{x:Type dxg:GridColumn}">
+        <Setter Property="dxg:ColumnBase.EditSettings">
+            <Setter.Value>
+                <dxe:SpinEditSettings DisplayFormat="###,###,###,###,##0.00" 
+                              MaskType="Numeric" 
+                              Mask="###,###,###,###,##0.00" 
+                              MaskUseAsDisplayFormat="True" 
+                              AllowDefaultButton="False"/>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style x:Key="LinesCountSummaryStyle" TargetType="{x:Type ContentPresenter}">
     <Setter Property="ContentPresenter.ContentTemplate">
       <Setter.Value>
         <DataTemplate>

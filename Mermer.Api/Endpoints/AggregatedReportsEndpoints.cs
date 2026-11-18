@@ -1,15 +1,16 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using Dapper;
+﻿using Dapper;
+using Mermer.Data.Postgres;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
-using Mermer.Data.Postgres;
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Mermer.Api.Endpoints;
 
@@ -21,16 +22,19 @@ public static class AggregatedReportsEndpoints
 
         group.MapGet("/", async (HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
-            DateTime dateFrom = DateTime.UtcNow.AddMonths(-1);
-            DateTime dateTill = DateTime.UtcNow;
+            DateTime dateFrom = DateTime.SpecifyKind(DateTime.Now.AddMonths(-1), DateTimeKind.Utc);
+            DateTime dateTill = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
 
             string? fromStr = req.Query["dateFrom"].FirstOrDefault();
-            if (!string.IsNullOrEmpty(fromStr) && DateTime.TryParse(fromStr.Replace(" ", "+"), out var pf))
-                dateFrom = pf.ToUniversalTime();
+            if (!string.IsNullOrEmpty(fromStr) && DateTime.TryParse(fromStr.Replace(" ", "+"), CultureInfo.InvariantCulture, DateTimeStyles.None, out var pf))
+                dateFrom = DateTime.SpecifyKind(pf, DateTimeKind.Utc);
 
             string? tillStr = req.Query["dateTill"].FirstOrDefault();
-            if (!string.IsNullOrEmpty(tillStr) && DateTime.TryParse(tillStr.Replace(" ", "+"), out var pt))
-                dateTill = pt.ToUniversalTime();
+            if (!string.IsNullOrEmpty(tillStr) && DateTime.TryParse(tillStr.Replace(" ", "+"), CultureInfo.InvariantCulture, DateTimeStyles.None, out var pt))
+            {
+                if (pt.TimeOfDay == TimeSpan.Zero) pt = pt.Date.AddDays(1).AddTicks(-1);
+                dateTill = DateTime.SpecifyKind(pt, DateTimeKind.Utc);
+            }
 
             var officeIds = req.Query["officeId"]
                 .Select(x => Guid.TryParse(x, out var g) ? (Guid?)g : null)

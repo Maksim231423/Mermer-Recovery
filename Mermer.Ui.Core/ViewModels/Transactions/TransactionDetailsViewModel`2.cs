@@ -34,7 +34,7 @@ public class TransactionDetailsViewModel<T, TLine> : TransactionDetailsViewModel
     private string[] _groupNames;
     private string[] _tagNames;
     private TLine _selectedLine;
-
+    private string _initialDisplayCurrencyId;
     public TransactionDetailsViewModel(
       IConfigurator configurator,
       IRepository<T> repository,
@@ -131,7 +131,17 @@ public class TransactionDetailsViewModel<T, TLine> : TransactionDetailsViewModel
         Details.AmountFormatterRequested += AmountFormatter;
         Details.DefaultCurrencyIdRequested += DefaultCurrencyIdProvider;
         Details.RaiseChangeEvents = false;
-        Details.DisplayCurrencyId = DefaultCurrencyIdProvider();
+
+        // Назначаем дефолтную валюту только при создании нового документа 
+        // либо если у существующего документа она пустая:
+        if (string.IsNullOrEmpty(this.ItemId) || string.IsNullOrEmpty(Details.DisplayCurrencyId))
+        {
+            Details.DisplayCurrencyId = DefaultCurrencyIdProvider();
+        }
+
+        // Запоминаем оригинальную валюту создания документа из базы
+        this._initialDisplayCurrencyId = Details.DisplayCurrencyId;
+
         Details.PropertyChanged += Details_PropertyChanged;
 
         if (Details.Lines == null)
@@ -152,7 +162,6 @@ public class TransactionDetailsViewModel<T, TLine> : TransactionDetailsViewModel
 
                 if (existing != null)
                 {
-                    // Если документ новый (создание) — гарантируем актуальный курс из базы
                     if (string.IsNullOrEmpty(this.ItemId))
                     {
                         existing.Multiplier = mult;
@@ -172,7 +181,11 @@ public class TransactionDetailsViewModel<T, TLine> : TransactionDetailsViewModel
         }
 
         Details.UpdateCurrencyConvertion();
+        Details.UpdateDisplayCurrencyId(false);
         Details.RaisePropertyChanged("LinesCount");
+        Details.RaisePropertyChanged("DisplayTotal");
+        Details.RaisePropertyChanged("Total");
+        Details.RaisePropertyChanged("ActionTotal");
 
         WatchedObservableCollection<TLine> lines = Details.Lines;
         if (lines != null)
@@ -180,31 +193,48 @@ public class TransactionDetailsViewModel<T, TLine> : TransactionDetailsViewModel
 
         IEnumerable<string> usedCurrencyIds = Details.Lines.Select(x => x.CurrencyId).Distinct();
         Currencies.Filter = x => !x.IsDisabled || usedCurrencyIds.Contains(x.Id);
+
+        // ВАЖНО: Включаем обратно генерацию событий после завершения загрузки!
+        Details.RaiseChangeEvents = true;
     }
 
     protected override Task<bool> OnSaveAsync()
     {
         this.Details.PropertyChanged -= new PropertyChangedEventHandler(this.Details_PropertyChanged);
+
+        // Если документ уже существовал, перед отправкой на сервер возвращаем его оригинальную валюту
+        if (!string.IsNullOrEmpty(this.ItemId) && !string.IsNullOrEmpty(this._initialDisplayCurrencyId))
+        {
+            this.Details.DisplayCurrencyId = this._initialDisplayCurrencyId;
+        }
+
         return base.OnSaveAsync();
     }
 
     protected virtual void Details_PropertyChanged(object sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == "DisplayCurrencyId" && !this.IsBusy && this.Details.LinesCount > 0)
+        if (e.PropertyName == "DisplayCurrencyId" && !this.IsBusy)
         {
-            int num1 = 0;
-            if ((object)this.SelectedLine != null)
+            // Принудительно запускаем пересчет отображения строк и итогов
+            this.Details.UpdateDisplayCurrencyId(true);
+
+            if (this.Details.LinesCount > 0)
             {
-                int num2 = this.Details.Lines.IndexOf(this.SelectedLine);
-                if (num2 > 10)
-                    num1 = num2 - 10;
+                int num1 = 0;
+                if ((object)this.SelectedLine != null)
+                {
+                    int num2 = this.Details.Lines.IndexOf(this.SelectedLine);
+                    if (num2 > 10)
+                        num1 = num2 - 10;
+                }
+                int num3 = num1 + 20;
+                if (num3 > this.Details.LinesCount)
+                    num3 = this.Details.LinesCount;
+                for (int index = num1; index < num3; ++index)
+                    this.Details.Lines.Move(index, index);
             }
-            int num3 = num1 + 20;
-            if (num3 > this.Details.LinesCount)
-                num3 = this.Details.LinesCount;
-            for (int index = num1; index < num3; ++index)
-                this.Details.Lines.Move(index, index);
         }
+
         this.RaisePropertyChanged<string>((Expression<Func<string>>)(() => this.SubCaption));
     }
 

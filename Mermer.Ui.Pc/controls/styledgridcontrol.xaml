@@ -10,12 +10,12 @@
                  xmlns:helpers="clr-namespace:Mermer.Ui.Pc.Helpers"
                  x:Name="This" AutoExpandAllGroups="true" Margin="10" ItemsSource="{Binding List}"
                  ShowLoadingPanel="{Binding IsBusy}" SelectedItem="{Binding SelectedItem}">
-  <dxmvvm:Interaction.Behaviors>
-    <dxmvvm:EventToCommand PassEventArgsToCommand="True" EventName="MouseDoubleClick"
+    <dxmvvm:Interaction.Behaviors>
+        <dxmvvm:EventToCommand PassEventArgsToCommand="True" EventName="MouseDoubleClick"
                            Command="{Binding SelectOrViewDetailsCommand}"/>
-  </dxmvvm:Interaction.Behaviors>
-  <dxg:GridControl.View>
-    <dxg:TableView x:Name="TableView" ShowSearchPanelMode="Never" AllowEditing="false" AllowCellMerge="true"
+    </dxmvvm:Interaction.Behaviors>
+    <dxg:GridControl.View>
+        <dxg:TableView x:Name="TableView" ShowSearchPanelMode="Never" AllowEditing="false" AllowCellMerge="true"
                    AllowPerPixelScrolling="true" ShowGroupPanel="false" ShowIndicator="false" NavigationStyle="Row"
                    WaitIndicatorType="Panel" ColumnFilterPopupMode="Excel"
                    ShowGroupedColumns="{Binding ShowGroupedColumns, ElementName=This, Mode=OneWay}"
@@ -24,36 +24,50 @@
                    ShowTotalSummary="{Binding ShowTotalSummary, ElementName=This, Mode=OneWay}"
                    helpers:GridExtender.PrintButton="{Binding PrintButton, ElementName=This, Mode=OneWay}"
                    helpers:GridExtender.FilterButton="{Binding FilterButton, ElementName=This, Mode=OneWay}">
-      <dxg:DataViewBase.ColumnMenuCustomizations>
-        <dxb:RemoveBarItemAndLinkAction ItemName="{x:Static dxg:DefaultColumnMenuItemNames.SearchPanel}"/>
-      </dxg:DataViewBase.ColumnMenuCustomizations>
-      <dxg:TableView.FormatConditions>
-        <dxg:FormatCondition FieldName="IsOverDue" Expression="[IsOverDue]=True" ApplyToRow="true">
-          <dx:Format Background="Pink"/>
-        </dxg:FormatCondition>
-        <dxg:FormatCondition FieldName="IsOverDueSoon" Expression="[IsOverDueSoon]=True" ApplyToRow="true">
-          <dx:Format Background="LightYellow"/>
-        </dxg:FormatCondition>
-        <dxg:FormatCondition FieldName="IsCompleted" Expression="[IsCompleted]=False" ApplyToRow="true"
+            <dxg:DataViewBase.ColumnMenuCustomizations>
+                <dxb:RemoveBarItemAndLinkAction ItemName="{x:Static dxg:DefaultColumnMenuItemNames.SearchPanel}"/>
+            </dxg:DataViewBase.ColumnMenuCustomizations>
+            <dxg:TableView.FormatConditions>
+                <dxg:FormatCondition FieldName="IsOverDue" Expression="[IsOverDue]=True" ApplyToRow="true">
+                    <dx:Format Background="Pink"/>
+                </dxg:FormatCondition>
+                <dxg:FormatCondition FieldName="IsOverDueSoon" Expression="[IsOverDueSoon]=True" ApplyToRow="true">
+                    <dx:Format Background="LightYellow"/>
+                </dxg:FormatCondition>
+
+                <!-- Не закрытый: желтый фон -->
+                <dxg:FormatCondition FieldName="IsCompleted" Expression="[IsCompleted]=False" ApplyToRow="true"
                              PredefinedFormatName="YellowFillWithDarkYellowText"/>
-        <dxg:FormatCondition FieldName="IsDisabled" Expression="[IsDisabled]=True" ApplyToRow="true"
+
+                <!-- КОНФЛИКТ: красный фон без перечеркивания -->
+                <dxg:FormatCondition FieldName="IsConflicted" Expression="[IsConflicted]=True" ApplyToRow="true"
                              PredefinedFormatName="LightRedFillWithDarkRedText"/>
-        <dxg:FormatCondition FieldName="IsDisabled" Expression="[IsDisabled]=True" ApplyToRow="true"
+
+                <!-- Удаленный: красный фон + перечеркивание -->
+                <dxg:FormatCondition FieldName="IsDisabled" Expression="[IsDisabled]=True" ApplyToRow="true"
+                             PredefinedFormatName="LightRedFillWithDarkRedText"/>
+                <dxg:FormatCondition FieldName="IsDisabled" Expression="[IsDisabled]=True" ApplyToRow="true"
                              PredefinedFormatName="StrikethroughText"/>
-        <dxg:FormatCondition FieldName="IsExceed" Expression="[IsExceed]=True" ApplyToRow="true"
+
+                <dxg:FormatCondition FieldName="IsExceed" Expression="[IsExceed]=True" ApplyToRow="true"
                              PredefinedFormatName="YellowFillWithDarkYellowText"/>
-        <dxg:FormatCondition FieldName="IsDeficit" Expression="[IsDeficit]=True" ApplyToRow="true"
+                <dxg:FormatCondition FieldName="IsDeficit" Expression="[IsDeficit]=True" ApplyToRow="true"
                              PredefinedFormatName="LightRedFillWithDarkRedText"/>
-        <dxg:FormatCondition FieldName="IsCheaperThanRecommended" Expression="[IsCheaperThanRecommended]=True" ApplyToRow="true"
+                <dxg:FormatCondition FieldName="IsCheaperThanRecommended" Expression="[IsCheaperThanRecommended]=True" ApplyToRow="true"
                              PredefinedFormatName="GreenFillWithDarkGreenText"/>
-        <dxg:FormatCondition FieldName="TransactionIsCompleted" Expression="[TransactionIsCompleted]=False" ApplyToRow="true"
+
+                <!-- Для журнала проводок (Transactions) -->
+                <dxg:FormatCondition FieldName="TransactionIsCompleted" Expression="[TransactionIsCompleted]=False" ApplyToRow="true"
                              PredefinedFormatName="YellowFillWithDarkYellowText"/>
-        <dxg:FormatCondition FieldName="TransactionIsDisabled" Expression="[TransactionIsDisabled]=True" ApplyToRow="true"
+                <dxg:FormatCondition FieldName="TransactionIsConflicted" Expression="[TransactionIsConflicted]=True" ApplyToRow="true"
                              PredefinedFormatName="LightRedFillWithDarkRedText"/>
-        <dxg:FormatCondition FieldName="TransactionIsDisabled" Expression="[TransactionIsDisabled]=True" ApplyToRow="true"
+                <dxg:FormatCondition FieldName="TransactionIsDisabled" Expression="[TransactionIsDisabled]=True" ApplyToRow="true"
+                             PredefinedFormatName="LightRedFillWithDarkRedText"/>
+                <dxg:FormatCondition FieldName="TransactionIsDisabled" Expression="[TransactionIsDisabled]=True" ApplyToRow="true"
                              PredefinedFormatName="StrikethroughText"/>
-        <dxg:DataBarFormatCondition FieldName="Turnover" PredefinedFormatName="GreenSolidDataBar"/>
-      </dxg:TableView.FormatConditions>
-    </dxg:TableView>
-  </dxg:GridControl.View>
+
+                <dxg:DataBarFormatCondition FieldName="Turnover" PredefinedFormatName="GreenSolidDataBar"/>
+            </dxg:TableView.FormatConditions>
+        </dxg:TableView>
+    </dxg:GridControl.View>
 </dxg:GridControl>

@@ -25,12 +25,15 @@
         <dxlc:LayoutItem Label="{Localize 'Stock Name'}">
           <dxe:TextEdit IsReadOnly="true" EditValue="{Binding Details.StockName, UpdateSourceTrigger=PropertyChanged}"/>
         </dxlc:LayoutItem>
-        <dxlc:LayoutItem Label="{Localize Quantity}">
-          <dxlc:LayoutGroup>
-            <dxe:SpinEdit x:Name="FirstFocus" MinValue="0"
-              EditValue="{Binding Details.Quantity, UpdateSourceTrigger=PropertyChanged}"
-              PreviewKeyDown="Quantity_PreviewKeyDown"/>
-            <dxg:LookUpEdit AutoPopulateColumns="false" DisplayMember="Name" ValueMember="Id"
+                <dxlc:LayoutItem Label="{Localize Quantity}">
+                    <dxlc:LayoutGroup>
+                        <dxe:SpinEdit x:Name="FirstFocus" MinValue="0"
+                              MaskType="Numeric"
+                              Mask="###,###,###,##0.##"
+                              MaskUseAsDisplayFormat="True"
+                              EditValue="{Binding Details.Quantity, UpdateSourceTrigger=PropertyChanged}"
+                              PreviewKeyDown="Quantity_PreviewKeyDown"/>    
+                        <dxg:LookUpEdit AutoPopulateColumns="false" DisplayMember="Name" ValueMember="Id"
                             EditValue="{Binding Details.UnitId, UpdateSourceTrigger=PropertyChanged}"
                             ItemsSource="{Binding Details.Units}">
               <dxe:PopupBaseEdit.PopupContentTemplate>
@@ -48,11 +51,14 @@
             </dxg:LookUpEdit>
           </dxlc:LayoutGroup>
         </dxlc:LayoutItem>
-        <dxlc:LayoutItem Label="{Localize Price}">
-          <dxlc:LayoutGroup>
-            <dxe:SpinEdit x:Name="PriceEdit" MinValue="0"
+                <dxlc:LayoutItem Label="{Localize Price}">
+                    <dxlc:LayoutGroup>
+                        <dxe:SpinEdit x:Name="PriceEdit" MinValue="0"
+                          MaskType="Numeric"
+                          Mask="###,###,###,##0.00"
+                          MaskUseAsDisplayFormat="True"
                           EditValue="{Binding Details.Price, UpdateSourceTrigger=PropertyChanged}"/>
-            <dxg:LookUpEdit AutoPopulateColumns="false" DisplayMember="Name" ValueMember="Id"
+                        <dxg:LookUpEdit AutoPopulateColumns="false" DisplayMember="Name" ValueMember="Id"
                             EditValue="{Binding Details.CurrencyId, UpdateSourceTrigger=PropertyChanged}"
                             ItemsSource="{Binding Details.Currencies}">
               <dxe:PopupBaseEdit.PopupContentTemplate>

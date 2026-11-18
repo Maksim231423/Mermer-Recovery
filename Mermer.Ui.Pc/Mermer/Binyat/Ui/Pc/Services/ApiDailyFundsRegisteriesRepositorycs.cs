@@ -67,8 +67,8 @@ public class ApiDailyFundsRegisteriesRepository :
         {
             try
             {
-                var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ss");
+                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ss");
 
                 var remoteSlice = await _restClient.GetAsync<List<DailyFundsRegistery>>($"/api/finance/registeries?from={fromStr}&till={tillStr}&limit=10000");
                 if (remoteSlice != null)
@@ -126,8 +126,9 @@ public class ApiDailyFundsRegisteriesRepository :
             string url = "/api/finance/registeries/count";
             if (hasDates)
             {
-                var fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = till.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                // СТАЛО:
+                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ss");
+                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ss");
                 url += $"?from={fromStr}&till={tillStr}";
             }
 
@@ -253,20 +254,7 @@ public class ApiDailyFundsRegisteriesRepository :
         return item;
     }
 
-    private static DateTime ToDisplayLocal(DateTime dt)
-    {
-        if (dt == DateTime.MinValue || dt == DateTime.MaxValue) return dt;
-
-        if (dt.Kind == DateTimeKind.Utc)
-            return dt.ToLocalTime();
-
-        if (dt.Kind == DateTimeKind.Unspecified)
-        {
-            return DateTime.SpecifyKind(dt, DateTimeKind.Utc).ToLocalTime();
-        }
-
-        return dt;
-    }
+    private static DateTime ToDisplayLocal(DateTime dt) => dt;
     #endregion
 
     private static (bool HasDates, DateTime From, DateTime Till) TryExtractDateRange(Expression<Func<DailyFundsRegistery, bool>>[] predicates)

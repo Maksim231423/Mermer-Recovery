@@ -50,8 +50,8 @@ public class ApiExpenseActionsRepository : IExpenseActionsRepository
     {
         var queryParams = new List<string>();
 
-        if (startDate.HasValue) queryParams.Add($"from={startDate.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
-        if (endDate.HasValue) queryParams.Add($"till={endDate.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
+        if (startDate.HasValue) queryParams.Add($"from={startDate.Value:yyyy-MM-ddTHH:mm:ss}");
+        if (endDate.HasValue) queryParams.Add($"till={endDate.Value:yyyy-MM-ddTHH:mm:ss}");
         if (!string.IsNullOrEmpty(expenseId) && expenseId != "null") queryParams.Add($"expenseId={expenseId.Trim()}");
 
         if (depositoryIds != null && depositoryIds.Any())

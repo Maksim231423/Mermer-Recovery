@@ -50,8 +50,16 @@
                 <dxg:GridColumn FieldName="UserName" Header="{Localize Author}"/>
                 <dxg:GridColumn FieldName="IsCompleted" Width="50" Header="{Localize Completed}"/>
                 <dxg:GridColumn FieldName="IsDisabled" Width="50" Header="{Localize Deleted}"/>
-                <dxg:GridColumn FieldName="DebitTotal" Header="{Localize DebitTotal}"/>
-                <dxg:GridColumn FieldName="CreditTotal" Header="{Localize CreditTotal}"/>
+                <dxg:GridColumn FieldName="DebitTotal" Header="{Localize DebitTotal}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxe:TextEditSettings DisplayFormat="n2" MaskType="Numeric" Mask="n2"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="CreditTotal" Header="{Localize CreditTotal}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxe:TextEditSettings DisplayFormat="n2" MaskType="Numeric" Mask="n2"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
 
                 <!-- Колонка с тегами -->
                 <dxg:GridColumn FieldName="Tags" Header="{Localize Tags}" Width="150">

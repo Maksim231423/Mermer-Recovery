@@ -26,8 +26,13 @@ public static class AggregatedStockOrdersEndpoints
             int take = limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : 200;
             int skip = offset.GetValueOrDefault(0);
 
-            DateTimeOffset startDate = from.HasValue ? new DateTimeOffset(from.Value.ToUniversalTime()) : DateTimeOffset.UtcNow.AddMonths(-1);
-            DateTimeOffset endDate = till.HasValue ? new DateTimeOffset(till.Value.ToUniversalTime()) : DateTimeOffset.UtcNow;
+            DateTimeOffset startDate = from.HasValue
+                ? new DateTimeOffset(DateTime.SpecifyKind(from.Value, DateTimeKind.Utc), TimeSpan.Zero)
+                : new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now.AddMonths(-1), DateTimeKind.Utc), TimeSpan.Zero);
+
+            DateTimeOffset endDate = till.HasValue
+                ? new DateTimeOffset(DateTime.SpecifyKind(till.Value.TimeOfDay == TimeSpan.Zero ? till.Value.Date.AddDays(1).AddTicks(-1) : till.Value, DateTimeKind.Utc), TimeSpan.Zero)
+                : new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
 
             var query = db.AggregatedStockOrders
                 .AsNoTracking()
@@ -48,7 +53,7 @@ public static class AggregatedStockOrdersEndpoints
             {
                 Id = o.Id.ToString(),
                 Code = o.Code ?? "",
-                Date = o.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                Date = o.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                 WarehouseId = o.WarehouseId?.ToString(),
                 PartnerId = o.PartnerId?.ToString(),
                 UserId = o.UserId?.ToString(),
@@ -87,7 +92,7 @@ public static class AggregatedStockOrdersEndpoints
             {
                 Id = o.Id.ToString(),
                 Code = o.Code ?? "",
-                Date = o.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                Date = o.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                 WarehouseId = o.WarehouseId?.ToString(),
                 PartnerId = o.PartnerId?.ToString(),
                 UserId = o.UserId?.ToString(),
@@ -150,9 +155,11 @@ public static class AggregatedStockOrdersEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var todayUtc = DateTime.UtcNow.Date;
+                    // СТАЛО:
+                    var today = DateTime.Today;
+                    var todayUtc = new DateTimeOffset(DateTime.SpecifyKind(today, DateTimeKind.Utc), TimeSpan.Zero);
                     var weekStart = todayUtc.AddDays(-7);
-                    var monthStart = new DateTime(todayUtc.Year, todayUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+                    var monthStart = new DateTimeOffset(DateTime.SpecifyKind(new DateTime(today.Year, today.Month, 1), DateTimeKind.Utc), TimeSpan.Zero);
 
                     var countToday = await db.AggregatedStockOrders.CountAsync(r => !r.IsDisabled && r.Date >= todayUtc, ct);
                     var countWeek = await db.AggregatedStockOrders.CountAsync(r => !r.IsDisabled && r.Date >= weekStart, ct);
@@ -201,10 +208,10 @@ public static class AggregatedStockOrdersEndpoints
             bool isCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
             bool isDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
 
-            DateTimeOffset date = DateTimeOffset.UtcNow;
+            DateTimeOffset date = new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc));
             string? dateStr = GetStringProp(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr) && DateTimeOffset.TryParse(dateStr, out var pDate))
-                date = pDate.ToUniversalTime();
+            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var pDate))
+                date = new DateTimeOffset(DateTime.SpecifyKind(pDate, DateTimeKind.Utc));
 
             var tagsList = ExtractTagsFromRawJson(root);
 
@@ -258,7 +265,6 @@ public static class AggregatedStockOrdersEndpoints
             else
             {
                 existing.Code = code;
-                existing.Date = date;
                 existing.WarehouseId = wId;
                 existing.PartnerId = pId;
                 if (uId.HasValue) existing.UserId = uId;

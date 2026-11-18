@@ -55,8 +55,8 @@ public static class StockRevisionsEndpoints
             {
                 Id = r.Id.ToString(),
                 Code = r.Code ?? "",
-                Date = r.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
-                FinishDate = r.FinishDate.HasValue ? r.FinishDate.Value.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss") : null,
+                Date = r.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
+                FinishDate = r.FinishDate.HasValue ? r.FinishDate.Value.ToString("yyyy-MM-ddTHH:mm:ss") : null,
                 WarehouseId = r.WarehouseId?.ToString(),
                 ExceedSlipId = r.ExceedSlipId?.ToString(),
                 DeficitSlipId = r.DeficitSlipId?.ToString(),
@@ -120,8 +120,8 @@ public static class StockRevisionsEndpoints
             {
                 Id = r.Id.ToString(),
                 Code = r.Code ?? "",
-                Date = r.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
-                FinishDate = r.FinishDate.HasValue ? r.FinishDate.Value.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss") : null,
+                Date = r.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
+                FinishDate = r.FinishDate.HasValue ? r.FinishDate.Value.ToString("yyyy-MM-ddTHH:mm:ss") : null,
                 WarehouseId = r.WarehouseId?.ToString(),
                 ExceedSlipId = r.ExceedSlipId?.ToString(),
                 DeficitSlipId = r.DeficitSlipId?.ToString(),
@@ -146,7 +146,7 @@ public static class StockRevisionsEndpoints
                 Id = l.Id.ToString(),
                 StockRevisionId = l.StockRevisionId.ToString(),
                 StockId = l.StockId?.ToString(),
-                Date = l.Date.ToLocalTime().ToString("yyyy-MM-ddTHH:mm:ss"),
+                Date = l.Date.ToString("yyyy-MM-ddTHH:mm:ss"),
                 Quantity = l.Quantity,
                 UnitId = l.UnitId?.ToString(),
                 Price = l.Price,
@@ -267,11 +267,12 @@ public static class StockRevisionsEndpoints
                 finishDate = ParseCleanDateOffset(finishDateStr);
             }
 
-            DateTimeOffset date = DateTimeOffset.UtcNow;
+            // СТАЛО:
+            DateTimeOffset date = new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
             string? dateStr = GetStringProp(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr))
+            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate))
             {
-                date = ParseCleanDateOffset(dateStr);
+                date = new DateTimeOffset(DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc), TimeSpan.Zero);
             }
 
             var tagsList = ExtractTagsFromRawJson(root);
@@ -302,7 +303,6 @@ public static class StockRevisionsEndpoints
             else
             {
                 existing.Code = code;
-                existing.Date = date;
                 existing.FinishDate = finishDate;
                 if (wId.HasValue) existing.WarehouseId = wId;
                 if (exceedSlipId.HasValue) existing.ExceedSlipId = exceedSlipId;
@@ -365,10 +365,10 @@ public static class StockRevisionsEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    var now = DateTimeOffset.Now;
-                    var todayStart = new DateTimeOffset(now.Year, now.Month, now.Day, 0, 0, 0, now.Offset);
+                    var today = DateTime.Today;
+                    var todayStart = new DateTimeOffset(DateTime.SpecifyKind(today, DateTimeKind.Utc), TimeSpan.Zero);
                     var weekStart = todayStart.AddDays(-7);
-                    var monthStart = new DateTimeOffset(now.Year, now.Month, 1, 0, 0, 0, now.Offset);
+                    var monthStart = new DateTimeOffset(DateTime.SpecifyKind(new DateTime(today.Year, today.Month, 1), DateTimeKind.Utc), TimeSpan.Zero);
 
                     var countToday = await db.StockRevisions.CountAsync(r => !r.IsDisabled && r.Date >= todayStart, ct);
                     var countWeek = await db.StockRevisions.CountAsync(r => !r.IsDisabled && r.Date >= weekStart, ct);
@@ -398,41 +398,35 @@ public static class StockRevisionsEndpoints
     #region Helpers
     private static DateTimeOffset ParseCleanDateOffset(string raw)
     {
+        if (string.IsNullOrWhiteSpace(raw)) return new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
         raw = raw.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            return dto.ToUniversalTime();
-        }
+
         if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            return new DateTimeOffset(dt.ToUniversalTime());
+            return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc), TimeSpan.Zero);
         }
-        return DateTimeOffset.UtcNow;
+        return new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
     }
 
     private static DateTimeOffset ParseSafeFilterOffset(string raw, bool isTill = false)
     {
+        if (string.IsNullOrWhiteSpace(raw))
+            return isTill ? new DateTimeOffset(new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc), TimeSpan.Zero)
+                          : new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc), TimeSpan.Zero);
+
         raw = raw.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
-            {
-                return new DateTimeOffset(dto.Year, dto.Month, dto.Day, 23, 59, 59, dto.Offset).ToUniversalTime();
-            }
-            return dto.ToUniversalTime();
-        }
 
         if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            var offset = DateTimeOffset.Now.Offset;
             if (isTill && dt.TimeOfDay == TimeSpan.Zero)
             {
-                return new DateTimeOffset(dt.Year, dt.Month, dt.Day, 23, 59, 59, offset).ToUniversalTime();
+                dt = dt.Date.AddDays(1).AddTicks(-1);
             }
-            return new DateTimeOffset(dt, offset).ToUniversalTime();
+            return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc), TimeSpan.Zero);
         }
 
-        return isTill ? DateTimeOffset.UtcNow.AddYears(10) : DateTimeOffset.UtcNow.AddYears(-10);
+        return isTill ? new DateTimeOffset(new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc), TimeSpan.Zero)
+                      : new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc), TimeSpan.Zero);
     }
 
     private static List<string> ExtractTagsFromRawJson(JsonElement root)

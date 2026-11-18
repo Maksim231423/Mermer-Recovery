@@ -48,11 +48,11 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                var fromUtc = from.Kind == DateTimeKind.Utc ? from : from.ToUniversalTime();
-                var tillUtc = till.Kind == DateTimeKind.Utc ? till : till.ToUniversalTime();
+ 
 
-                var fromStr = fromUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = tillUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                // СТАЛО:
+                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ss");
+                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ss");
                 var url = $"/api/invoices?from={fromStr}&till={tillStr}";
                 if (!string.IsNullOrEmpty(displayCurrencyId)) url += $"&displayCurrencyId={displayCurrencyId}";
 
@@ -69,11 +69,10 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                var fromUtc = from.Kind == DateTimeKind.Utc ? from : from.ToUniversalTime();
-                var tillUtc = till.Kind == DateTimeKind.Utc ? till : till.ToUniversalTime();
-
-                var fromStr = fromUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = tillUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                
+                // СТАЛО:
+                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ss");
+                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ss");
 
                 var res = await _restClient.GetAsync<CountResponse>($"/api/invoices/count?from={fromStr}&till={tillStr}");
                 return res?.Count ?? 0;
@@ -93,8 +92,9 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                // СТАЛО:
+                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ss");
+                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ss");
                 var url = $"/api/invoices/payment-info?from={fromStr}&till={tillStr}";
                 if (!string.IsNullOrEmpty(officeId)) url += $"&officeId={officeId}";
                 if (!string.IsNullOrEmpty(partnerId)) url += $"&partnerId={partnerId}";
@@ -159,8 +159,9 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                // СТАЛО:
+                var fromStr = from.ToString("yyyy-MM-ddTHH:mm:ss");
+                var tillStr = till.ToString("yyyy-MM-ddTHH:mm:ss");
                 var url = $"/api/invoices/payment-info/count?from={fromStr}&till={tillStr}";
                 if (!string.IsNullOrEmpty(officeId)) url += $"&officeId={officeId}";
                 if (!string.IsNullOrEmpty(partnerId)) url += $"&partnerId={partnerId}";

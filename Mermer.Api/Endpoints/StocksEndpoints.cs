@@ -532,7 +532,7 @@ public static class StocksEndpoints
                 )
                 SELECT * 
                 FROM raw_actions
-                ORDER BY "TransactionDate" DESC
+                ORDER BY "TransactionDate" ASC
                 LIMIT @take OFFSET @skip;
                 """;
 
@@ -677,7 +677,7 @@ public static class StocksEndpoints
 
             if (!incomingPrices.Any() && rootPrice > 0)
             {
-                incomingPrices.Add((Guid.NewGuid(), rootPrice, rootCurGuid, string.Empty, DateTime.UtcNow.Date));
+                incomingPrices.Add((Guid.NewGuid(), rootPrice, rootCurGuid, string.Empty, DateTime.SpecifyKind(DateTime.Today, DateTimeKind.Utc)));
             }
 
             var incomingUnits = new List<(Guid Id, string Name, decimal Multiplier, decimal Divider, bool IsDefault)>();

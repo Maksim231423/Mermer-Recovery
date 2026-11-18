@@ -63,8 +63,9 @@ namespace Mermer.Ui.Pc.Services
         {
             var queryParams = new List<string>();
 
-            if (startDate.HasValue) queryParams.Add($"from={startDate.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
-            if (endDate.HasValue) queryParams.Add($"till={endDate.Value.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
+            // СТАЛО:
+            if (startDate.HasValue) queryParams.Add($"from={startDate.Value:yyyy-MM-ddTHH:mm:ss}");
+            if (endDate.HasValue) queryParams.Add($"till={endDate.Value:yyyy-MM-ddTHH:mm:ss}");
             if (!string.IsNullOrEmpty(stockId)) queryParams.Add($"stockId={stockId}");
             if (completed.HasValue) queryParams.Add($"completed={completed.Value.ToString().ToLower()}");
 

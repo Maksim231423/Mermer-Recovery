@@ -65,10 +65,10 @@ public class ApiStockTransfersRepository : IRepositoryWithFacets<StockTransfer>,
             if (hasDates)
             {
                 if (from > new DateTime(2000, 1, 1))
-                    queryParams.Add($"from={from.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
+                    queryParams.Add($"from={from:yyyy-MM-ddTHH:mm:ss}");
 
                 if (till < new DateTime(2099, 1, 1))
-                    queryParams.Add($"till={till.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
+                    queryParams.Add($"till={till:yyyy-MM-ddTHH:mm:ss}");
             }
 
             if (queryParams.Any())
@@ -110,10 +110,10 @@ public class ApiStockTransfersRepository : IRepositoryWithFacets<StockTransfer>,
             if (hasDates)
             {
                 if (from > new DateTime(2000, 1, 1))
-                    queryParams.Add($"from={from.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
+                    queryParams.Add($"from={from:yyyy-MM-ddTHH:mm:ss}");
 
                 if (till < new DateTime(2099, 1, 1))
-                    queryParams.Add($"till={till.ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}");
+                    queryParams.Add($"till={till:yyyy-MM-ddTHH:mm:ss}");
             }
 
             if (isConflictedFilter)

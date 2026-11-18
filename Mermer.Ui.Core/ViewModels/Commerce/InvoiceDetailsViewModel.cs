@@ -85,6 +85,28 @@ public class InvoiceDetailsViewModel :
     public Reference<Depository> Depositories { get; }
     public ListHelper<InvoiceDiscountType>[] DiscountTypes { get; set; }
 
+    /// <summary>
+    /// 3-й блок баланса отображается только тогда, когда выбран партнер И есть долг / неполная оплата (эффект на баланс не нулевой)
+    /// </summary>
+    public bool CanShowPartnerBalance
+    {
+        get
+        {
+            if (Details == null || string.IsNullOrEmpty(Details.PartnerId))
+                return false;
+
+            // Если в чеке есть неоплаченный остаток или отмечена запись в долг
+            if (Details.DisplayLeftTotal > 0 || Details.DebitCreditLeftAmount)
+                return true;
+
+            // Если чек полностью оплачен (эффект на баланс нулевой) — скрываем 3-й блок
+            if (Details.IsPayed && Details.DisplayDebitTotal == 0m && Details.DisplayCreditTotal == 0m)
+                return false;
+
+            return Details.DisplayDebitTotal != 0m || Details.DisplayCreditTotal != 0m;
+        }
+    }
+
     public override Invoice Details
     {
         get => base.Details;
@@ -348,6 +370,7 @@ public class InvoiceDetailsViewModel :
             StockSearcher.PriceGroup = Details.StockPriceGroup;
 
         RaisePropertyChanged(() => CanSelectSource);
+        RaisePropertyChanged(() => CanShowPartnerBalance);
     }
 
     private void UpdateFacilityFilters()
@@ -574,6 +597,7 @@ public class InvoiceDetailsViewModel :
             }
 
             Details.DebitCreditLeftAmount = result.DebitCreditLeftAmount;
+            RaisePropertyChanged(() => CanShowPartnerBalance);
         }
         catch (Exception ex)
         {

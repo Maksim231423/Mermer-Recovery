@@ -12,49 +12,58 @@
                 xmlns:ctrl="clr-namespace:Mermer.Ui.Pc.Controls"
                 xmlns:menu="clr-namespace:Mermer.Ui.Pc.Controls.MenuItems"
                 xmlns:vm="clr-namespace:Mermer.Ui.Core.ViewModels.Finance;assembly=Mermer.Ui.Core">
-  <DockPanel>
-    <dxwui:AppBar DockPanel.Dock="Bottom" Style="{StaticResource MenuStyle}">
-      <ctrl:StyledGridSearchControl x:Name="SearchControl" View="{Binding View, ElementName=GridControl}"/>
-      <menu:ListCreateNew/>
-      <menu:ListViewDetails/>
-      <dxwui:AppBarSeparator/>
-      <menu:CommonReload/>
+    <DockPanel>
+        <dxwui:AppBar DockPanel.Dock="Bottom" Style="{StaticResource MenuStyle}">
+            <ctrl:StyledGridSearchControl x:Name="SearchControl" View="{Binding View, ElementName=GridControl}"/>
+            <menu:ListCreateNew/>
+            <menu:ListViewDetails/>
+            <dxwui:AppBarSeparator/>
+            <menu:CommonReload/>
             <menu:ListPrint x:Name="PrintButton" IsEnabled="{DXBinding '@e(GridControl).VisibleRowCount != 0'}"/>
-      <menu:ListFilter x:Name="FilterButton"/>
-      <menu:CommonClose/>
-    </dxwui:AppBar>
-    <ctrl:ListFilterControl DockPanel.Dock="Left"
+            <menu:ListFilter x:Name="FilterButton"/>
+            <menu:CommonClose/>
+        </dxwui:AppBar>
+        <ctrl:ListFilterControl DockPanel.Dock="Left"
                             Visibility="{Binding ElementName=ExpandButton, Path=IsChecked, Converter={dxmvvm:BooleanToVisibilityConverter}}"/>
-    <ToggleButton x:Name="ExpandButton" DockPanel.Dock="Left" Style="{StaticResource HideButtonStyle}"
+        <ToggleButton x:Name="ExpandButton" DockPanel.Dock="Left" Style="{StaticResource HideButtonStyle}"
                   IsChecked="True" VerticalAlignment="Center"/>
-    <ctrl:StyledGridControl x:Name="GridControl" PrintButton="{Binding ElementName=PrintButton, Mode=OneWay}"
+        <ctrl:StyledGridControl x:Name="GridControl" PrintButton="{Binding ElementName=PrintButton, Mode=OneWay}"
                             FilterButton="{Binding ElementName=FilterButton, Mode=OneWay}"
                             SearchControl="{Binding ElementName=SearchControl, Mode=OneWay}">
-      <dxg:GridControl.Columns>
-        <dxg:GridColumn FieldName="Date" SortOrder="Ascending" Header="{Localize Date}">
-          <dxg:ColumnBase.EditSettings>
-            <dxe:DateEditSettings DisplayFormat="g"/>
-          </dxg:ColumnBase.EditSettings>
-        </dxg:GridColumn>
-        <dxg:GridColumn FieldName="Code" Header="{Localize Code}"/>
-        <dxg:GridColumn FieldName="DepositoryId" Header="{Localize 'Source Depository'}">
-          <dxg:ColumnBase.EditSettings>
-            <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Depositories.List}"/>
-          </dxg:ColumnBase.EditSettings>
-        </dxg:GridColumn>
-        <dxg:GridColumn FieldName="DestinationDepositoryId" Header="{Localize 'Destination Depository'}">
-          <dxg:ColumnBase.EditSettings>
-            <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Depositories.List}"/>
-          </dxg:ColumnBase.EditSettings>
-        </dxg:GridColumn>
-        <dxg:GridColumn FieldName="ActionTotal" Style="{StaticResource AmountDisplayFormat}"
-                        Header="{Localize 'Sent Total'}"/>
-        <dxg:GridColumn FieldName="ActionReceivedTotal" Style="{StaticResource AmountDisplayFormat}"
-                        Header="{Localize 'Received Total'}"/>
-        <dxg:GridColumn FieldName="IsConflicted" Width="50" Header="{Localize Conflicted}"/>
-        <dxg:GridColumn FieldName="IsCompleted" Width="50" Header="{Localize Completed}"/>
-        <dxg:GridColumn FieldName="IsDisabled" Width="50" Header="{Localize Deleted}"/>
-        <dxg:GridColumn FieldName="UserName" Header="{Localize Author}"/>
+            <dxg:GridControl.Columns>
+                <dxg:GridColumn FieldName="Date" SortOrder="Ascending" Header="{Localize Date}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxe:DateEditSettings DisplayFormat="g"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="Code" Header="{Localize Code}"/>
+                <dxg:GridColumn FieldName="DepositoryId" Header="{Localize 'Source Depository'}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Depositories.List}"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="DestinationDepositoryId" Header="{Localize 'Destination Depository'}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxg:LookUpEditSettings DisplayMember="Name" ValueMember="Id" ItemsSource="{Binding Depositories.List}"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+
+                <dxg:GridColumn FieldName="ActionTotal" Header="{Localize 'Sent Total'}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxe:TextEditSettings DisplayFormat="n2" MaskType="Numeric" Mask="n2"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+                <dxg:GridColumn FieldName="ActionReceivedTotal" Header="{Localize 'Received Total'}">
+                    <dxg:ColumnBase.EditSettings>
+                        <dxe:TextEditSettings DisplayFormat="n2" MaskType="Numeric" Mask="n2"/>
+                    </dxg:ColumnBase.EditSettings>
+                </dxg:GridColumn>
+
+                <dxg:GridColumn FieldName="IsConflicted" Width="50" Header="{Localize Conflicted}"/>
+                <dxg:GridColumn FieldName="IsCompleted" Width="50" Header="{Localize Completed}"/>
+                <dxg:GridColumn FieldName="IsDisabled" Width="50" Header="{Localize Deleted}"/>
+                <dxg:GridColumn FieldName="UserName" Header="{Localize Author}"/>
+
                 <!-- Колонка с тегами -->
                 <dxg:GridColumn FieldName="Tags" Header="{Localize Tags}" Width="150">
                     <dxg:GridColumn.CellTemplate>
@@ -69,20 +78,6 @@
 
                 <dxg:GridColumn FieldName="Group" GroupIndex="0" Header="{Localize Group}"/>
             </dxg:GridControl.Columns>
-            <dxg:GridControl.View>
-                <dxg:TableView AllowEditing="False" NavigationStyle="Row" ShowGroupPanel="False">
-                    <dxg:TableView.FormatConditions>
-                        <!-- Видалені перекази (червоний фон + закреслений текст) -->
-                        <dxg:FormatCondition Expression="[IsDisabled] = True" ApplyToRow="True" PredefinedFormatName="LightRedFillWithDarkRedText"/>
-                        <dxg:FormatCondition Expression="[IsDisabled] = True" ApplyToRow="True" PredefinedFormatName="StrikethroughText"/>
-
-                        <!-- Частково або повністю не прийняті перекази -->
-                        <dxg:FormatCondition Expression="[ActionReceivedTotal] &lt; [ActionTotal] And [IsDisabled] = False" 
-                                 ApplyToRow="True" 
-                                 PredefinedFormatName="LightRedFillWithDarkRedText"/>
-                    </dxg:TableView.FormatConditions>
-                </dxg:TableView>
-            </dxg:GridControl.View>
         </ctrl:StyledGridControl>
-  </DockPanel>
+    </DockPanel>
 </mvx:MvxWpfView>

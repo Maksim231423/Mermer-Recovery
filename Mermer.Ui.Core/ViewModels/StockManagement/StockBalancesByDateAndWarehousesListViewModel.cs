@@ -87,8 +87,12 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
             // Генерируем колонки под выбранные склады
             this.GenerateColumns();
 
-            if (this.IsBusy) return;
-            this.Initialize();
+            // При смене склада НЕ загружаем остатки автоматически!
+            // Очищаем таблицу и ждём нажатия Add All Stocks или ручного добавления через строку Add
+            this.ShowAllStocks = false;
+            this.SelectedStockIds?.Clear();
+            this.List = new ObservableCollection<StockBalanceByWarehouses>();
+            this.SelectedItem = null;
         }
     }
 
@@ -181,8 +185,8 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
 
     protected override async Task OnLoad()
     {
-        // Если склады не выбраны — таблица открывается пустой без запроса к базе
-        if (!this.WarehouseIds.Any())
+        // Таблица остаётся пустой, если склады не выбраны ИЛИ если не нажат Add All Stocks и нет выбранных товаров
+        if (!this.WarehouseIds.Any() || (!this.ShowAllStocks && (this.SelectedStockIds == null || !this.SelectedStockIds.Any())))
         {
             this.List = new ObservableCollection<StockBalanceByWarehouses>();
             return;
@@ -249,6 +253,24 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
     }
 
     public ICommand ReloadCommand => new MvxAsyncCommand(this.OnReloadAsync, () => !this.IsBusy);
+
+    // Команда кнопки "Add All Stocks"
+    public ICommand AddAllStocksCommand => new MvxAsyncCommand(this.OnAddAllStocksAsync, () => !this.IsBusy && this.WarehouseIds.Any());
+    public ICommand ShowAllStocksCommand => this.AddAllStocksCommand; // Алиас на случай привязки в XAML
+
+    private async Task OnAddAllStocksAsync()
+    {
+        if (!this.WarehouseIds.Any())
+        {
+            this.UserInteractionService?.ShowMessage(this["Warning"], this["Please select at least one warehouse."]);
+            return;
+        }
+
+        this.ShowAllStocks = true;
+        this.SelectedStockIds.Clear();
+        this.SubCaption = this["All Stocks"];
+        await this.Initialize();
+    }
 
     private Task OnReloadAsync() => this.Initialize();
 

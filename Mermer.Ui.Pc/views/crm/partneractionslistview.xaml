@@ -38,18 +38,33 @@
                 </dxlc:LayoutItem>
 
                 <dxlc:LayoutItem HorizontalAlignment="Left" Width="400" Label="{Localize Partner}">
-                    <dxg:LookUpEdit NullValueButtonPlacement="EditBox" AutoPopulateColumns="false" DisplayMember="Fullname"
-                    ValueMember="Id" EditValue="{Binding PartnerId, UpdateSourceTrigger=PropertyChanged}"
-                    ItemsSource="{Binding Partners.List}" NullText="{Localize 'All Partners'}">
+                    <dxg:LookUpEdit x:Name="PartnerEditor"
+                    DisplayMember="Fullname"
+                    ValueMember="Id"
+                    AutoPopulateColumns="False"
+                    IncrementalFiltering="True"
+                    ImmediatePopup="False"
+                    AutoComplete="False"
+                    FilterCondition="Contains"
+                    NullValueButtonPlacement="EditBox"
+                    NullText="{Localize 'All Partners'}"
+                    EditValue="{Binding PartnerId, UpdateSourceTrigger=PropertyChanged}"
+                    ItemsSource="{Binding Partners.List}">
                         <dxe:PopupBaseEdit.PopupContentTemplate>
                             <ControlTemplate>
-                                <dxg:GridControl Name="PART_GridControl" AutoExpandAllGroups="true">
+                                <dxg:GridControl Name="PART_GridControl" EnableSmartColumnsGeneration="False">
                                     <dxg:GridControl.Columns>
-                                        <dxg:GridColumn FieldName="Code" Header="{Localize Code}"/>
-                                        <dxg:GridColumn FieldName="Name" Width="300" Header="{Localize Name}"/>
+                                        <dxg:GridColumn FieldName="Code" Width="*" Header="{Localize Code}"/>
+                                        <dxg:GridColumn FieldName="Name" Width="*" Header="{Localize Name}"/>
                                     </dxg:GridControl.Columns>
                                     <dxg:GridControl.View>
-                                        <dxg:TableView AutoWidth="true"/>
+                                        <dxg:TableView AutoWidth="True"
+                                       ShowGroupPanel="False"
+                                       SearchDelay="200"
+                                       SearchPanelFindFilter="Contains"
+                                       ShowSearchPanelMode="Always"
+                                       VirtualizingPanel.IsVirtualizing="True"
+                                       VirtualizingPanel.VirtualizationMode="Recycling"/>
                                     </dxg:GridControl.View>
                                 </dxg:GridControl>
                             </ControlTemplate>

@@ -614,56 +614,47 @@ public static class StockBalancesEndpoints
     }
 
     #region Helpers
+    // СТАЛО:
     private static DateTimeOffset ParseSafeEndOfDayOffset(string? raw)
     {
-        if (string.IsNullOrWhiteSpace(raw)) return DateTimeOffset.Now;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return new DateTimeOffset(DateTime.SpecifyKind(DateTime.Today.AddDays(1).AddTicks(-1), DateTimeKind.Utc), TimeSpan.Zero);
+        }
 
         raw = raw.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            if (dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
-            {
-                return new DateTimeOffset(dto.Year, dto.Month, dto.Day, 23, 59, 59, dto.Offset);
-            }
-            return dto;
-        }
-
         if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            var offset = DateTimeOffset.Now.Offset;
             if (dt.TimeOfDay == TimeSpan.Zero)
             {
-                return new DateTimeOffset(dt.Year, dt.Month, dt.Day, 23, 59, 59, offset);
+                dt = dt.Date.AddDays(1).AddTicks(-1);
             }
-            return new DateTimeOffset(dt, offset);
+            return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc), TimeSpan.Zero);
         }
 
-        return DateTimeOffset.Now;
+        return new DateTimeOffset(DateTime.SpecifyKind(DateTime.Today.AddDays(1).AddTicks(-1), DateTimeKind.Utc), TimeSpan.Zero);
     }
 
     private static DateTimeOffset ParseFilterOffset(string raw, bool isTill)
     {
-        raw = raw.Replace(" ", "+").Trim();
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
-        {
-            if (isTill && dto.TimeOfDay == TimeSpan.Zero && !raw.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
-            {
-                return new DateTimeOffset(dto.Year, dto.Month, dto.Day, 23, 59, 59, dto.Offset);
-            }
-            return dto;
-        }
+        if (string.IsNullOrWhiteSpace(raw))
+            return isTill
+                ? new DateTimeOffset(new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc), TimeSpan.Zero)
+                : new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc), TimeSpan.Zero);
 
+        raw = raw.Replace(" ", "+").Trim();
         if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
         {
-            var offset = DateTimeOffset.Now.Offset;
             if (isTill && dt.TimeOfDay == TimeSpan.Zero)
             {
-                return new DateTimeOffset(dt.Year, dt.Month, dt.Day, 23, 59, 59, offset);
+                dt = dt.Date.AddDays(1).AddTicks(-1);
             }
-            return new DateTimeOffset(dt, offset);
+            return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc), TimeSpan.Zero);
         }
 
-        return isTill ? DateTimeOffset.UtcNow.AddYears(10) : DateTimeOffset.UtcNow.AddYears(-10);
+        return isTill
+            ? new DateTimeOffset(new DateTime(2099, 12, 31, 23, 59, 59, DateTimeKind.Utc), TimeSpan.Zero)
+            : new DateTimeOffset(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc), TimeSpan.Zero);
     }
 
     private static HashSet<Guid> ParseGuids(Microsoft.Extensions.Primitives.StringValues values)

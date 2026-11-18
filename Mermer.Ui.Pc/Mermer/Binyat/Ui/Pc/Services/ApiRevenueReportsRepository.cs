@@ -21,7 +21,8 @@ namespace Mermer.Ui.Pc.Services
         {
             try
             {
-                var query = $"?dateFrom={dateFrom.ToUniversalTime():O}&dateTill={dateTill.ToUniversalTime():O}";
+                // СТАЛО:
+                var query = $"?dateFrom={dateFrom:yyyy-MM-ddTHH:mm:ss}&dateTill={dateTill:yyyy-MM-ddTHH:mm:ss}";
 
                 if (warehouseIds != null)
                 {
