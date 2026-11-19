@@ -251,10 +251,36 @@ public static class StockRevisionsEndpoints
                 wId = defWh?.Id;
             }
 
+            Guid? userId = Guid.TryParse(GetStringProp(root, "userId", "UserId", "authorId", "AuthorId"), out var uG) && uG != Guid.Empty ? uG : null;
+            string userName = GetStringProp(root, "userName", "UserName", "author", "Author") ?? "admin";
+
+            if (!userId.HasValue && !string.IsNullOrEmpty(userName))
+            {
+                var u = await db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Username.ToLower() == userName.ToLower());
+                userId = u?.Id;
+            }
+
+            // ПРОВЕРКА ПРАВ НА СКЛАД
+            if (userId.HasValue && wId.HasValue)
+            {
+                var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId.Value);
+                if (user != null && !user.IsAdmin)
+                {
+                    if (user.AccountPrivileges.TryGetValue(wId.Value.ToString(), out int accLvl) && accLvl == 0)
+                    {
+                        var wh = await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => w.Id == wId.Value);
+                        string whName = !string.IsNullOrWhiteSpace(wh?.Name) ? wh.Name : wId.Value.ToString();
+
+                        return Results.Json(new
+                        {
+                            message = $"Access denied: you do not have permission to use warehouse '{whName}'."
+                        }, statusCode: StatusCodes.Status403Forbidden);
+                    }
+                }
+            }
+
             Guid? exceedSlipId = Guid.TryParse(GetStringProp(root, "exceedSlipId", "ExceedSlipId"), out var eG) && eG != Guid.Empty ? eG : null;
             Guid? deficitSlipId = Guid.TryParse(GetStringProp(root, "deficitSlipId", "DeficitSlipId"), out var dG) && dG != Guid.Empty ? dG : null;
-            Guid? userId = Guid.TryParse(GetStringProp(root, "userId", "UserId"), out var uG) && uG != Guid.Empty ? uG : null;
-            string userName = GetStringProp(root, "userName", "UserName") ?? "admin";
             string groupName = GetStringProp(root, "group", "Group", "groupName", "GroupName") ?? string.Empty;
             string description = GetStringProp(root, "description", "Description") ?? string.Empty;
             bool isCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
@@ -267,12 +293,11 @@ public static class StockRevisionsEndpoints
                 finishDate = ParseCleanDateOffset(finishDateStr);
             }
 
-            // СТАЛО:
-            DateTimeOffset date = new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
+            DateTimeOffset? clientDate = null;
             string? dateStr = GetStringProp(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate))
+            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var parsedDate))
             {
-                date = new DateTimeOffset(DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc), TimeSpan.Zero);
+                clientDate = new DateTimeOffset(parsedDate);
             }
 
             var tagsList = ExtractTagsFromRawJson(root);
@@ -283,7 +308,7 @@ public static class StockRevisionsEndpoints
                 {
                     Id = revId,
                     Code = code,
-                    Date = date,
+                    Date = clientDate ?? DateTimeOffset.UtcNow,
                     FinishDate = finishDate,
                     WarehouseId = wId,
                     ExceedSlipId = exceedSlipId,
@@ -315,6 +340,13 @@ public static class StockRevisionsEndpoints
                 existing.Description = description;
                 existing.Tags = tagsList.ToArray();
                 existing.UpdatedAt = DateTimeOffset.UtcNow;
+
+                // ОБНОВЛЕНИЕ ДАТЫ
+                if (clientDate.HasValue && clientDate.Value.Year >= 2000)
+                {
+                    existing.Date = clientDate.Value;
+                }
+
                 db.StockRevisions.Update(existing);
             }
 
@@ -398,14 +430,14 @@ public static class StockRevisionsEndpoints
     #region Helpers
     private static DateTimeOffset ParseCleanDateOffset(string raw)
     {
-        if (string.IsNullOrWhiteSpace(raw)) return new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
+        if (string.IsNullOrWhiteSpace(raw)) return DateTimeOffset.Now;
         raw = raw.Replace(" ", "+").Trim();
 
-        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var dt))
         {
-            return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc), TimeSpan.Zero);
+            return new DateTimeOffset(dt);
         }
-        return new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
+        return DateTimeOffset.Now;
     }
 
     private static DateTimeOffset ParseSafeFilterOffset(string raw, bool isTill = false)

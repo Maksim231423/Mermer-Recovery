@@ -133,12 +133,12 @@
                 <dxe:TextEdit EditValue="{Binding Details.Code, UpdateSourceTrigger=PropertyChanged}"
                               IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"/>
               </dxlc:LayoutItem>
-              <dxlc:LayoutItem Label="{Localize Date}">
-                <dxe:DateEdit Mask="f" MaskUseAsDisplayFormat="true"
-                              EditValue="{Binding Details.Date, UpdateSourceTrigger=PropertyChanged}"
-                              IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"/>
-              </dxlc:LayoutItem>
-              <dxlc:LayoutItem Label="{Localize Warehouse}">
+                            <dxlc:LayoutItem Label="{Localize Date}">
+                                <dxe:DateEdit Mask="f" MaskUseAsDisplayFormat="true"
+                EditValue="{Binding Details.Date, UpdateSourceTrigger=PropertyChanged}"
+                IsReadOnly="{Binding CanChangeDate, Converter={dxmvvm:BooleanNegationConverter}}"/>
+                            </dxlc:LayoutItem>
+                            <dxlc:LayoutItem Label="{Localize Warehouse}">
                 <dxg:LookUpEdit DisplayMember="Name" ValueMember="Id" AutoPopulateColumns="false"
                                 EditValue="{Binding Details.WarehouseId, UpdateSourceTrigger=PropertyChanged}"
                                 IsReadOnly="{Binding HasSaveAccess, Converter={dxmvvm:BooleanNegationConverter}}"

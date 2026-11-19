@@ -1,11 +1,7 @@
-﻿// Decompiled with JetBrains decompiler
-// Type: Mermer.Ui.Core.ViewModels.Commerce.BillsListViewModel
-// Assembly: Mermer.Ui.Core, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
-// MVID: DC92D011-8413-44AC-9F10-F866D891CF66
-// Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.Ui.Core.dll
-
-using MvvmCross.Core.Navigation;
+﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Plugins.Messenger;
+using Mermer.Authorization.Enums;
+using Mermer.Authorization.Services;
 using Mermer.Commerce.Models;
 using Mermer.CRM.Models;
 using Mermer.Enterprise.Models;
@@ -21,20 +17,43 @@ namespace Mermer.Ui.Core.ViewModels.Commerce;
 
 public class BillsListViewModel : FundsTransactionsListViewModel<Bill, BillLine>
 {
-  public BillsListViewModel(
-    IMvxMessenger messenger,
-    IRepository<Bill> repository,
-    IListAuthorizer<Bill> authorizer,
-    Reference<Partner> partners,
-    Reference<Depository> depositories,
-    IMvxNavigationService navigationService,
-    IUserInteractionService userInteractionService)
-    : base(messenger, repository, authorizer, depositories, navigationService, userInteractionService)
-  {
-    this.Partners = partners;
-  }
+    private readonly ILoginService _loginService;
 
-  public Reference<Partner> Partners { get; }
+    public BillsListViewModel(
+      IMvxMessenger messenger,
+      IRepository<Bill> repository,
+      IListAuthorizer<Bill> authorizer,
+      Reference<Partner> partners,
+      Reference<Depository> depositories,
+      IMvxNavigationService navigationService,
+      IUserInteractionService userInteractionService,
+      ILoginService loginService)
+      : base(messenger, repository, authorizer, depositories, navigationService, userInteractionService)
+    {
+        this.Partners = partners;
+        this._loginService = loginService;
+    }
 
-  protected override Task PreLoad() => Task.WhenAll(base.PreLoad(), this.Partners.Initialize());
+    public Reference<Partner> Partners { get; }
+
+    protected override async Task PreLoad()
+    {
+        await Task.WhenAll(base.PreLoad(), this.Partners.Initialize());
+
+        if (this._loginService?.Session != null && !this._loginService.Session.IsAdmin && this._loginService.Session.Accounts != null)
+        {
+            var accounts = this._loginService.Session.Accounts;
+
+            this.Depositories.Filter = d =>
+                !d.IsDisabled &&
+                (!accounts.TryGetValue(d.Id, out var level) ||
+                 (level != AccountAccessLevel.None && (level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read))));
+        }
+        else
+        {
+            this.Depositories.Filter = d => !d.IsDisabled;
+        }
+
+        this.Depositories?.RaisePropertyChanged("List");
+    }
 }

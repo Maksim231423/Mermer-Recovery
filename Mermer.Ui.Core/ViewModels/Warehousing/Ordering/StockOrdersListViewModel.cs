@@ -4,6 +4,7 @@
 // MVID: DC92D011-8413-44AC-9F10-F866D891CF66
 // Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.Ui.Core.dll
 
+using Mermer.Authorization.Enums;
 using Mermer.Authorization.Services;
 using Mermer.CRM.Models;
 using Mermer.Data.Authorizers;
@@ -106,6 +107,27 @@ public class StockOrdersListViewModel : TransactionsListViewModel<StockOrder>
             default:
                 return base.CountFilteredListAsync(filter);
         }
+    }
+
+    protected override async Task PostLoad()
+    {
+        await base.PostLoad();
+
+        if (this._loginService?.Session != null && !this._loginService.Session.IsAdmin && this._loginService.Session.Accounts != null)
+        {
+            var allowedIds = this._loginService.Session.Accounts
+                .Where(a => a.Value.HasFlag(AccountAccessLevel.Operate) || a.Value.HasFlag(AccountAccessLevel.Read))
+                .Select(a => a.Key)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            this.Warehouses.Filter = w => !w.IsDisabled && allowedIds.Contains(w.Id);
+        }
+        else
+        {
+            this.Warehouses.Filter = w => !w.IsDisabled;
+        }
+
+        this.Warehouses?.RaisePropertyChanged("List");
     }
 
     protected override Task<IEnumerable<StockOrder>> GetFilteredListAsync(ListFilter filter)

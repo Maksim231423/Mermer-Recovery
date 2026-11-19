@@ -185,10 +185,64 @@ public static class InvoicesEndpoints
             if (pgInvoice == null) return Results.BadRequest("Invalid JSON");
 
             using var doc = JsonDocument.Parse(body);
-            var extractedTags = ExtractTagsFromRawJson(doc.RootElement);
+            var root = doc.RootElement;
+            var extractedTags = ExtractTagsFromRawJson(root);
             if (extractedTags.Count > 0)
             {
                 pgInvoice.Tags = extractedTags;
+            }
+
+            // ПРОВЕРКА ПРАВ НА СКЛАД И КАССУ
+            Guid? authorUserId = null;
+            if (!string.IsNullOrWhiteSpace(pgInvoice.UserId) && Guid.TryParse(pgInvoice.UserId, out var pUid))
+            {
+                authorUserId = pUid;
+            }
+            else if (!string.IsNullOrWhiteSpace(pgInvoice.UserName))
+            {
+                var u = await db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Username.ToLower() == pgInvoice.UserName.ToLower(), ct);
+                authorUserId = u?.Id;
+            }
+
+            if (authorUserId.HasValue)
+            {
+                var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == authorUserId.Value, ct);
+                if (user != null && !user.IsAdmin)
+                {
+                    // Проверка склада
+                    if (!string.IsNullOrWhiteSpace(pgInvoice.WarehouseId) &&
+                        user.AccountPrivileges.TryGetValue(pgInvoice.WarehouseId, out int whAccess) && whAccess == 0)
+                    {
+                        string whName = pgInvoice.WarehouseId;
+                        if (Guid.TryParse(pgInvoice.WarehouseId, out var whGuid))
+                        {
+                            var wh = await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => w.Id == whGuid, ct);
+                            if (!string.IsNullOrWhiteSpace(wh?.Name)) whName = wh.Name;
+                        }
+
+                        return Results.Json(new
+                        {
+                            message = $"Access denied: you do not have permission to use warehouse '{whName}'."
+                        }, statusCode: StatusCodes.Status403Forbidden);
+                    }
+
+                    // Проверка кассы
+                    if (!string.IsNullOrWhiteSpace(pgInvoice.DepositoryId) &&
+                        user.AccountPrivileges.TryGetValue(pgInvoice.DepositoryId, out int depAccess) && depAccess == 0)
+                    {
+                        string depName = pgInvoice.DepositoryId;
+                        if (Guid.TryParse(pgInvoice.DepositoryId, out var depGuid))
+                        {
+                            var dep = await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => d.Id == depGuid, ct);
+                            if (!string.IsNullOrWhiteSpace(dep?.Name)) depName = dep.Name;
+                        }
+
+                        return Results.Json(new
+                        {
+                            message = $"Access denied: you do not have permission to use depository '{depName}'."
+                        }, statusCode: StatusCodes.Status403Forbidden);
+                    }
+                }
             }
 
             pgInvoice.Date = DateTime.SpecifyKind(pgInvoice.Date, DateTimeKind.Utc);
@@ -272,8 +326,12 @@ public static class InvoicesEndpoints
                 }
                 else
                 {
-                    // Защита от перезаписи даты и валюты создания при редактировании:
-                    pgInvoice.Date = existing.Date;
+                    // ИСПРАВЛЕНИЕ: если клиент передал новую дату (например, админ сменил число), сохраняем её!
+                    if (pgInvoice.Date.Year < 2000)
+                    {
+                        pgInvoice.Date = existing.Date;
+                    }
+
                     pgInvoice.DisplayCurrencyId = existing.DisplayCurrencyId;
                     await repo.UpdateAsync(pgInvoice, ct);
                 }

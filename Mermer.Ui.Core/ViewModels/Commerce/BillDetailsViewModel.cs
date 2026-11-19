@@ -1,4 +1,5 @@
-﻿using Mermer.Authorization.Services;
+﻿using Mermer.Authorization.Enums;
+using Mermer.Authorization.Services;
 using Mermer.Commerce.Models;
 using Mermer.CRM.Models;
 using Mermer.CRM.Services;
@@ -306,36 +307,32 @@ public class BillDetailsViewModel :
     {
         try
         {
-            // 1. Проверка контрагента
             if (string.IsNullOrEmpty(Details.PartnerId))
-            {
                 throw new Exception(this["Field '{0}' is required", this["Partner"]]);
-            }
 
-            // 2. Проверка кассы
             if (string.IsNullOrEmpty(Details.DepositoryId))
-            {
                 throw new Exception(this["Field '{0}' is required", this["Depository"]]);
-            }
 
-            // 3. Проверка наличия строк
-            if (Details.Lines == null || !Details.Lines.Any())
+            // Защита: проверка прав на выбранную кассу
+            if (LoginService?.Session != null && !LoginService.Session.IsAdmin && LoginService.Session.Accounts != null)
             {
-                throw new Exception(this["Document cannot be empty"]);
+                if (LoginService.Session.Accounts.TryGetValue(Details.DepositoryId, out var level) &&
+                    (level == AccountAccessLevel.None || (!level.HasFlag(AccountAccessLevel.Operate) && !level.HasFlag(AccountAccessLevel.Read))))
+                {
+                    throw new Exception("You do not have permission to use the selected depository.");
+                }
             }
 
-            // 4. Проверка колонок каждой строки: Amount, Currency, Total
+            if (Details.Lines == null || !Details.Lines.Any())
+                throw new Exception(this["Document cannot be empty"]);
+
             foreach (var line in Details.Lines)
             {
                 if (line.Amount <= 0m)
-                {
                     throw new Exception(this["Field '{0}' is required and must be greater than zero", this["Amount"]]);
-                }
 
                 if (string.IsNullOrEmpty(line.CurrencyId))
-                {
                     throw new Exception(this["Field '{0}' is required", this["Currency"]]);
-                }
             }
         }
         catch (Exception ex)
@@ -398,10 +395,36 @@ public class BillDetailsViewModel :
 
     private void UpdateFacilityFilters()
     {
+        var accounts = this.LoginService?.Session?.Accounts;
+        bool isAdmin = this.LoginService?.Session?.IsAdmin ?? false;
+
+        // Фильтруем офисы
+        if (!isAdmin && accounts != null)
+        {
+            Offices.Filter = o => !o.IsDisabled &&
+                (!accounts.TryGetValue(o.Id, out var level) ||
+                 (level != AccountAccessLevel.None && (level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read))));
+        }
+        else
+        {
+            Offices.Filter = o => !o.IsDisabled;
+        }
+
+        // Фильтруем кассы с проверкой прав сессии
         Depositories.Filter = x =>
         {
             if (x.IsDisabled && !string.Equals(x.Id, Details?.DepositoryId, StringComparison.OrdinalIgnoreCase))
                 return false;
+
+            // Проверка прав на кассу (No Access / 0)
+            if (!isAdmin && accounts != null)
+            {
+                if (accounts.TryGetValue(x.Id, out var level) &&
+                    (level == AccountAccessLevel.None || (!level.HasFlag(AccountAccessLevel.Operate) && !level.HasFlag(AccountAccessLevel.Read))))
+                {
+                    return false;
+                }
+            }
 
             if (string.IsNullOrWhiteSpace(Details?.OfficeId))
                 return true;
@@ -412,7 +435,18 @@ public class BillDetailsViewModel :
             return string.Equals(x.OfficeId, Details.OfficeId, StringComparison.OrdinalIgnoreCase);
         };
 
+        // Для нового документа выбираем первую разрешенную кассу
+        if (string.IsNullOrEmpty(ItemId))
+        {
+            var allowedDepositories = Depositories?.List?.Where(Depositories.Filter).ToList();
+            if (string.IsNullOrEmpty(Details.DepositoryId) || !allowedDepositories.Any(d => d.Id == Details.DepositoryId))
+            {
+                Details.DepositoryId = allowedDepositories?.FirstOrDefault()?.Id;
+            }
+        }
+
         Depositories?.RaisePropertyChanged("List");
+        Offices?.RaisePropertyChanged("List");
     }
 
     private async void UpdatePartnerBalance()

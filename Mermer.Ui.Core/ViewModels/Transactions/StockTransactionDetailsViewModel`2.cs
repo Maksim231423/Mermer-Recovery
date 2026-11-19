@@ -1,4 +1,5 @@
-﻿using Mermer.Authorization.Services;
+﻿using Mermer.Authorization.Enums;
+using Mermer.Authorization.Services;
 using Mermer.Common.Settings;
 using Mermer.Data;
 using Mermer.Data.Authorizers;
@@ -104,7 +105,6 @@ public class StockTransactionDetailsViewModel<T, TLine> :
     {
         this.StocksCache = new ObservableCollection<Stock>();
 
-        // Запуск инициализации поисковика в фоне без блокировки открытия формы
         _ = Task.Run(async () =>
         {
             try
@@ -114,7 +114,6 @@ public class StockTransactionDetailsViewModel<T, TLine> :
             catch { }
         });
 
-        // Инициализируем только базовые справочники складов
         return Task.WhenAll(base.PreLoad(), this.Warehouses.Initialize());
     }
 
@@ -127,7 +126,22 @@ public class StockTransactionDetailsViewModel<T, TLine> :
         if (!string.IsNullOrEmpty(ItemId) || !string.IsNullOrEmpty(Details.WarehouseId))
             return;
 
-        Details.WarehouseId = AppSettings.DefaultWarehouseId;
+        // Если склад по умолчанию запрещен для операций — выбираем первый разрешенный для операций
+        string defaultWh = AppSettings.DefaultWarehouseId;
+        if (IsWarehouseAllowed(defaultWh))
+        {
+            Details.WarehouseId = defaultWh;
+        }
+        else
+        {
+            var firstAllowed = Warehouses?.List?.FirstOrDefault(w => !w.IsDisabled && IsWarehouseAllowed(w.Id));
+            Details.WarehouseId = firstAllowed?.Id;
+        }
+    }
+
+    private bool IsWarehouseAllowed(string warehouseId)
+    {
+        return AccountSecurityHelper.CanOperate(LoginService, warehouseId);
     }
 
     protected override async Task PostLoad()
@@ -159,7 +173,10 @@ public class StockTransactionDetailsViewModel<T, TLine> :
         await LoadStocksCache();
         Details.RaisePropertyChanged("LineQuantitiesSum");
 
-        Warehouses.Filter = w => !w.IsDisabled || w.Id == Details.WarehouseId;
+        // При создании/редактировании выпадающий список содержит только склады с правом Operate
+        // Для существующего документа разрешаем отображение его склада, если есть хотя бы право Read
+        Warehouses.Filter = w => !w.IsDisabled && (AccountSecurityHelper.CanOperate(LoginService, w.Id) || (!string.IsNullOrEmpty(ItemId) && w.Id == Details.WarehouseId && AccountSecurityHelper.CanRead(LoginService, w.Id)));
+        Warehouses?.RaisePropertyChanged("List");
     }
 
     public override async Task Initialize()
@@ -448,6 +465,17 @@ public class StockTransactionDetailsViewModel<T, TLine> :
         Status = null;
         SuspendLoading = false;
         IsBusy = false;
+    }
+
+    protected override async Task<bool> OnSaveAsync()
+    {
+        if (!string.IsNullOrEmpty(Details?.WarehouseId) && !AccountSecurityHelper.CanOperate(LoginService, Details.WarehouseId))
+        {
+            UserInteractionService.ShowMessage(this["Access Denied"], this["You do not have permission to operate with the selected warehouse."]);
+            return false;
+        }
+
+        return await base.OnSaveAsync();
     }
 
     public class LineImport

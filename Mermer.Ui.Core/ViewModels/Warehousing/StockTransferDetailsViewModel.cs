@@ -4,6 +4,7 @@
 // MVID: DC92D011-8413-44AC-9F10-F866D891CF66
 // Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.Ui.Core.dll
 
+using Mermer.Authorization.Enums;
 using Mermer.Authorization.Services;
 using Mermer.Data;
 using Mermer.Data.Authorizers;
@@ -31,6 +32,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
+
 
 #nullable disable
 namespace Mermer.Ui.Core.ViewModels.Warehousing;
@@ -77,17 +79,32 @@ public class StockTransferDetailsViewModel :
         if (!string.IsNullOrEmpty(ItemId))
             return;
 
-        if (!string.IsNullOrEmpty(_sourceWarehouseId))
+        if (!string.IsNullOrEmpty(_sourceWarehouseId) && IsAllowedAccount(_sourceWarehouseId))
             Details.WarehouseId = _sourceWarehouseId;
-        if (!string.IsNullOrEmpty(_destinationWarehouseId))
+
+        if (!string.IsNullOrEmpty(_destinationWarehouseId) && IsAllowedAccount(_destinationWarehouseId))
             Details.DestinationWarehouseId = _destinationWarehouseId;
     }
 
     protected override async Task PostLoad()
     {
-        var usedWarehouseIds = new[] { Details.WarehouseId, Details.DestinationWarehouseId }.Distinct();
         await base.PostLoad();
-        Warehouses.Filter = x => !x.IsDisabled || usedWarehouseIds.Contains(x.Id);
+
+        // Если в новом документе оказался запрещенный склад, сбрасываем его
+        if (string.IsNullOrEmpty(ItemId))
+        {
+            if (!IsAllowedAccount(Details.WarehouseId))
+                Details.WarehouseId = Warehouses?.List?.FirstOrDefault(w => !w.IsDisabled && IsAllowedAccount(w.Id))?.Id;
+
+            if (!IsAllowedAccount(Details.DestinationWarehouseId))
+                Details.DestinationWarehouseId = null;
+        }
+
+        var usedWarehouseIds = new[] { Details.WarehouseId, Details.DestinationWarehouseId }.Distinct();
+
+        // Скрываем все запрещенные склады из выпадающих списков
+        Warehouses.Filter = x => (!x.IsDisabled || usedWarehouseIds.Contains(x.Id)) && IsAllowedAccount(x.Id);
+        Warehouses?.RaisePropertyChanged("List");
     }
 
     protected override async Task<bool> OnSaveAsync()
@@ -185,7 +202,19 @@ public class StockTransferDetailsViewModel :
     }
   }
 
-  private async Task SelectDestinationWarehouseAsync()
+    private bool IsAllowedAccount(string accountId)
+    {
+        if (string.IsNullOrEmpty(accountId) || LoginService?.Session == null || LoginService.Session.IsAdmin)
+            return true;
+
+        if (LoginService.Session.Accounts != null && LoginService.Session.Accounts.TryGetValue(accountId, out var level))
+        {
+            return level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read);
+        }
+        return true;
+    }
+
+    private async Task SelectDestinationWarehouseAsync()
   {
     StockTransferDetailsViewModel detailsViewModel = this;
     StockTransfer stockTransfer = detailsViewModel.Details;

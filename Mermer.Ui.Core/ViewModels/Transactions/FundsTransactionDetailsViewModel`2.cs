@@ -1,11 +1,6 @@
-﻿// Decompiled with JetBrains decompiler
-// Type: Mermer.Ui.Core.ViewModels.Transactions.FundsTransactionDetailsViewModel`2
-// Assembly: Mermer.Ui.Core, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
-// MVID: DC92D011-8413-44AC-9F10-F866D891CF66
-// Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.Ui.Core.dll
-
-using MvvmCross.Core.Navigation;
+﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
+using Mermer.Authorization.Enums;
 using Mermer.Authorization.Services;
 using Mermer.Enterprise.Models;
 using Mermer.FundsManagement.Models;
@@ -19,6 +14,7 @@ using Mermer.Mvvm.Services;
 using Mermer.Mvvm.ViewModels;
 using Mermer.Services;
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Input;
 
@@ -29,24 +25,24 @@ public class FundsTransactionDetailsViewModel<T, TLine> : TransactionDetailsView
   where T : FundsTransaction<TLine>
   where TLine : FundsTransactionLine
 {
-  protected FundsTransactionDetailsViewModel(
-    IRepository<T> repository,
-    IListAuthorizer<T> authorizer,
-    IConfigurator configurator,
-    ILoginService loginService,
-    Reference<Currency> currencies,
-    Reference<Depository> depositories,
-    IMvxNavigationService navigationService,
-    ITransactionCodeGenerationService codegentor,
-    IUserInteractionService userInteractionService)
-    : base(configurator, repository, authorizer, loginService, currencies, navigationService, codegentor, userInteractionService)
-  {
-    this.Depositories = depositories;
-  }
+    protected FundsTransactionDetailsViewModel(
+      IRepository<T> repository,
+      IListAuthorizer<T> authorizer,
+      IConfigurator configurator,
+      ILoginService loginService,
+      Reference<Currency> currencies,
+      Reference<Depository> depositories,
+      IMvxNavigationService navigationService,
+      ITransactionCodeGenerationService codegentor,
+      IUserInteractionService userInteractionService)
+      : base(configurator, repository, authorizer, loginService, currencies, navigationService, codegentor, userInteractionService)
+    {
+        this.Depositories = depositories;
+    }
 
-  public Reference<Depository> Depositories { get; }
+    public Reference<Depository> Depositories { get; }
 
-  protected override Task PreLoad() => Task.WhenAll(base.PreLoad(), this.Depositories.Initialize());
+    protected override Task PreLoad() => Task.WhenAll(base.PreLoad(), this.Depositories.Initialize());
 
     protected override async Task OnLoad()
     {
@@ -54,43 +50,63 @@ public class FundsTransactionDetailsViewModel<T, TLine> : TransactionDetailsView
         if (!string.IsNullOrEmpty(ItemId))
             return;
 
-        Details.DepositoryId = AppSettings.DefaultDepositoryId;
+        // Если касса по умолчанию не разрешена для операций — подставляем первую разрешенную
+        string defaultDep = AppSettings.DefaultDepositoryId;
+        if (AccountSecurityHelper.CanOperate(LoginService, defaultDep))
+        {
+            Details.DepositoryId = defaultDep;
+        }
+        else
+        {
+            var firstAllowed = Depositories?.List?.FirstOrDefault(d => !d.IsDisabled && AccountSecurityHelper.CanOperate(LoginService, d.Id));
+            Details.DepositoryId = firstAllowed?.Id;
+        }
     }
 
     protected override async Task PostLoad()
     {
         await base.PostLoad();
 
-        // Восстановленная лямбда фильтрации (показываем активные или уже выбранные)
-        Depositories.Filter = x => !x.IsDisabled || x.Id == Details.DepositoryId;
+        // Для новых документов в выпадающем списке только кассы с правом Operate.
+        // Для существующего документа оставляем его кассу в списке, если есть хотя бы право Read.
+        Depositories.Filter = x => !x.IsDisabled && (AccountSecurityHelper.CanOperate(LoginService, x.Id) || (!string.IsNullOrEmpty(ItemId) && x.Id == Details.DepositoryId && AccountSecurityHelper.CanRead(LoginService, x.Id)));
+        Depositories?.RaisePropertyChanged("List");
+    }
+
+    protected override async Task<bool> OnSaveAsync()
+    {
+        if (!string.IsNullOrEmpty(Details?.DepositoryId) && !AccountSecurityHelper.CanOperate(LoginService, Details.DepositoryId))
+        {
+            UserInteractionService.ShowMessage(this["Access Denied"], this["You do not have permission to operate with the selected depository."]);
+            return false;
+        }
+
+        return await base.OnSaveAsync();
     }
 
     public ICommand SelectedLineDeleteCommand
-  {
-    get
     {
-      return (ICommand) new MvxCommand(new Action(this.OnSelectedLineDelete), (Func<bool>) (() => !this.IsBusy && this.HasSaveAccess && this.IsLineSelected));
+        get
+        {
+            return new MvxCommand(this.OnSelectedLineDelete, () => !this.IsBusy && this.HasSaveAccess && this.IsLineSelected);
+        }
     }
-  }
 
-  private void OnSelectedLineDelete()
-  {
-    this.SelectedLine = this.Details.Lines.RemoveWithSelection<TLine>(this.SelectedLine);
-  }
-
-  public ICommand SelectDepositoryCommand
-  {
-    get
+    private void OnSelectedLineDelete()
     {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnSelectDepositoryCommandAsync), (Func<bool>) (() => !this.IsBusy && this.HasSaveAccess));
+        this.SelectedLine = this.Details.Lines.RemoveWithSelection<TLine>(this.SelectedLine);
     }
-  }
 
-  private async Task OnSelectDepositoryCommandAsync()
-  {
-    FundsTransactionDetailsViewModel<T, TLine> detailsViewModel = this;
-    T obj = detailsViewModel.Details;
-    obj.DepositoryId = await detailsViewModel.NavigationService.Navigate<ListViewModel<Depository>, string, string>(detailsViewModel.Details.DepositoryId ?? Guid.Empty.ToString());
-    obj = default (T);
-  }
+    public ICommand SelectDepositoryCommand
+    {
+        get
+        {
+            return new MvxAsyncCommand(this.OnSelectDepositoryCommandAsync, () => !this.IsBusy && this.HasSaveAccess);
+        }
+    }
+
+    private async Task OnSelectDepositoryCommandAsync()
+    {
+        Details.DepositoryId = await this.NavigationService.Navigate<ListViewModel<Depository>, string, string>(this.Details.DepositoryId ?? Guid.Empty.ToString());
+    }
 }

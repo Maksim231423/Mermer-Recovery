@@ -1,4 +1,5 @@
-﻿using Mermer.Authorization.Services;
+﻿using Mermer.Authorization.Enums;
+using Mermer.Authorization.Services;
 using Mermer.Common.Models;
 using Mermer.Common.Settings;
 using Mermer.CRM.Models;
@@ -12,6 +13,7 @@ using Mermer.Mvvm.ViewModels;
 using Mermer.Services;
 using Mermer.StockManagement.Models;
 using Mermer.StockManagement.Services;
+using Mermer.Transactions.Models.Authorizers;
 using Mermer.Transactions.Services;
 using Mermer.Ui.Core.Helpers;
 using Mermer.Ui.Core.ViewModels.Common;
@@ -48,6 +50,7 @@ public class AggregatedStockOrderDetailsViewModel :
     private string[] _groupNames;
     private string[] _tagNames;
     private AggregatedStockOrderDetailsViewModel.Params _paramenter;
+    private bool _canChangeDate;
 
     public AggregatedStockOrderDetailsViewModel(
       IConfigurator configurator,
@@ -73,6 +76,19 @@ public class AggregatedStockOrderDetailsViewModel :
         this.Partners = partners;
         this.StockSearcher = stockSearcher;
         this.StockSearcher.ResultSelected += new SearchResultSelected(this.StockSearcher_ResultSelected);
+    }
+
+    public bool CanChangeDate
+    {
+        get => this.HasSaveAccess && this._canChangeDate;
+        set => this.SetProperty(ref this._canChangeDate, value, nameof(CanChangeDate));
+    }
+
+    protected override MvxInpcInterceptionResult InterceptRaisePropertyChanged(PropertyChangedEventArgs changedArgs)
+    {
+        if (changedArgs.PropertyName == "HasSaveAccess")
+            this.RaisePropertyChanged(() => this.CanChangeDate);
+        return base.InterceptRaisePropertyChanged(changedArgs);
     }
 
     public StockSearcher StockSearcher { get; }
@@ -155,7 +171,6 @@ public class AggregatedStockOrderDetailsViewModel :
         set => this.SetProperty(ref this._tagNames, value, nameof(TagNames));
     }
 
-    // ИСПРАВЛЕНИЕ: Безопасное чтение фасетов (без падений)
     protected virtual async Task LoadFacetsAsync()
     {
         var facets = await ((IRepositoryWithFacets<AggregatedStockOrder>)this.Repository).GetFacets("GroupNames", "TagNames");
@@ -185,6 +200,20 @@ public class AggregatedStockOrderDetailsViewModel :
 
     protected override Task PreLoad()
     {
+        // ── ПРОВЕРКА ПРАВ НА ИЗМЕНЕНИЕ ДАТЫ ──
+        if (this.LoginService?.Session != null && this.LoginService.Session.IsAdmin)
+        {
+            this.CanChangeDate = true;
+        }
+        else if (this.Authorizer is ITransactionAuthorizer<AggregatedStockOrder> txAuth)
+        {
+            this.CanChangeDate = txAuth.CanChangeDate();
+        }
+        else
+        {
+            this.CanChangeDate = false;
+        }
+
         this.StocksCache = new ObservableCollection<Stock>();
         this.StocksBalances = new ObservableCollection<ListHelper<string, Decimal>>();
         return Task.WhenAll(base.PreLoad(), this.LoadFacetsAsync(), this.Warehouses.Initialize(), this.Partners.Initialize(), this.StockSearcher.Initialize());
@@ -199,11 +228,30 @@ public class AggregatedStockOrderDetailsViewModel :
         if (Details.Lines == null)
             Details.Lines = new WatchedObservableCollection<AggregatedStockOrderLine>();
 
+        // 1. Фильтрация складов по правам сессии (скрываем склады со статусом No Access / 0)
+        if (LoginService?.Session != null && !LoginService.Session.IsAdmin && LoginService.Session.Accounts != null)
+        {
+            var accounts = LoginService.Session.Accounts;
+
+            Warehouses.Filter = w =>
+                !w.IsDisabled &&
+                (!accounts.TryGetValue(w.Id, out var level) ||
+                 (level != AccountAccessLevel.None && (level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read))));
+        }
+        else
+        {
+            Warehouses.Filter = w => !w.IsDisabled;
+        }
+
+        Warehouses?.RaisePropertyChanged("List");
+
+        // 2. Инициализация нового документа
         if (string.IsNullOrEmpty(ItemId))
         {
             if (_paramenter != null)
             {
-                Details.WarehouseId = _paramenter.WarehouseId;
+                Details.WarehouseId = IsWarehouseAllowed(_paramenter.WarehouseId) ? _paramenter.WarehouseId : null;
+
                 foreach (string stockId in _paramenter.StockIds)
                 {
                     AggregatedStockOrderLine line = await CreateLine(stockId);
@@ -214,17 +262,47 @@ public class AggregatedStockOrderDetailsViewModel :
             if (string.IsNullOrEmpty(Details.WarehouseId))
             {
                 AppSettings configAsync = await _configurator.GetConfigAsync<AppSettings>();
-                Details.WarehouseId = configAsync.DefaultWarehouseId;
+                string defaultWhId = configAsync.DefaultWarehouseId;
+
+                // Если склад по умолчанию запрещен — подставляем первый разрешенный
+                Details.WarehouseId = IsWarehouseAllowed(defaultWhId)
+                    ? defaultWhId
+                    : Warehouses?.List?.FirstOrDefault(w => Warehouses.Filter(w))?.Id;
+            }
+        }
+        else
+        {
+            if (!IsWarehouseAllowed(Details.WarehouseId))
+            {
+                Details.WarehouseId = Warehouses?.List?.FirstOrDefault(w => Warehouses.Filter(w))?.Id;
             }
         }
 
         StockSearcher.WarehouseId = Details.WarehouseId;
         await LoadStocksCache();
 
-        Warehouses.Filter = w => !w.IsDisabled || w.Id == Details.WarehouseId;
         Partners.Filter = p => !p.IsDisabled || p.Id == Details.PartnerId;
 
         GenerateColumns();
+        this.RaisePropertyChanged(() => this.CanChangeDate);
+    }
+
+    private bool IsWarehouseAllowed(string warehouseId)
+    {
+        if (string.IsNullOrEmpty(warehouseId) || LoginService?.Session == null || LoginService.Session.IsAdmin)
+            return true;
+
+        var accounts = LoginService.Session.Accounts;
+        if (accounts == null || accounts.Count == 0)
+            return true;
+
+        if (accounts.TryGetValue(warehouseId, out var level))
+        {
+            return level != AccountAccessLevel.None &&
+                   (level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read));
+        }
+
+        return true;
     }
 
     private void GenerateColumns()
@@ -326,7 +404,6 @@ public class AggregatedStockOrderDetailsViewModel :
         }
     }
 
-    // ИСПРАВЛЕНИЕ: Добавлена проверка this.Details != null для предотвращения краша!
     public ICommand NewTransferCommand => new MvxAsyncCommand(
         this.OnNewTransferCommandAsync,
         () => !this.IsBusy && !this.IsDirty && this.Details != null && this.Details.IsCompleted && !string.IsNullOrEmpty(this.Details.WarehouseId)
@@ -419,6 +496,11 @@ public class AggregatedStockOrderDetailsViewModel :
             if (string.IsNullOrEmpty(Details?.WarehouseId))
             {
                 throw new Exception(this["Field '{0}' is required", this["Warehouse"]]);
+            }
+
+            if (!IsWarehouseAllowed(Details.WarehouseId))
+            {
+                throw new Exception("You do not have permission to use the selected warehouse.");
             }
 
             if (Details.Lines == null || !Details.Lines.Any())

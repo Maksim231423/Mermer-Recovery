@@ -12,6 +12,9 @@ namespace Mermer.Ui.Core.Helpers;
 
 public class Reference<T> : BindableObject, IDisposable where T : IModel
 {
+    // Глобальный фильтр безопасности для складов, касс и офисов
+    public static Func<string, bool> SecurityFilter { get; set; }
+
     private readonly IRepository<T> _repository;
     private readonly IMvxMessenger _messenger;
     private MvxSubscriptionToken _messageToken;
@@ -70,9 +73,19 @@ public class Reference<T> : BindableObject, IDisposable where T : IModel
             return;
         }
 
+        IEnumerable<T> query = this._rawList;
+
+        // Автоматически отсекаем запрещенные объекты безопасности (склады, кассы, офисы)
+        string typeName = typeof(T).Name;
+        if (SecurityFilter != null && (typeName == "Warehouse" || typeName == "Depository" || typeName == "Office"))
+        {
+            query = query.Where(item => SecurityFilter(item.Id));
+        }
+
+        // Применяем локальный фильтр конкретного окна (например, неотключенные)
         this._filteredList = this._filter != null
-            ? this._rawList.Where(this._filter).ToList()
-            : this._rawList;
+            ? query.Where(this._filter).ToList()
+            : query.ToList();
     }
 
     public virtual async Task Initialize()

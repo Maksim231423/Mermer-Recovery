@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -57,7 +58,7 @@ public static class AggregatedStockOrdersEndpoints
                 WarehouseId = o.WarehouseId?.ToString(),
                 PartnerId = o.PartnerId?.ToString(),
                 UserId = o.UserId?.ToString(),
-                UserName = o.UserName ?? "admin",
+                UserName = !string.IsNullOrEmpty(o.UserName) ? o.UserName : "admin",
                 IsCompleted = o.IsCompleted,
                 IsDisabled = o.IsDisabled,
                 Group = o.GroupName ?? "",
@@ -96,7 +97,7 @@ public static class AggregatedStockOrdersEndpoints
                 WarehouseId = o.WarehouseId?.ToString(),
                 PartnerId = o.PartnerId?.ToString(),
                 UserId = o.UserId?.ToString(),
-                UserName = o.UserName ?? "admin",
+                UserName = !string.IsNullOrEmpty(o.UserName) ? o.UserName : "admin",
                 IsCompleted = o.IsCompleted,
                 IsDisabled = o.IsDisabled,
                 Group = o.GroupName ?? "",
@@ -155,7 +156,6 @@ public static class AggregatedStockOrdersEndpoints
                 }
                 else if (field.Equals("Date", StringComparison.OrdinalIgnoreCase))
                 {
-                    // СТАЛО:
                     var today = DateTime.Today;
                     var todayUtc = new DateTimeOffset(DateTime.SpecifyKind(today, DateTimeKind.Utc), TimeSpan.Zero);
                     var weekStart = todayUtc.AddDays(-7);
@@ -201,17 +201,45 @@ public static class AggregatedStockOrdersEndpoints
             string code = GetStringProp(root, "code", "Code") ?? $"AGR-{DateTime.UtcNow:yyMMddHHmmss}";
             Guid? wId = Guid.TryParse(GetStringProp(root, "warehouseId", "WarehouseId"), out var wG) ? wG : null;
             Guid? pId = Guid.TryParse(GetStringProp(root, "partnerId", "PartnerId"), out var pG) ? pG : null;
-            Guid? uId = Guid.TryParse(GetStringProp(root, "userId", "UserId"), out var uG) ? uG : null;
-            string userName = GetStringProp(root, "userName", "UserName") ?? "admin";
+
+            string? uIdStr = GetStringProp(root, "userId", "UserId", "authorId", "AuthorId");
+            Guid? uId = Guid.TryParse(uIdStr, out var uG) && uG != Guid.Empty ? uG : null;
+            string userName = GetStringProp(root, "userName", "UserName", "author", "Author") ?? "admin";
+
+            if (!uId.HasValue && !string.IsNullOrEmpty(userName))
+            {
+                var u = await db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Username.ToLower() == userName.ToLower());
+                uId = u?.Id;
+            }
+
+            // ПРОВЕРКА ПРАВ НА СКЛАД
+            if (uId.HasValue && wId.HasValue)
+            {
+                var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uId.Value);
+                if (user != null && !user.IsAdmin)
+                {
+                    if (user.AccountPrivileges.TryGetValue(wId.Value.ToString(), out int accLvl) && accLvl == 0)
+                    {
+                        var wh = await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => w.Id == wId.Value);
+                        string whName = !string.IsNullOrWhiteSpace(wh?.Name) ? wh.Name : "MERKEZ";
+
+                        return Results.Json(new
+                        {
+                            message = $"Access denied: you do not have permission to use warehouse '{whName}'."
+                        }, statusCode: StatusCodes.Status403Forbidden);
+                    }
+                }
+            }
+
             string groupName = GetStringProp(root, "group", "Group", "groupName", "GroupName") ?? string.Empty;
             string description = GetStringProp(root, "description", "Description") ?? string.Empty;
             bool isCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
             bool isDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
 
-            DateTimeOffset date = new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc));
+            DateTimeOffset? clientDate = null;
             string? dateStr = GetStringProp(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var pDate))
-                date = new DateTimeOffset(DateTime.SpecifyKind(pDate, DateTimeKind.Utc));
+            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var pDate))
+                clientDate = new DateTimeOffset(DateTime.SpecifyKind(pDate, DateTimeKind.Utc));
 
             var tagsList = ExtractTagsFromRawJson(root);
 
@@ -247,7 +275,7 @@ public static class AggregatedStockOrdersEndpoints
                 {
                     Id = orderId,
                     Code = code,
-                    Date = date,
+                    Date = clientDate ?? DateTimeOffset.UtcNow,
                     WarehouseId = wId,
                     PartnerId = pId,
                     UserId = uId,
@@ -275,6 +303,12 @@ public static class AggregatedStockOrdersEndpoints
                 existing.Description = description;
                 existing.Tags = tagsList.ToArray();
                 existing.UpdatedAt = DateTimeOffset.UtcNow;
+
+                // ОБНОВЛЕНИЕ ДАТЫ
+                if (clientDate.HasValue && clientDate.Value.Year >= 2000)
+                {
+                    existing.Date = clientDate.Value;
+                }
 
                 var oldLines = await db.AggregatedStockOrderLines.Where(l => l.AggregatedStockOrderId == orderId).ToListAsync();
                 if (oldLines.Any()) db.AggregatedStockOrderLines.RemoveRange(oldLines);

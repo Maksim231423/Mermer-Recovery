@@ -1,4 +1,5 @@
 ﻿using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System;
 using System.Diagnostics;
 using System.Net.Http;
@@ -119,12 +120,10 @@ public class RestClient
         if (!response.IsSuccessStatusCode)
             throw await RestClient.ExportException(response, address).ConfigureAwait(false);
 
-        // Читаем поток без захвата контекста UI
         using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
         using var sr = new System.IO.StreamReader(stream);
         using var reader = new JsonTextReader(sr);
 
-        // Парсинг выполняется строго в пуле фоновых потоков (Task.Run), не фризя интерфейс!
         return await Task.Run(() =>
         {
             var serializer = JsonSerializer.Create(JsonSerializerSettings);
@@ -137,22 +136,50 @@ public class RestClient
         string body = "";
         try
         {
-            body = await response.Content.ReadAsStringAsync();
+            body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(body))
             {
+                // 1. Сначала пробуем извлечь message / detail / error из JSON (работает и для Results.Json, и для Results.Problem)
+                try
+                {
+                    var obj = JObject.Parse(body);
+                    var extracted =
+                        obj.GetValue("message", StringComparison.OrdinalIgnoreCase)?.ToString() ??
+                        obj.GetValue("detail", StringComparison.OrdinalIgnoreCase)?.ToString() ??
+                        obj.GetValue("error", StringComparison.OrdinalIgnoreCase)?.ToString() ??
+                        obj.GetValue("exceptionMessage", StringComparison.OrdinalIgnoreCase)?.ToString();
+
+                    if (!string.IsNullOrWhiteSpace(extracted))
+                    {
+                        Debug.WriteLine($"[HTTP {(int)response.StatusCode}] URL: '{address}' -> {extracted}");
+                        return new Exception(extracted);
+                    }
+                }
+                catch { }
+
+                // 2. Если это стандартный формат RestException с непустым сообщением
                 try
                 {
                     var restEx = JsonConvert.DeserializeObject<RestException>(body, RestClient.JsonSerializerSettings);
-                    if (restEx != null) return restEx.ToExecption();
+                    var mappedEx = restEx?.ToExecption();
+                    if (mappedEx != null &&
+                        !string.IsNullOrWhiteSpace(mappedEx.Message) &&
+                        !mappedEx.Message.StartsWith("Exception of type", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return mappedEx;
+                    }
                 }
                 catch { }
             }
         }
         catch { }
 
-        var message = $"[HTTP {(int)response.StatusCode} {response.ReasonPhrase}] URL: '{address}'. Details: {body}";
-        Debug.WriteLine(message);
-        return new Exception(message);
+        var fallbackMessage = !string.IsNullOrWhiteSpace(body)
+            ? body
+            : $"[HTTP {(int)response.StatusCode} {response.ReasonPhrase}] URL: '{address}'";
+
+        Debug.WriteLine(fallbackMessage);
+        return new Exception(fallbackMessage);
     }
 
     private static StringContent PrepareContent(object model)

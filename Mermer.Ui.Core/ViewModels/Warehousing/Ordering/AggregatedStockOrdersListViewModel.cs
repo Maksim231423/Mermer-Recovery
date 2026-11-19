@@ -1,11 +1,7 @@
-﻿// Decompiled with JetBrains decompiler
-// Type: Mermer.Ui.Core.ViewModels.Warehousing.Ordering.AggregatedStockOrdersListViewModel
-// Assembly: Mermer.Ui.Core, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
-// MVID: DC92D011-8413-44AC-9F10-F866D891CF66
-// Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.Ui.Core.dll
-
-using MvvmCross.Core.Navigation;
+﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Plugins.Messenger;
+using Mermer.Authorization.Enums;
+using Mermer.Authorization.Services;
 using Mermer.Enterprise.Models;
 using Mermer.Ui.Core.Helpers;
 using Mermer.Ui.Core.ViewModels.Common;
@@ -20,19 +16,42 @@ namespace Mermer.Ui.Core.ViewModels.Warehousing.Ordering;
 
 public class AggregatedStockOrdersListViewModel : TransactionsListViewModel<AggregatedStockOrder>
 {
-  public AggregatedStockOrdersListViewModel(
-    IMvxMessenger messenger,
-    Reference<Warehouse> warehouses,
-    IMvxNavigationService navigationService,
-    IRepository<AggregatedStockOrder> repository,
-    IListAuthorizer<AggregatedStockOrder> authorizer,
-    IUserInteractionService userInteractionService)
-    : base(repository, authorizer, messenger, navigationService, userInteractionService)
-  {
-    this.Warehouses = warehouses;
-  }
+    private readonly ILoginService _loginService;
 
-  public Reference<Warehouse> Warehouses { get; }
+    public AggregatedStockOrdersListViewModel(
+      IMvxMessenger messenger,
+      Reference<Warehouse> warehouses,
+      IMvxNavigationService navigationService,
+      IRepository<AggregatedStockOrder> repository,
+      IListAuthorizer<AggregatedStockOrder> authorizer,
+      IUserInteractionService userInteractionService,
+      ILoginService loginService)
+      : base(repository, authorizer, messenger, navigationService, userInteractionService)
+    {
+        this.Warehouses = warehouses;
+        this._loginService = loginService;
+    }
 
-  protected override Task PreLoad() => Task.WhenAll(base.PreLoad(), this.Warehouses.Initialize());
+    public Reference<Warehouse> Warehouses { get; }
+
+    protected override async Task PreLoad()
+    {
+        await Task.WhenAll(base.PreLoad(), this.Warehouses.Initialize());
+
+        if (this._loginService?.Session != null && !this._loginService.Session.IsAdmin && this._loginService.Session.Accounts != null)
+        {
+            var accounts = this._loginService.Session.Accounts;
+
+            this.Warehouses.Filter = w =>
+                !w.IsDisabled &&
+                (!accounts.TryGetValue(w.Id, out var level) ||
+                 (level != AccountAccessLevel.None && (level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read))));
+        }
+        else
+        {
+            this.Warehouses.Filter = w => !w.IsDisabled;
+        }
+
+        this.Warehouses?.RaisePropertyChanged("List");
+    }
 }

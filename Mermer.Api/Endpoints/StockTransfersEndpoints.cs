@@ -346,6 +346,47 @@ public static class StockTransfersEndpoints
                 srcWhId = defWh?.Id;
             }
 
+            // ОПРЕДЕЛЕНИЕ АВТОРА
+            string? uIdStr = GetStringProp(root, "userId", "UserId", "authorId", "AuthorId");
+            Guid? authorUserId = Guid.TryParse(uIdStr, out var pU) && pU != Guid.Empty ? pU : null;
+            string authorUserName = GetStringProp(root, "userName", "UserName", "author", "Author") ?? "admin";
+
+            if (!authorUserId.HasValue && !string.IsNullOrEmpty(authorUserName))
+            {
+                var u = await db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Username.ToLower() == authorUserName.ToLower());
+                authorUserId = u?.Id;
+            }
+
+            // ПРОВЕРКА ПРАВ НА СКЛАД-ОТПРАВИТЕЛЬ И СКЛАД-ПОЛУЧАТЕЛЬ
+            if (authorUserId.HasValue)
+            {
+                var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == authorUserId.Value);
+                if (user != null && !user.IsAdmin)
+                {
+                    if (srcWhId.HasValue && user.AccountPrivileges.TryGetValue(srcWhId.Value.ToString(), out int srcAcc) && srcAcc == 0)
+                    {
+                        var srcWh = await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => w.Id == srcWhId.Value);
+                        string srcWhName = !string.IsNullOrWhiteSpace(srcWh?.Name) ? srcWh.Name : srcWhId.Value.ToString();
+
+                        return Results.Json(new
+                        {
+                            message = $"Access denied: you do not have permission to use warehouse '{srcWhName}'."
+                        }, statusCode: StatusCodes.Status403Forbidden);
+                    }
+
+                    if (dstWhId.HasValue && user.AccountPrivileges.TryGetValue(dstWhId.Value.ToString(), out int dstAcc) && dstAcc == 0)
+                    {
+                        var dstWh = await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => w.Id == dstWhId.Value);
+                        string dstWhName = !string.IsNullOrWhiteSpace(dstWh?.Name) ? dstWh.Name : dstWhId.Value.ToString();
+
+                        return Results.Json(new
+                        {
+                            message = $"Access denied: you do not have permission to use warehouse '{dstWhName}'."
+                        }, statusCode: StatusCodes.Status403Forbidden);
+                    }
+                }
+            }
+
             if (!dispCurId.HasValue)
             {
                 var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled)
@@ -353,11 +394,11 @@ public static class StockTransfersEndpoints
                 dispCurId = defCur?.Id;
             }
 
-            DateTimeOffset date = new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
+            DateTimeOffset? clientDate = null;
             string? dateStr = GetStringProp(root, "date", "Date");
             if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate))
             {
-                date = new DateTimeOffset(DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc), TimeSpan.Zero);
+                clientDate = new DateTimeOffset(DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc), TimeSpan.Zero);
             }
 
             var tagsList = ExtractTagsFromRawJson(root);
@@ -400,11 +441,11 @@ public static class StockTransfersEndpoints
                 {
                     Id = transferId,
                     Code = code,
-                    Date = date,
+                    Date = clientDate ?? DateTimeOffset.UtcNow,
                     WarehouseId = srcWhId,
                     DestinationWarehouseId = dstWhId,
                     DisplayCurrencyId = dispCurId,
-                    UserName = GetStringProp(root, "userName", "UserName") ?? "admin",
+                    UserName = authorUserName,
                     IsCompleted = GetBoolProp(root, "isCompleted", "IsCompleted"),
                     IsDisabled = GetBoolProp(root, "isDisabled", "IsDisabled"),
                     GroupName = groupName,
@@ -423,12 +464,12 @@ public static class StockTransfersEndpoints
                 existing.WarehouseId = srcWhId;
                 existing.DestinationWarehouseId = dstWhId;
 
-                // Если валюта в базе ранее не была сохранена — заполняем её
                 if (!existing.DisplayCurrencyId.HasValue && dispCurId.HasValue)
                 {
                     existing.DisplayCurrencyId = dispCurId;
                 }
 
+                existing.UserName = authorUserName;
                 existing.IsCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
                 existing.IsDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
                 existing.GroupName = groupName;
@@ -437,6 +478,12 @@ public static class StockTransfersEndpoints
                 existing.ActionTotal = totalSent;
                 existing.ActionReceivedTotal = totalReceived;
                 existing.UpdatedAt = DateTimeOffset.UtcNow;
+
+                // ОБНОВЛЕНИЕ ДАТЫ ПРИ РЕДАКТИРОВАНИИ
+                if (clientDate.HasValue && clientDate.Value.Year >= 2000)
+                {
+                    existing.Date = clientDate.Value;
+                }
 
                 var currentDocLines = await db.StockTransferLines
                     .Where(l => l.StockTransferId == transferId)

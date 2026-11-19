@@ -1,23 +1,20 @@
-﻿// Decompiled with JetBrains decompiler
-// Type: Mermer.Ui.Core.ViewModels.Commerce.InvoicesListViewModel
-// Assembly: Mermer.Ui.Core, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
-// MVID: DC92D011-8413-44AC-9F10-F866D891CF66
-// Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.Ui.Core.dll
-
-using MvvmCross.Core.Navigation;
-using MvvmCross.Core.ViewModels;
-using MvvmCross.Plugins.Messenger;
+﻿using Mermer.Authorization.Enums;
+using Mermer.Authorization.Services;
 using Mermer.Commerce.Models;
 using Mermer.Commerce.Services;
 using Mermer.CRM.Models;
-using Mermer.Enterprise.Models;
-using Mermer.Ui.Core.Helpers;
-using Mermer.Ui.Core.ViewModels.Common;
 using Mermer.Data.Authorizers;
+using Mermer.Enterprise.Models;
 using Mermer.Mvvm.Services;
 using Mermer.Mvvm.ViewModels;
+using Mermer.Ui.Core.Helpers;
+using Mermer.Ui.Core.ViewModels.Common;
+using MvvmCross.Core.Navigation;
+using MvvmCross.Core.ViewModels;
+using MvvmCross.Plugins.Messenger;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Linq.Expressions;
 using System.Threading.Tasks;
 using System.Windows.Input;
@@ -27,8 +24,9 @@ namespace Mermer.Ui.Core.ViewModels.Commerce;
 
 public class InvoicesListViewModel : ListViewModelBaseWithFilterDate<InvoiceInfo>
 {
-  private readonly IInvoicesRepository _repository;
-  private readonly IListAuthorizer<Invoice> _authorizer;
+    private readonly IInvoicesRepository _repository;
+    private readonly IListAuthorizer<Invoice> _authorizer;
+    private readonly ILoginService _loginService;
 
     public InvoicesListViewModel(
           IMvxMessenger messenger,
@@ -39,35 +37,35 @@ public class InvoicesListViewModel : ListViewModelBaseWithFilterDate<InvoiceInfo
           IInvoicesRepository repository,
           IListAuthorizer<Invoice> authorizer,
           IMvxNavigationService navigationService,
-          IUserInteractionService userInteractionService)
+          IUserInteractionService userInteractionService,
+          ILoginService loginService)
           : base(messenger, navigationService, userInteractionService)
     {
         this._repository = repository;
         this._authorizer = authorizer;
+        this._loginService = loginService;
         this.Offices = offices;
         this.Partners = partners;
         this.Warehouses = warehouses;
         this.Depositories = depositories;
 
-        // Исправлено: передаем транзакции накладных, а не переоценку
         this.Types = new LocalizedTransactionTypes("Invoices");
     }
 
     public override string Caption => this["Invoices", Array.Empty<object>()];
 
-  public Reference<Office> Offices { get; }
+    public Reference<Office> Offices { get; }
 
-  public Reference<Partner> Partners { get; }
+    public Reference<Partner> Partners { get; }
 
-  public Reference<Warehouse> Warehouses { get; }
+    public Reference<Warehouse> Warehouses { get; }
 
-  public Reference<Depository> Depositories { get; }
+    public Reference<Depository> Depositories { get; }
 
-  public LocalizedTransactionTypes Types { get; set; }
+    public LocalizedTransactionTypes Types { get; set; }
 
     protected override Task PreLoad()
     {
-        // Не блокируем UI: инициализация тяжелых справочников уходит в фон
         _ = Task.Run(async () =>
         {
             try
@@ -77,10 +75,34 @@ public class InvoicesListViewModel : ListViewModelBaseWithFilterDate<InvoiceInfo
                     this.Warehouses.Initialize(),
                     this.Depositories.Initialize(),
                     this.Partners.Initialize());
+
+                InvokeOnMainThread(() =>
+                {
+                    if (this._loginService?.Session != null && !this._loginService.Session.IsAdmin && this._loginService.Session.Accounts != null)
+                    {
+                        var allowedIds = this._loginService.Session.Accounts
+                            .Where(a => a.Value.HasFlag(AccountAccessLevel.Operate) || a.Value.HasFlag(AccountAccessLevel.Read))
+                            .Select(a => a.Key)
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                        this.Warehouses.Filter = w => !w.IsDisabled && allowedIds.Contains(w.Id);
+                        this.Depositories.Filter = d => !d.IsDisabled && allowedIds.Contains(d.Id);
+                        this.Offices.Filter = o => !o.IsDisabled && allowedIds.Contains(o.Id);
+                    }
+                    else
+                    {
+                        this.Warehouses.Filter = w => !w.IsDisabled;
+                        this.Depositories.Filter = d => !d.IsDisabled;
+                        this.Offices.Filter = o => !o.IsDisabled;
+                    }
+
+                    this.Warehouses.RaisePropertyChanged("List");
+                    this.Depositories.RaisePropertyChanged("List");
+                    this.Offices.RaisePropertyChanged("List");
+                });
             }
             catch
             {
-                // Игнорируем фоновые ошибки инициализации справочников
             }
         });
 
@@ -88,79 +110,79 @@ public class InvoicesListViewModel : ListViewModelBaseWithFilterDate<InvoiceInfo
     }
 
     protected override Task<int> CountFilteredListAsync(ListFilter filter)
-  {
-    return this._repository.CountInfoAsync(DateTime.MinValue, DateTime.MaxValue);
-  }
-
-  protected override Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
-  {
-    return this._repository.CountInfoAsync(from, till);
-  }
-
-  protected override Task<IEnumerable<InvoiceInfo>> GetFilteredListAsync(ListFilter filter)
-  {
-    return this._repository.GetInfoAsync(DateTime.MinValue, DateTime.MaxValue);
-  }
-
-  protected override Task<IEnumerable<InvoiceInfo>> GetFilteredListByDateAsync(
-    DateTime from,
-    DateTime till)
-  {
-    return this._repository.GetInfoAsync(from, till);
-  }
-
-  public bool HasCreateAccess => this._authorizer.CanCreate();
-
-  public ICommand CreateNewCommand
-  {
-    get
     {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnCreateNewAsync), (Func<bool>) (() => !this.IsBusy && this.HasCreateAccess));
+        return this._repository.CountInfoAsync(DateTime.MinValue, DateTime.MaxValue);
     }
-  }
 
-  protected virtual Task OnCreateNewAsync()
-  {
-    return this.NavigationService.Navigate<DetailsViewModel<Invoice>, string>(string.Empty);
-  }
-
-  public ICommand ViewDetailsCommand
-  {
-    get
+    protected override Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
     {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnViewDetailsAsync), (Func<bool>) (() => !this.IsBusy && this.SelectedItem != null));
+        return this._repository.CountInfoAsync(from, till);
     }
-  }
 
-  protected virtual Task OnViewDetailsAsync()
-  {
-    return this.NavigationService.Navigate<DetailsViewModel<Invoice>, string>(this.SelectedItem.Id);
-  }
-
-  public ICommand SelectOrViewDetailsCommand
-  {
-    get
+    protected override Task<IEnumerable<InvoiceInfo>> GetFilteredListAsync(ListFilter filter)
     {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnSelectOrViewDetailsAsync), (Func<bool>) (() => !this.IsBusy && this.SelectedItem != null));
+        return this._repository.GetInfoAsync(DateTime.MinValue, DateTime.MaxValue);
     }
-  }
 
-  protected virtual Task OnSelectOrViewDetailsAsync() => this.OnViewDetailsAsync();
+    protected override Task<IEnumerable<InvoiceInfo>> GetFilteredListByDateAsync(
+      DateTime from,
+      DateTime till)
+    {
+        return this._repository.GetInfoAsync(from, till);
+    }
 
-  protected override Expression<Func<InvoiceInfo, bool>> GetDateFilter(DateTime from, DateTime till)
-  {
-    throw new NotImplementedException();
-  }
+    public bool HasCreateAccess => this._authorizer.CanCreate();
 
-  protected override Task<int> CountListAsync(
-    params Expression<Func<InvoiceInfo, bool>>[] predicates)
-  {
-    throw new NotImplementedException();
-  }
+    public ICommand CreateNewCommand
+    {
+        get
+        {
+            return (ICommand)new MvxAsyncCommand(new Func<Task>(this.OnCreateNewAsync), (Func<bool>)(() => !this.IsBusy && this.HasCreateAccess));
+        }
+    }
 
-  protected override Task<IEnumerable<InvoiceInfo>> GetListAsync(
-    params Expression<Func<InvoiceInfo, bool>>[] predicates)
-  {
-    throw new NotImplementedException();
-  }
+    protected virtual Task OnCreateNewAsync()
+    {
+        return this.NavigationService.Navigate<DetailsViewModel<Invoice>, string>(string.Empty);
+    }
+
+    public ICommand ViewDetailsCommand
+    {
+        get
+        {
+            return (ICommand)new MvxAsyncCommand(new Func<Task>(this.OnViewDetailsAsync), (Func<bool>)(() => !this.IsBusy && this.SelectedItem != null));
+        }
+    }
+
+    protected virtual Task OnViewDetailsAsync()
+    {
+        return this.NavigationService.Navigate<DetailsViewModel<Invoice>, string>(this.SelectedItem.Id);
+    }
+
+    public ICommand SelectOrViewDetailsCommand
+    {
+        get
+        {
+            return (ICommand)new MvxAsyncCommand(new Func<Task>(this.OnSelectOrViewDetailsAsync), (Func<bool>)(() => !this.IsBusy && this.SelectedItem != null));
+        }
+    }
+
+    protected virtual Task OnSelectOrViewDetailsAsync() => this.OnViewDetailsAsync();
+
+    protected override Expression<Func<InvoiceInfo, bool>> GetDateFilter(DateTime from, DateTime till)
+    {
+        throw new NotImplementedException();
+    }
+
+    protected override Task<int> CountListAsync(
+      params Expression<Func<InvoiceInfo, bool>>[] predicates)
+    {
+        throw new NotImplementedException();
+    }
+
+    protected override Task<IEnumerable<InvoiceInfo>> GetListAsync(
+      params Expression<Func<InvoiceInfo, bool>>[] predicates)
+    {
+        throw new NotImplementedException();
+    }
 }

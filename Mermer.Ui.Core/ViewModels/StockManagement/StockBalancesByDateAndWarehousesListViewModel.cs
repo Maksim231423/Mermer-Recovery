@@ -1,5 +1,7 @@
 ﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
+using MvvmCross.Platform;
+using Mermer.Authorization.Services;
 using Mermer.Enterprise.Models;
 using Mermer.FundsManagement.Models;
 using Mermer.StockManagement.Models;
@@ -23,6 +25,7 @@ namespace Mermer.Ui.Core.ViewModels.StockManagement;
 public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
 {
     private readonly IStockBalancesRepository _balancesRepository;
+    private readonly ILoginService _loginService;
     private DateTime _date = DateTime.Today;
     private System.Collections.Generic.List<object> _selectedWarehouseIds;
     private string _displayCurrencyId;
@@ -56,6 +59,8 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
         this.StockSearcher.ResultSelected += new SearchResultSelected(this.OnStockSearcherOnResultSelected);
         this.SelectedStockIds = new ObservableCollection<string>();
         this._list = new ObservableCollection<StockBalanceByWarehouses>();
+
+        try { this._loginService = Mvx.Resolve<ILoginService>(); } catch { }
     }
 
     public StockSearcher StockSearcher { get; }
@@ -84,11 +89,7 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
                 return;
             this.SetProperty(ref this._selectedWarehouseIds, value, nameof(SelectedWarehouseIds));
 
-            // Генерируем колонки под выбранные склады
             this.GenerateColumns();
-
-            // При смене склада НЕ загружаем остатки автоматически!
-            // Очищаем таблицу и ждём нажатия Add All Stocks или ручного добавления через строку Add
             this.ShowAllStocks = false;
             this.SelectedStockIds?.Clear();
             this.List = new ObservableCollection<StockBalanceByWarehouses>();
@@ -105,7 +106,7 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
 
             return this.SelectedWarehouseIds
                 .Select(x => x?.ToString())
-                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Where(x => !string.IsNullOrWhiteSpace(x) && AccountSecurityHelper.CanRead(this._loginService, x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
@@ -167,6 +168,11 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
 
     protected override async Task PreLoad()
     {
+        if (this.Warehouses != null)
+        {
+            this.Warehouses.Filter = w => !w.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, w.Id);
+        }
+
         if (!_loaded)
         {
             await Task.WhenAll(base.PreLoad(), this.Currencies.Initialize(), this.Warehouses.Initialize(), this.StockSearcher.Initialize());
@@ -185,7 +191,6 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
 
     protected override async Task OnLoad()
     {
-        // Таблица остаётся пустой, если склады не выбраны ИЛИ если не нажат Add All Stocks и нет выбранных товаров
         if (!this.WarehouseIds.Any() || (!this.ShowAllStocks && (this.SelectedStockIds == null || !this.SelectedStockIds.Any())))
         {
             this.List = new ObservableCollection<StockBalanceByWarehouses>();
@@ -254,9 +259,8 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
 
     public ICommand ReloadCommand => new MvxAsyncCommand(this.OnReloadAsync, () => !this.IsBusy);
 
-    // Команда кнопки "Add All Stocks"
     public ICommand AddAllStocksCommand => new MvxAsyncCommand(this.OnAddAllStocksAsync, () => !this.IsBusy && this.WarehouseIds.Any());
-    public ICommand ShowAllStocksCommand => this.AddAllStocksCommand; // Алиас на случай привязки в XAML
+    public ICommand ShowAllStocksCommand => this.AddAllStocksCommand;
 
     private async Task OnAddAllStocksAsync()
     {
@@ -306,7 +310,7 @@ public class StockBalancesByDateAndWarehousesListViewModel : BaseViewModel
     private void GenerateColumns()
     {
         this.Columns = this.Warehouses.List
-            .Where(x => this.WarehouseIds.Contains(x.Id))
+            .Where(x => this.WarehouseIds.Contains(x.Id) && AccountSecurityHelper.CanRead(this._loginService, x.Id))
             .Select(x => new ColumnDescription(x.Id, x.Name))
             .ToArray();
     }

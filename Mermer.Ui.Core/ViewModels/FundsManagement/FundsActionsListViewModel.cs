@@ -1,4 +1,5 @@
-﻿using Mermer.Commerce.Models;
+﻿using Mermer.Authorization.Services;
+using Mermer.Commerce.Models;
 using Mermer.Common.Settings;
 using Mermer.CRM.Models;
 using Mermer.Enterprise.Models;
@@ -14,6 +15,7 @@ using Mermer.Ui.Core.Helpers;
 using Mermer.Ui.Core.ViewModels.Common;
 using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
+using MvvmCross.Platform;
 using MvvmCross.Plugins.Messenger;
 using System;
 using System.Collections.Generic;
@@ -32,6 +34,7 @@ public class FundsActionsListViewModel :
 {
     private readonly IConfigurator _configurator;
     private readonly IFundsActionsRepository _repository;
+    private readonly ILoginService _loginService;
     private List<object> _selectedDepositoryIds;
     private FundsActionsFilter _parameter;
     private bool _loaded;
@@ -45,7 +48,6 @@ public class FundsActionsListViewModel :
             if (!this.SetProperty<string>(ref this._currencyId, value, nameof(CurrencyId)) || this.IsBusy)
                 return;
 
-            // Мгновенный пересчет колонки в памяти без выгрузки данных
             this.ApplyCustomCurrencyRate();
         }
     }
@@ -70,7 +72,7 @@ public class FundsActionsListViewModel :
         this.Types = new LocalizedTransactionTypes("Repricing");
         this.Currencies = currencies;
 
-        // Исключаем удаленные валюты из списка
+        try { this._loginService = Mvx.Resolve<ILoginService>(); } catch { }
         this.Currencies.Filter = c => !c.IsDisabled;
     }
 
@@ -85,7 +87,6 @@ public class FundsActionsListViewModel :
             if (!this.SetProperty<List<object>>(ref this._selectedDepositoryIds, value, nameof(SelectedDepositoryIds)))
                 return;
 
-            // Если окно уже загружено — вызываем Initialize(), который перезагружает счетчики и таблицу, как кнопка Reload
             if (_loaded && !this.IsBusy)
             {
                 this.Initialize();
@@ -103,7 +104,7 @@ public class FundsActionsListViewModel :
             return list
                 .SelectMany(x => (x?.ToString() ?? string.Empty).Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
                 .Select(x => x.Trim())
-                .Where(x => !string.IsNullOrEmpty(x) && Guid.TryParse(x, out _))
+                .Where(x => !string.IsNullOrEmpty(x) && Guid.TryParse(x, out _) && AccountSecurityHelper.CanRead(this._loginService, x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
@@ -122,24 +123,7 @@ public class FundsActionsListViewModel :
 
     protected override async Task PreLoad()
     {
-        if (!_loaded)
-        {
-            if (_parameter != null)
-            {
-                SelectedDepositoryIds = _parameter.DepositoryIds?.Cast<object>().ToList() ?? new List<object>();
-                DateFilterFrom = _parameter.DateFrom;
-                DateFilterTill = _parameter.DateTill;
-            }
-            else
-            {
-                var config = await _configurator.GetConfigAsync<AppSettings>();
-                if (config != null && !string.IsNullOrEmpty(config.DefaultDepositoryId))
-                {
-                    SelectedDepositoryIds = new List<object> { config.DefaultDepositoryId };
-                }
-            }
-        }
-
+        this.Depositories.Filter = d => !d.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, d.Id);
         this.Currencies.Filter = c => !c.IsDisabled;
 
         await Task.WhenAll(
@@ -149,10 +133,32 @@ public class FundsActionsListViewModel :
             Currencies.Initialize()
         );
 
-        // По умолчанию пусто, то есть (none)
+        if (!_loaded)
+        {
+            if (_parameter != null)
+            {
+                SelectedDepositoryIds = _parameter.DepositoryIds?.Where(id => AccountSecurityHelper.CanRead(this._loginService, id)).Cast<object>().ToList() ?? new List<object>();
+                DateFilterFrom = _parameter.DateFrom;
+                DateFilterTill = _parameter.DateTill;
+            }
+            else
+            {
+                var config = await _configurator.GetConfigAsync<AppSettings>();
+                string defDep = config?.DefaultDepositoryId;
+                if (!string.IsNullOrEmpty(defDep) && AccountSecurityHelper.CanRead(this._loginService, defDep))
+                {
+                    SelectedDepositoryIds = new List<object> { defDep };
+                }
+                else
+                {
+                    var firstAllowed = Depositories?.List?.FirstOrDefault();
+                    SelectedDepositoryIds = firstAllowed != null ? new List<object> { firstAllowed.Id } : new List<object>();
+                }
+            }
+        }
+
         this._currencyId = null;
         this.RaisePropertyChanged(nameof(CurrencyId));
-
         _loaded = true;
     }
 
@@ -194,7 +200,6 @@ public class FundsActionsListViewModel :
         return this.LoadByDateAsync(false);
     }
 
-    // Подсчет всегда идет по датам и кассам, currencyId передается null
     protected override Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
     {
         return this._repository.CountAsync(from, till, null, this.DepositoryIds);
@@ -208,12 +213,14 @@ public class FundsActionsListViewModel :
     protected override async Task<IEnumerable<FundsAction>> GetFilteredListByDateAsync(DateTime from, DateTime till)
     {
         var result = await this._repository.GetAsync(from, till, null, this.DepositoryIds);
+        result = result?.Where(x => AccountSecurityHelper.CanRead(this._loginService, x.ActionDepositoryId));
         return ApplyCustomCurrencyRate(result).ToList();
     }
 
     protected override async Task<IEnumerable<FundsAction>> GetFilteredListAsync(ListFilter filter)
     {
         var result = await this._repository.GetAsync(null, null, null, this.DepositoryIds);
+        result = result?.Where(x => AccountSecurityHelper.CanRead(this._loginService, x.ActionDepositoryId));
         return ApplyCustomCurrencyRate(result).ToList();
     }
 

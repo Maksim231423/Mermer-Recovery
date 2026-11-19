@@ -1,6 +1,8 @@
 ﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
+using MvvmCross.Platform;
 using MvvmCross.Plugins.Messenger;
+using Mermer.Authorization.Services;
 using Mermer.Common.Settings;
 using Mermer.CRM.Models;
 using Mermer.CRM.Services;
@@ -26,6 +28,7 @@ public class PartnerBalancesListViewModel :
 {
     private readonly IConfigurator _configurator;
     private readonly IPartnerBalancesRepository _repository;
+    private readonly ILoginService _loginService;
     private System.Collections.Generic.List<object> _selectedOfficeIds;
     private string _partnerId;
     private string _currencyId;
@@ -47,6 +50,8 @@ public class PartnerBalancesListViewModel :
         this.Offices = offices;
         this.Partners = partners;
         this.Currencies = currencies;
+
+        try { this._loginService = Mvx.Resolve<ILoginService>(); } catch { }
     }
 
     public System.Collections.Generic.List<object> SelectedOfficeIds
@@ -70,6 +75,7 @@ public class PartnerBalancesListViewModel :
             {
                 SelectedOfficeIds = value?
                     .OfType<Office>()
+                    .Where(o => AccountSecurityHelper.CanRead(this._loginService, o.Id))
                     .Select(o => (object)o.Id)
                     .ToList() ?? new List<object>();
             }
@@ -81,7 +87,8 @@ public class PartnerBalancesListViewModel :
         get
         {
             System.Collections.Generic.List<object> selectedOfficeIds = this.SelectedOfficeIds;
-            return (selectedOfficeIds != null ? selectedOfficeIds.Cast<string>().ToArray<string>() : (string[])null) ?? Array.Empty<string>();
+            var list = (selectedOfficeIds != null ? selectedOfficeIds.Cast<string>().ToArray<string>() : (string[])null) ?? Array.Empty<string>();
+            return list.Where(id => AccountSecurityHelper.CanRead(this._loginService, id)).ToArray();
         }
     }
 
@@ -108,9 +115,7 @@ public class PartnerBalancesListViewModel :
     }
 
     public Reference<Office> Offices { get; }
-
     public Reference<Partner> Partners { get; }
-
     public Reference<Currency> Currencies { get; }
 
     protected override async Task PreLoad()
@@ -122,7 +127,7 @@ public class PartnerBalancesListViewModel :
 
         if (this.Offices != null)
         {
-            this.Offices.Filter = x => !x.IsDisabled;
+            this.Offices.Filter = x => !x.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, x.Id);
         }
 
         if (this.Currencies != null)
@@ -142,13 +147,15 @@ public class PartnerBalancesListViewModel :
             if (OfficeIds == null || !OfficeIds.Any())
             {
                 AppSettings config = await _configurator.GetConfigAsync<AppSettings>();
-                if (!string.IsNullOrEmpty(config?.DefaultOfficeId))
+                string defOffice = config?.DefaultOfficeId;
+                if (!string.IsNullOrEmpty(defOffice) && AccountSecurityHelper.CanRead(this._loginService, defOffice))
                 {
-                    _selectedOfficeIds = new List<object> { config.DefaultOfficeId };
+                    _selectedOfficeIds = new List<object> { defOffice };
                 }
                 else
                 {
-                    _selectedOfficeIds = new List<object>();
+                    var firstAllowed = Offices?.List?.FirstOrDefault();
+                    _selectedOfficeIds = firstAllowed != null ? new List<object> { firstAllowed.Id } : new List<object>();
                 }
                 RaisePropertyChanged(() => SelectedOfficeIds);
             }
@@ -163,13 +170,17 @@ public class PartnerBalancesListViewModel :
     DateTime from,
     DateTime till)
     {
-        return this.ApplyCustomCurrencyRate(await this._repository.GetByTypeAsync(from, till, this.PartnerId, this.OfficeIds));
+        var result = await this._repository.GetByTypeAsync(from, till, this.PartnerId, this.OfficeIds);
+        result = result?.Where(x => AccountSecurityHelper.CanRead(this._loginService, x.OfficeId));
+        return this.ApplyCustomCurrencyRate(result);
     }
 
     protected override async Task<IEnumerable<PartnerBalanceByTypeWithBalance>> GetFilteredListAsync(
       ListFilter filter)
     {
-        return this.ApplyCustomCurrencyRate(await this._repository.GetByTypeAsync(DateTime.MinValue, DateTime.MaxValue, this.PartnerId, this.OfficeIds));
+        var result = await this._repository.GetByTypeAsync(DateTime.MinValue, DateTime.MaxValue, this.PartnerId, this.OfficeIds);
+        result = result?.Where(x => AccountSecurityHelper.CanRead(this._loginService, x.OfficeId));
+        return this.ApplyCustomCurrencyRate(result);
     }
 
     private void ApplyCustomCurrencyRate() => this.List = this.ApplyCustomCurrencyRate(this.List);
@@ -212,9 +223,9 @@ public class PartnerBalancesListViewModel :
         return this.NavigationService.Navigate<PartnerActionsListViewModel, PartnerActionsFilter>(new PartnerActionsFilter()
         {
             OfficeIds = new string[1]
-          {
-        this.SelectedItem.OfficeId
-          },
+            {
+                this.SelectedItem.OfficeId
+            },
             PartnerId = this.SelectedItem.PartnerId,
             DateFrom = this.DateFilterFrom,
             DateTill = this.DateFilterTill

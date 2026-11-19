@@ -1,4 +1,5 @@
 ﻿using Humanizer;
+using Mermer.Authorization.Services;
 using Mermer.Common.Settings;
 using Mermer.Data.Tools.Expressions;
 using Mermer.Enterprise.Models;
@@ -13,6 +14,7 @@ using Mermer.Ui.Core.Helpers;
 using Mermer.Ui.Core.ViewModels.Common;
 using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
+using MvvmCross.Platform;
 using MvvmCross.Plugins.Messenger;
 using System;
 using System.Collections.Generic;
@@ -29,6 +31,7 @@ public class StockBalancesByStatusesListViewModel : ListViewModelBaseWithFilter<
     private readonly IConfigurator _configurator;
     private readonly IStocksRepository _stocksRepository;
     private readonly IStockBalancesRepository _balancesRepository;
+    private readonly ILoginService _loginService;
     private readonly MvxSubscriptionToken _messageToken;
     private string _caption;
     private List<object> _selectedWarehouseIds;
@@ -54,48 +57,15 @@ public class StockBalancesByStatusesListViewModel : ListViewModelBaseWithFilter<
         Currencies = currencies;
         Warehouses = warehouses;
 
+        try { this._loginService = Mvx.Resolve<ILoginService>(); } catch { }
+
         Filters = new[]
         {
-            new ListFilter
-            {
-                Title = this["Existing"],
-                Tag = "Existing",
-                CanLoad = x => !IsBusy,
-                Loader = x => LoadByFilterAsync(x),
-                Counter = CountByFilterAsync
-            },
-            new ListFilter
-            {
-                Title = this["Finished"],
-                Tag = "Finished",
-                CanLoad = x => !IsBusy,
-                Loader = x => LoadByFilterAsync(x),
-                Counter = CountByFilterAsync
-            },
-            new ListFilter
-            {
-                Title = this["Small Amount"],
-                Tag = "Min",
-                CanLoad = x => !IsBusy,
-                Loader = x => LoadByFilterAsync(x),
-                Counter = CountByFilterAsync
-            },
-            new ListFilter
-            {
-                Title = this["Over Limit"],
-                Tag = "Max",
-                CanLoad = x => !IsBusy,
-                Loader = x => LoadByFilterAsync(x),
-                Counter = CountByFilterAsync
-            },
-            new ListFilter
-            {
-                Title = this["All Records"],
-                Tag = "All",
-                CanLoad = x => !IsBusy,
-                Loader = x => LoadByFilterAsync(x),
-                Counter = CountByFilterAsync
-            }
+            new ListFilter { Title = this["Existing"], Tag = "Existing", CanLoad = x => !IsBusy, Loader = x => LoadByFilterAsync(x), Counter = CountByFilterAsync },
+            new ListFilter { Title = this["Finished"], Tag = "Finished", CanLoad = x => !IsBusy, Loader = x => LoadByFilterAsync(x), Counter = CountByFilterAsync },
+            new ListFilter { Title = this["Small Amount"], Tag = "Min", CanLoad = x => !IsBusy, Loader = x => LoadByFilterAsync(x), Counter = CountByFilterAsync },
+            new ListFilter { Title = this["Over Limit"], Tag = "Max", CanLoad = x => !IsBusy, Loader = x => LoadByFilterAsync(x), Counter = CountByFilterAsync },
+            new ListFilter { Title = this["All Records"], Tag = "All", CanLoad = x => !IsBusy, Loader = x => LoadByFilterAsync(x), Counter = CountByFilterAsync }
         };
     }
 
@@ -130,11 +100,11 @@ public class StockBalancesByStatusesListViewModel : ListViewModelBaseWithFilter<
         get
         {
             if (this.SelectedWarehouseIds == null || this.SelectedWarehouseIds.Count == 0)
-                return Array.Empty<string>();
+                return this.Warehouses?.List?.Select(w => w.Id).ToArray() ?? Array.Empty<string>();
 
             return this.SelectedWarehouseIds
                 .Select(x => x?.ToString())
-                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Where(x => !string.IsNullOrWhiteSpace(x) && AccountSecurityHelper.CanRead(this._loginService, x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
@@ -156,7 +126,6 @@ public class StockBalancesByStatusesListViewModel : ListViewModelBaseWithFilter<
     }
 
     public Reference<Currency> Currencies { get; }
-
     public Reference<Warehouse> Warehouses { get; }
 
     private ICommand _reloadDataCommand;
@@ -179,18 +148,25 @@ public class StockBalancesByStatusesListViewModel : ListViewModelBaseWithFilter<
 
     protected override async Task PreLoad()
     {
+        if (this.Warehouses != null)
+        {
+            this.Warehouses.Filter = w => !w.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, w.Id);
+        }
+
         if (!_loaded)
         {
             await Task.WhenAll(Currencies.Initialize(), Warehouses.Initialize());
 
             AppSettings configAsync = await _configurator.GetConfigAsync<AppSettings>();
-            if (!string.IsNullOrEmpty(configAsync?.DefaultWarehouseId))
+            string defWh = configAsync?.DefaultWarehouseId;
+            if (!string.IsNullOrEmpty(defWh) && AccountSecurityHelper.CanRead(this._loginService, defWh))
             {
-                this._selectedWarehouseIds = new List<object> { configAsync.DefaultWarehouseId };
+                this._selectedWarehouseIds = new List<object> { defWh };
             }
             else
             {
-                this._selectedWarehouseIds = new List<object>();
+                var firstAllowed = this.Warehouses?.List?.FirstOrDefault();
+                this._selectedWarehouseIds = firstAllowed != null ? new List<object> { firstAllowed.Id } : new List<object>();
             }
 
             var defCurr = Currencies.List.FirstOrDefault(x => x.IsDefault)
@@ -207,7 +183,9 @@ public class StockBalancesByStatusesListViewModel : ListViewModelBaseWithFilter<
 
     private async Task PreLoadBalances()
     {
-        string[] whFilter = this.WarehouseIds.Length > 0 ? this.WarehouseIds : null;
+        string[] whFilter = this.WarehouseIds.Length > 0
+            ? this.WarehouseIds
+            : (this.Warehouses?.List?.Select(w => w.Id).ToArray() ?? Array.Empty<string>());
 
         var stocks = await _stocksRepository.GetAsync();
         var balancesList = await _balancesRepository.GetAsync(null, DateTime.UtcNow, whFilter);
@@ -328,7 +306,6 @@ public class StockBalancesByStatusesListViewModel : ListViewModelBaseWithFilter<
         if (this.SelectedItem == null || string.IsNullOrEmpty(this.SelectedItem.StockId))
             return;
 
-        // Открываем окно редактирования выбранного товара по его StockId
         await this.NavigationService.Navigate<StockDetailsViewModel, string>(this.SelectedItem.StockId);
     }
 }

@@ -748,6 +748,12 @@ public static class PartnersEndpoints
                 existing.Tags = tagsList.ToArray();
                 existing.Description = description;
 
+                // ИСПРАВЛЕНИЕ: сохранение даты ордера взаиморасчётов
+                if (slipDate.Year >= 2000)
+                {
+                    existing.Date = slipDate;
+                }
+
                 if (TryGetPropertyCaseInsensitive(root, "isCompleted", out var compProp) && (compProp.ValueKind == JsonValueKind.True || compProp.ValueKind == JsonValueKind.False))
                     existing.IsCompleted = compProp.GetBoolean();
 
@@ -1080,8 +1086,15 @@ public static class PartnersEndpoints
                 existing.Group = groupName;
                 existing.Tags = tagsList.ToArray();
                 existing.Description = description;
-                existing.IsCompleted = isCompleted; // ИСПРАВЛЕНО
-                existing.IsDisabled = isDisabled;   // ИСПРАВЛЕНО
+                existing.IsCompleted = isCompleted;
+                existing.IsDisabled = isDisabled;
+
+                // ИСПРАВЛЕНИЕ: сохранение даты перевода
+                if (transferDate.Year >= 2000)
+                {
+                    existing.Date = transferDate;
+                }
+
                 existing.UpdatedAt = DateTime.UtcNow;
 
                 if (existing.Lines != null && existing.Lines.Any())

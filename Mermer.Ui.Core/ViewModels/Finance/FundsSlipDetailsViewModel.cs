@@ -1,4 +1,5 @@
-﻿using Mermer.Authorization.Services;
+﻿using Mermer.Authorization.Enums;
+using Mermer.Authorization.Services;
 using Mermer.Data;
 using Mermer.Data.Authorizers;
 using Mermer.Data.Storage;
@@ -113,6 +114,21 @@ public class FundsSlipDetailsViewModel :
     {
         await base.PostLoad();
 
+        // ── ФИЛЬТРАЦИЯ КАСС ПО ПРАВАМ ПОЛЬЗОВАТЕЛЯ ──
+        if (LoginService?.Session != null && !LoginService.Session.IsAdmin && LoginService.Session.Accounts != null)
+        {
+            var accounts = LoginService.Session.Accounts;
+
+            Depositories.Filter = d =>
+                !d.IsDisabled &&
+                (!accounts.TryGetValue(d.Id, out var level) ||
+                 (level != AccountAccessLevel.None && (level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read))));
+        }
+        else
+        {
+            Depositories.Filter = d => !d.IsDisabled;
+        }
+
         if (string.IsNullOrEmpty(ItemId))
         {
             Details.SlipType = _newSlipType;
@@ -124,10 +140,9 @@ public class FundsSlipDetailsViewModel :
                     Details.DisplayCurrencyId = activeCurrencies.FirstOrDefault(c => c.IsDefault)?.Id ?? activeCurrencies.FirstOrDefault()?.Id;
             }
 
-            if (string.IsNullOrEmpty(Details.DepositoryId) && Depositories?.List != null)
-            {
-                Details.DepositoryId = Depositories.List.FirstOrDefault(d => !d.IsDisabled)?.Id ?? Depositories.List.FirstOrDefault()?.Id;
-            }
+            // Подставляем первую разрешенную кассу
+            var allowedDepositories = Depositories?.List?.Where(Depositories.Filter).ToList();
+            Details.DepositoryId = allowedDepositories?.FirstOrDefault()?.Id;
 
             if (string.IsNullOrEmpty(Details.Code))
             {
@@ -211,7 +226,6 @@ public class FundsSlipDetailsViewModel :
             Details.Lines.CollectionChanged -= Lines_CollectionChanged;
             Details.Lines.CollectionChanged += Lines_CollectionChanged;
 
-            // Если открыт новый документ, в пустых строках ставим валюту шапки
             if (string.IsNullOrEmpty(ItemId) && !string.IsNullOrEmpty(Details.DisplayCurrencyId))
             {
                 foreach (var line in Details.Lines)
@@ -234,7 +248,6 @@ public class FundsSlipDetailsViewModel :
             {
                 if (item is FundsSlipLine line && !string.IsNullOrEmpty(Details?.DisplayCurrencyId))
                 {
-                    // Новая строка всегда наследует валюту, выбранную в шапке документа
                     line.CurrencyId = Details.DisplayCurrencyId;
                     line.UpdateCurrencyConvertion();
                 }
@@ -257,7 +270,6 @@ public class FundsSlipDetailsViewModel :
             {
                 foreach (var line in Details.Lines)
                 {
-                    // Меняем валюту строки, если это новый документ и строка пустая (Amount == 0)
                     if (string.IsNullOrEmpty(ItemId) && line.Amount == 0m)
                     {
                         line.CurrencyId = Details.DisplayCurrencyId;

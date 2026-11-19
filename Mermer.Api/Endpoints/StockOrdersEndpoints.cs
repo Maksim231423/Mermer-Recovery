@@ -300,18 +300,44 @@ public static class StockOrdersEndpoints
             }
 
             Guid? pId = Guid.TryParse(GetStringProp(root, "partnerId", "PartnerId"), out var pG) && pG != Guid.Empty ? pG : null;
-            Guid? uId = Guid.TryParse(GetStringProp(root, "userId", "UserId"), out var uG) && uG != Guid.Empty ? uG : null;
-            string userName = GetStringProp(root, "userName", "UserName") ?? "admin";
+            Guid? uId = Guid.TryParse(GetStringProp(root, "userId", "UserId", "authorId", "AuthorId"), out var uG) && uG != Guid.Empty ? uG : null;
+            string userName = GetStringProp(root, "userName", "UserName", "author", "Author") ?? "admin";
+
+            if (!uId.HasValue && !string.IsNullOrEmpty(userName))
+            {
+                var u = await db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Username.ToLower() == userName.ToLower());
+                uId = u?.Id;
+            }
+
+            // ПРОВЕРКА ПРАВ НА СКЛАД
+            if (uId.HasValue && wId.HasValue)
+            {
+                var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uId.Value);
+                if (user != null && !user.IsAdmin)
+                {
+                    if (user.AccountPrivileges.TryGetValue(wId.Value.ToString(), out int accLvl) && accLvl == 0)
+                    {
+                        var wh = await db.Warehouses.AsNoTracking().FirstOrDefaultAsync(w => w.Id == wId.Value);
+                        string whName = !string.IsNullOrWhiteSpace(wh?.Name) ? wh.Name : "MERKEZ";
+
+                        return Results.Json(new
+                        {
+                            message = $"Access denied: you do not have permission to use warehouse '{whName}'."
+                        }, statusCode: StatusCodes.Status403Forbidden);
+                    }
+                }
+            }
+
             string groupName = GetStringProp(root, "group", "Group", "groupName", "GroupName") ?? string.Empty;
             string description = GetStringProp(root, "description", "Description") ?? string.Empty;
             bool isCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
             bool isDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
 
-            DateTimeOffset date = new DateTimeOffset(DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc), TimeSpan.Zero);
+            DateTimeOffset? clientDate = null;
             string? dateStr = GetStringProp(root, "date", "Date");
             if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate))
             {
-                date = new DateTimeOffset(DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc), TimeSpan.Zero);
+                clientDate = new DateTimeOffset(DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc), TimeSpan.Zero);
             }
 
             var tagsList = ExtractTagsFromRawJson(root);
@@ -358,7 +384,7 @@ public static class StockOrdersEndpoints
                 {
                     Id = orderId,
                     Code = code,
-                    Date = date,
+                    Date = clientDate ?? DateTimeOffset.UtcNow,
                     WarehouseId = wId,
                     PartnerId = pId,
                     UserId = uId,
@@ -387,6 +413,12 @@ public static class StockOrdersEndpoints
                 existing.Description = description;
                 existing.Tags = tagsList.ToArray();
                 existing.UpdatedAt = DateTimeOffset.UtcNow;
+
+                // ОБНОВЛЕНИЕ ДАТЫ ПРИ РЕДАКТИРОВАНИИ
+                if (clientDate.HasValue && clientDate.Value.Year >= 2000)
+                {
+                    existing.Date = clientDate.Value;
+                }
 
                 var curLines = await db.StockOrderLines.Where(l => l.StockOrderId == orderId).ToListAsync();
                 if (curLines.Any()) db.StockOrderLines.RemoveRange(curLines);

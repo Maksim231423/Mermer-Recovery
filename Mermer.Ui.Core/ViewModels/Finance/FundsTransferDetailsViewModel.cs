@@ -1,9 +1,4 @@
-﻿// Decompiled with JetBrains decompiler
-// Type: Mermer.Ui.Core.ViewModels.Finance.FundsTransferDetailsViewModel
-// Assembly: Mermer.Ui.Core, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
-// MVID: DC92D011-8413-44AC-9F10-F866D891CF66
-// Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.Ui.Core.dll
-
+﻿using Mermer.Authorization.Enums;
 using Mermer.Authorization.Services;
 using Mermer.Data.Authorizers;
 using Mermer.Data.Storage;
@@ -28,46 +23,93 @@ using System.Windows.Input;
 #nullable disable
 namespace Mermer.Ui.Core.ViewModels.Finance;
 
-public class FundsTransferDetailsViewModel(
-  IConfigurator configurator,
-  ILoginService loginService,
-  Reference<Currency> currencies,
-  Reference<Depository> depositories,
-  IRepository<FundsTransfer> repository,
-  IListAuthorizer<FundsTransfer> authorizer,
-  IMvxNavigationService navigationService,
-  ITransactionCodeGenerationService codegentor,
-  IUserInteractionService userInteractionService) : 
-  FundsTransactionDetailsViewModel<FundsTransfer, FundsTransferLine>(repository, authorizer, configurator, loginService, currencies, depositories, navigationService, codegentor, userInteractionService)
+public class FundsTransferDetailsViewModel : FundsTransactionDetailsViewModel<FundsTransfer, FundsTransferLine>
 {
+    private readonly ILoginService _loginService;
+
+    public FundsTransferDetailsViewModel(
+        IConfigurator configurator,
+        ILoginService loginService,
+        Reference<Currency> currencies,
+        Reference<Depository> depositories,
+        IRepository<FundsTransfer> repository,
+        IListAuthorizer<FundsTransfer> authorizer,
+        IMvxNavigationService navigationService,
+        ITransactionCodeGenerationService codegentor,
+        IUserInteractionService userInteractionService)
+        : base(repository, authorizer, configurator, loginService, currencies, depositories, navigationService, codegentor, userInteractionService)
+    {
+        this._loginService = loginService;
+    }
+
     protected override async Task PostLoad()
     {
-        var usedDepositoryIds = new[]
-        {
-        Details.DepositoryId,
-        Details.DestinationDepositoryId
-    }.Distinct();
-
         await base.PostLoad();
 
-        Depositories.Filter = x => !x.IsDisabled || usedDepositoryIds.Contains(x.Id);
+        // 1. Фильтрация касс по правам сессии (скрываем кассы с No Access)
+        if (this._loginService?.Session != null && !this._loginService.Session.IsAdmin && this._loginService.Session.Accounts != null)
+        {
+            var accounts = this._loginService.Session.Accounts;
+
+            Depositories.Filter = d =>
+                !d.IsDisabled &&
+                (!accounts.TryGetValue(d.Id, out var level) ||
+                 (level != AccountAccessLevel.None && (level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read))));
+        }
+        else
+        {
+            Depositories.Filter = d => !d.IsDisabled;
+        }
+
+        // 2. Для нового документа: если подставилась запрещенная касса, сбрасываем или выбираем первую разрешенную
+        if (string.IsNullOrEmpty(ItemId))
+        {
+            var allowedDepositories = Depositories?.List?.ToList();
+
+            if (!IsDepositoryAllowed(Details.DepositoryId))
+            {
+                Details.DepositoryId = allowedDepositories?.FirstOrDefault()?.Id;
+            }
+
+            if (!IsDepositoryAllowed(Details.DestinationDepositoryId))
+            {
+                Details.DestinationDepositoryId = null;
+            }
+        }
+
+        Depositories?.RaisePropertyChanged("List");
+    }
+
+    private bool IsDepositoryAllowed(string depositoryId)
+    {
+        if (string.IsNullOrEmpty(depositoryId) || this._loginService?.Session == null || this._loginService.Session.IsAdmin)
+            return true;
+
+        var accounts = this._loginService.Session.Accounts;
+        if (accounts == null || accounts.Count == 0)
+            return true;
+
+        if (accounts.TryGetValue(depositoryId, out var level))
+        {
+            return level != AccountAccessLevel.None &&
+                   (level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read));
+        }
+
+        return true;
     }
 
     public ICommand SelectDestinationDepositoryCommand
-  {
-    get
     {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnSelectDestinationDepositoryCommandAsync), (Func<bool>) (() => !this.IsBusy && this.HasSaveAccess));
+        get
+        {
+            return new MvxAsyncCommand(OnSelectDestinationDepositoryCommandAsync, () => !this.IsBusy && this.HasSaveAccess);
+        }
     }
-  }
 
-  private async Task OnSelectDestinationDepositoryCommandAsync()
-  {
-    FundsTransferDetailsViewModel detailsViewModel = this;
-    FundsTransfer fundsTransfer = detailsViewModel.Details;
-    fundsTransfer.DestinationDepositoryId = await detailsViewModel.NavigationService.Navigate<ListViewModel<Depository>, string, string>(detailsViewModel.Details.DestinationDepositoryId ?? Guid.Empty.ToString());
-    fundsTransfer = (FundsTransfer) null;
-  }
+    private async Task OnSelectDestinationDepositoryCommandAsync()
+    {
+        this.Details.DestinationDepositoryId = await this.NavigationService.Navigate<ListViewModel<Depository>, string, string>(this.Details.DestinationDepositoryId ?? Guid.Empty.ToString());
+    }
 
     protected override async Task<bool> OnSaveAsync()
     {
@@ -85,38 +127,45 @@ public class FundsTransferDetailsViewModel(
                 throw new Exception(this["Field '{0}' is required", this["Destination Depository"]]);
             }
 
-            // 3. Логическая защита: касса-отправитель и касса-получатель не могут быть одинаковыми
+            // 3. Защита: проверка прав на выбранные кассы
+            if (!IsDepositoryAllowed(Details.DepositoryId))
+            {
+                throw new Exception("You do not have permission to use the selected source depository.");
+            }
+
+            if (!IsDepositoryAllowed(Details.DestinationDepositoryId))
+            {
+                throw new Exception("You do not have permission to use the selected destination depository.");
+            }
+
+            // 4. Касса-отправитель и касса-получатель не могут совпадать
             if (Details.DepositoryId == Details.DestinationDepositoryId)
             {
                 throw new Exception(this["Source and destination depositories cannot be the same"]);
             }
 
-            // 4. Документ не может быть пустым
+            // 5. Документ не может быть пустым
             if (Details.Lines == null || !Details.Lines.Any())
             {
                 throw new Exception(this["Document cannot be empty"]);
             }
 
-            // 5. Проверка каждой строки в таблице
+            // 6. Проверка строк
             foreach (var line in Details.Lines)
             {
-                // Сумма должна быть больше нуля
                 if (line.Amount <= 0)
                     throw new Exception(this["Amount must be greater than zero"]);
 
-                // Валюта обязательна
                 if (string.IsNullOrEmpty(line.CurrencyId))
                     throw new Exception(this["Field '{0}' is required", this["Currency"]]);
             }
         }
         catch (Exception ex)
         {
-            // Выводим сообщение и блокируем сохранение
             UserInteractionService.ShowExceptionMessage(ex);
             return false;
         }
 
-        // Если всё заполнено правильно — вызываем стандартное сохранение
         return await base.OnSaveAsync();
     }
 
@@ -126,9 +175,6 @@ public class FundsTransferDetailsViewModel(
         {
             var newCurrencyId = this.Details.DisplayCurrencyId;
 
-            // =========================================================
-            // БЛОК ПРАВИЛЬНОЙ КОНВЕРТАЦИИ ФИНАНСОВ (USD <-> TMT)
-            // =========================================================
             if (this.Details.Lines != null && !string.IsNullOrEmpty(newCurrencyId))
             {
                 var targetCurrency = this.Currencies?.List?.FirstOrDefault(c => c.Id == newCurrencyId);
@@ -152,21 +198,15 @@ public class FundsTransferDetailsViewModel(
                             decimal tMult = targetRate.Multiplier;
                             decimal tDiv = targetRate.Divider;
 
-                            // Вычисляем общий коэффициент конвертации
                             decimal conversionRate = (sMult / sDiv) * (tDiv / tMult);
 
-                            // Конвертируем ОТПРАВЛЕННУЮ сумму
                             line.Amount = Math.Round(line.Amount * conversionRate, targetCurrency.Decimals);
-
-                            // ДОБАВЛЕНО: Конвертируем ПОЛУЧЕННУЮ сумму
                             line.ReceivedAmount = Math.Round(line.ReceivedAmount * conversionRate, targetCurrency.Decimals);
-
                             line.CurrencyId = newCurrencyId;
                         }
                     }
                 }
             }
-            // =========================================================
 
             System.Threading.Tasks.Task.Run(async () =>
             {
@@ -177,7 +217,6 @@ public class FundsTransferDetailsViewModel(
                     {
                         foreach (var line in this.Details.Lines)
                         {
-                            // Оповещаем UI только о существующих свойствах!
                             line.RaisePropertyChanged("Amount");
                             line.RaisePropertyChanged("ReceivedAmount");
                             line.RaisePropertyChanged("ActionTotal");

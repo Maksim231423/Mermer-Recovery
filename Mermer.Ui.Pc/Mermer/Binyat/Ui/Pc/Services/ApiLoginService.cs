@@ -6,7 +6,10 @@ using Mermer.Authorization.Enums;
 using Mermer.Authorization.Models;
 using Mermer.Core.Authorization.Services;
 using Mermer.Data.Storage;
+using Mermer.Enterprise.Models;
+using Mermer.FundsManagement.Models;
 using Mermer.Http;
+using Mermer.Ui.Core.Helpers;
 using Mermer.Ui.Pc.DTOs;
 
 namespace Mermer.Ui.Pc.Services
@@ -15,6 +18,7 @@ namespace Mermer.Ui.Pc.Services
     {
         private readonly RestClient _restClient;
         private readonly IRepository<Role> _rolesRepository;
+        private Dictionary<string, AccountAccessLevel> _cachedAccountPrivileges;
 
         public ApiLoginService(RestClient restClient, IRepository<Role> rolesRepository)
         {
@@ -53,13 +57,16 @@ namespace Mermer.Ui.Pc.Services
                     }
                 }
 
+                // Сохраняем в кэш для передачи в Session.Accounts
+                _cachedAccountPrivileges = accountPrivileges;
+
                 return new User
                 {
                     Id = apiResponse.Id,
                     Username = apiResponse.Username,
                     IsAdmin = isAdmin,
                     Roles = userRoles,
-                    AccountPrivileges = accountPrivileges // Передаем привилегии в базовый LoginService
+                    AccountPrivileges = accountPrivileges
                 };
             }
             catch (Exception ex)
@@ -71,6 +78,15 @@ namespace Mermer.Ui.Pc.Services
 
         protected override async Task<IEnumerable<Role>> GetRoles(IEnumerable<string> roleIds)
         {
+            // 1. Гарантированно наполняем Session.Accounts сразу после создания сессии
+            if (Session != null && _cachedAccountPrivileges != null)
+            {
+                Session.Accounts = new Dictionary<string, AccountAccessLevel>(_cachedAccountPrivileges, StringComparer.OrdinalIgnoreCase);
+            }
+
+            // 2. Включаем централизованную защиту на уровне Reference<T>
+            ApplyGlobalSecurityFilter();
+
             if (roleIds == null || !roleIds.Any())
                 return Enumerable.Empty<Role>();
 
@@ -97,6 +113,13 @@ namespace Mermer.Ui.Pc.Services
                         }
                     }
                     Session.Roles = mergedAuth;
+
+                    if (_cachedAccountPrivileges != null)
+                    {
+                        Session.Accounts = new Dictionary<string, AccountAccessLevel>(_cachedAccountPrivileges, StringComparer.OrdinalIgnoreCase);
+                    }
+
+                    ApplyGlobalSecurityFilter();
                 }
 
                 return matchedRoles;
@@ -105,6 +128,40 @@ namespace Mermer.Ui.Pc.Services
             {
                 var detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
                 throw new Exception(string.Format("Failed to resolve roles. Details: {0}", detail), ex);
+            }
+        }
+
+        private void ApplyGlobalSecurityFilter()
+        {
+            if (Session != null && !Session.IsAdmin && Session.Accounts != null)
+            {
+                var accounts = Session.Accounts;
+
+                // Объект скрывается ТОЛЬКО если к нему явно закрыт доступ (уровень 0 / None)
+                Func<string, bool> checkAllowed = id =>
+                {
+                    if (string.IsNullOrEmpty(id)) return true;
+
+                    if (accounts.TryGetValue(id, out var level))
+                    {
+                        // Если в правах стоит 0 (None) — скрываем
+                        return level != AccountAccessLevel.None &&
+                               (level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read));
+                    }
+
+                    // Если объекта нет в списке ограничений — он доступен по умолчанию
+                    return true;
+                };
+
+                Reference<Warehouse>.SecurityFilter = checkAllowed;
+                Reference<Depository>.SecurityFilter = checkAllowed;
+                Reference<Office>.SecurityFilter = checkAllowed;
+            }
+            else
+            {
+                Reference<Warehouse>.SecurityFilter = null;
+                Reference<Depository>.SecurityFilter = null;
+                Reference<Office>.SecurityFilter = null;
             }
         }
 

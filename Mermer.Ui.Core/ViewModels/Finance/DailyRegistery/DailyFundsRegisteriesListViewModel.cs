@@ -1,11 +1,7 @@
-﻿// Decompiled with JetBrains decompiler
-// Type: Mermer.Ui.Core.ViewModels.Finance.DailyRegistery.DailyFundsRegisteriesListViewModel
-// Assembly: Mermer.Ui.Core, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
-// MVID: DC92D011-8413-44AC-9F10-F866D891CF66
-// Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.Ui.Core.dll
-
-using MvvmCross.Core.Navigation;
+﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Plugins.Messenger;
+using Mermer.Authorization.Enums;
+using Mermer.Authorization.Services;
 using Mermer.Enterprise.Models;
 using Mermer.Finance.DailyRegistery.Models;
 using Mermer.Finance.DailyRegistery.Services;
@@ -23,56 +19,79 @@ using System.Threading.Tasks;
 #nullable disable
 namespace Mermer.Ui.Core.ViewModels.Finance.DailyRegistery;
 
-public class DailyFundsRegisteriesListViewModel : 
+public class DailyFundsRegisteriesListViewModel :
   FundsTransactionsListViewModel<DailyFundsRegistery, DailyFundsRegisteryLine>
 {
-  private readonly IReadOnlyListAuthorizer<FundsBalance> _balanceAuthorizer;
-  private bool _canViewBalance;
+    private readonly IReadOnlyListAuthorizer<FundsBalance> _balanceAuthorizer;
+    private readonly ILoginService _loginService;
+    private bool _canViewBalance;
 
-  public DailyFundsRegisteriesListViewModel(
-    IMvxMessenger messenger,
-    Reference<Depository> depositories,
-    IDailyFundsRegisteriesRepository repository,
-    IListAuthorizer<DailyFundsRegistery> authorizer,
-    IReadOnlyListAuthorizer<FundsBalance> balanceAuthorizer,
-    IMvxNavigationService navigationService,
-    IUserInteractionService userInteractionService)
-    : base(messenger, (IRepository<DailyFundsRegistery>) repository, authorizer, depositories, navigationService, userInteractionService)
-  {
-    this._balanceAuthorizer = balanceAuthorizer;
-  }
-
-  public bool CanViewBalance
-  {
-    get => this._canViewBalance;
-    set => this.SetProperty<bool>(ref this._canViewBalance, value, nameof (CanViewBalance));
-  }
-
-  protected override Task PreLoad()
-  {
-    try
+    public DailyFundsRegisteriesListViewModel(
+      IMvxMessenger messenger,
+      Reference<Depository> depositories,
+      IDailyFundsRegisteriesRepository repository,
+      IListAuthorizer<DailyFundsRegistery> authorizer,
+      IReadOnlyListAuthorizer<FundsBalance> balanceAuthorizer,
+      IMvxNavigationService navigationService,
+      IUserInteractionService userInteractionService,
+      ILoginService loginService)
+      : base(messenger, (IRepository<DailyFundsRegistery>)repository, authorizer, depositories, navigationService, userInteractionService)
     {
-      this.CanViewBalance = false;
-      this._balanceAuthorizer.Authorize();
-      this.CanViewBalance = true;
+        this._balanceAuthorizer = balanceAuthorizer;
+        this._loginService = loginService;
     }
-    catch (Exception ex)
+
+    public bool CanViewBalance
     {
+        get => this._canViewBalance;
+        set => this.SetProperty<bool>(ref this._canViewBalance, value, nameof(CanViewBalance));
     }
-    return base.PreLoad();
-  }
 
+    protected override Task PreLoad()
+    {
+        try
+        {
+            this.CanViewBalance = false;
+            this._balanceAuthorizer.Authorize();
+            this.CanViewBalance = true;
+        }
+        catch (Exception ex)
+        {
+        }
+        return base.PreLoad();
+    }
 
-  protected override async Task<IEnumerable<DailyFundsRegistery>> GetFilteredListAsync(
-    ListFilter filter)
-  {
-    return (IEnumerable<DailyFundsRegistery>) await ((IDailyFundsRegisteriesRepository) this.Repository).GetAsync(Array.Empty<Expression<Func<DailyFundsRegistery, bool>>>());
-  }
+    protected override async Task PostLoad()
+    {
+        await base.PostLoad();
 
-  protected override async Task<IEnumerable<DailyFundsRegistery>> GetFilteredListByDateAsync(
-    DateTime from,
-    DateTime till)
-  {
-    return (IEnumerable<DailyFundsRegistery>) await ((IDailyFundsRegisteriesRepository) this.Repository).GetAsync((Expression<Func<DailyFundsRegistery, bool>>) (x => x.Date >= from && x.Date < till));
-  }
+        if (this._loginService?.Session != null && !this._loginService.Session.IsAdmin && this._loginService.Session.Accounts != null)
+        {
+            var accounts = this._loginService.Session.Accounts;
+
+            this.Depositories.Filter = d =>
+                !d.IsDisabled &&
+                (!accounts.TryGetValue(d.Id, out var level) ||
+                 (level != AccountAccessLevel.None && (level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read))));
+        }
+        else
+        {
+            this.Depositories.Filter = d => !d.IsDisabled;
+        }
+
+        this.Depositories?.RaisePropertyChanged("List");
+    }
+
+    protected override async Task<IEnumerable<DailyFundsRegistery>> GetFilteredListAsync(
+      ListFilter filter)
+    {
+        return (IEnumerable<DailyFundsRegistery>)await ((IDailyFundsRegisteriesRepository)this.Repository).GetAsync(Array.Empty<Expression<Func<DailyFundsRegistery, bool>>>());
+    }
+
+    protected override async Task<IEnumerable<DailyFundsRegistery>> GetFilteredListByDateAsync(
+      DateTime from,
+      DateTime till)
+    {
+        return (IEnumerable<DailyFundsRegistery>)await ((IDailyFundsRegisteriesRepository)this.Repository).GetAsync((Expression<Func<DailyFundsRegistery, bool>>)(x => x.Date >= from && x.Date < till));
+    }
 }

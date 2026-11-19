@@ -232,18 +232,45 @@ public static class SpendingEndpoints
                 curId = defCur?.Id;
             }
 
-            Guid? userId = Guid.TryParse(GetStringProp(root, "userId", "UserId"), out var uG) ? uG : null;
+            Guid? userId = Guid.TryParse(GetStringProp(root, "userId", "UserId", "authorId", "AuthorId"), out var uG) ? uG : null;
+            string authorUserName = GetStringProp(root, "userName", "UserName", "author", "Author") ?? "admin";
 
+            if (!userId.HasValue && !string.IsNullOrEmpty(authorUserName))
+            {
+                var u = await db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Username.ToLower() == authorUserName.ToLower());
+                userId = u?.Id;
+            }
+
+            // ПРОВЕРКА ПРАВ НА КАССУ
+            if (userId.HasValue && depId.HasValue)
+            {
+                var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId.Value);
+                if (user != null && !user.IsAdmin)
+                {
+                    if (user.AccountPrivileges.TryGetValue(depId.Value.ToString(), out int accLvl) && accLvl == 0)
+                    {
+                        var dep = await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => d.Id == depId.Value);
+                        string depName = !string.IsNullOrWhiteSpace(dep?.Name) ? dep.Name : depId.Value.ToString();
+
+                        return Results.Json(new
+                        {
+                            message = $"Access denied: you do not have permission to use depository '{depName}'."
+                        }, statusCode: StatusCodes.Status403Forbidden);
+                    }
+                }
+            }
+
+            DateTime? clientDate = null;
             string? dateStr = GetStringProp(root, "date", "Date");
-            DateTime date = !string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var parsedDate)
-                ? DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc)
-                : DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
+            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate))
+            {
+                clientDate = DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc);
+            }
 
             var tagsList = ExtractTagsFromRawJson(root);
             string groupName = GetStringProp(root, "group", "Group", "groupName", "GroupName") ?? "";
             string description = GetStringProp(root, "description", "Description") ?? "";
 
-            // Сохраняем словарь существующих строк документа для защиты их валюты
             var existingLinesMap = existing?.Lines?
                 .Where(l => l.Id != Guid.Empty)
                 .ToDictionary(l => l.Id) ?? new Dictionary<Guid, ExpenseSlipLineEntity>();
@@ -259,7 +286,6 @@ public static class SpendingEndpoints
                     Guid? expId = Guid.TryParse(GetStringProp(l, "expenseId", "ExpenseId"), out var eG) ? eG : null;
                     Guid? lineCurId = Guid.TryParse(GetStringProp(l, "currencyId", "CurrencyId"), out var lcG) ? lcG : curId;
 
-                    // Если строка уже была сохранена в базе — фиксируем её исходную валюту
                     if (existingLinesMap.TryGetValue(lineId, out var oldLine) && oldLine.CurrencyId.HasValue)
                     {
                         lineCurId = oldLine.CurrencyId;
@@ -285,12 +311,12 @@ public static class SpendingEndpoints
                     {
                         Id = id,
                         Code = code,
-                        Date = date,
+                        Date = clientDate ?? DateTime.UtcNow,
                         UserId = userId,
                         DepositoryId = depId,
                         OfficeId = offId,
                         DisplayCurrencyId = curId,
-                        UserName = GetStringProp(root, "userName", "UserName") ?? "admin",
+                        UserName = authorUserName,
                         IsCompleted = GetBoolProp(root, "isCompleted", "IsCompleted"),
                         IsDisabled = GetBoolProp(root, "isDisabled", "IsDisabled"),
                         GroupName = groupName,
@@ -308,14 +334,19 @@ public static class SpendingEndpoints
                     existing.UserId = userId;
                     existing.DepositoryId = depId;
                     existing.OfficeId = offId;
-                    // Не перезаписываем DisplayCurrencyId при редактировании
-                    existing.UserName = GetStringProp(root, "userName", "UserName") ?? existing.UserName;
+                    existing.UserName = authorUserName;
                     existing.IsCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
                     existing.IsDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
                     existing.GroupName = groupName;
                     existing.Description = description;
                     existing.Tags = tagsList.ToArray();
                     existing.UpdatedAt = DateTime.UtcNow;
+
+                    // ИСПРАВЛЕНИЕ: сохранение изменённой даты
+                    if (clientDate.HasValue && clientDate.Value.Year >= 2000)
+                    {
+                        existing.Date = clientDate.Value;
+                    }
 
                     if (existing.Lines != null && existing.Lines.Any())
                     {

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -27,7 +28,7 @@ public static class FinanceEndpoints
     public static void MapFinanceEndpoints(this IEndpointRouteBuilder routes)
     {
         // =========================================================================
-        // 1. СПИСОК ДЛЯ COMMERCE (BILLS) С ПАГИНАЦИЕЙ
+        // 1. СПИСОК ДЛЯ COMMERCE (BILLS)
         // =========================================================================
         Func<DateTime?, DateTime?, string?, string?, int?, int?, MermerDbContext, CancellationToken, Task<IResult>> getBillsHandler =
             async (from, till, depositoryId, partnerId, limit, offset, db, ct) =>
@@ -74,12 +75,12 @@ public static class FinanceEndpoints
                 if (Guid.TryParse(partnerId, out var partGuid))
                     query = query.Where(s => s.PartnerId == partGuid);
 
-                // Загружаем полные сущности со строками Lines без урезания через промежуточный Select
                 var rawSlips = await query
                     .OrderByDescending(s => s.Date)
                     .Skip(skip)
                     .Take(take)
                     .Include(s => s.Lines)
+                    .Include(s => s.User)
                     .AsSplitQuery()
                     .ToListAsync(ct);
 
@@ -87,7 +88,6 @@ public static class FinanceEndpoints
                                       ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => !c.IsDisabled, ct);
                 var defaultCurrencyId = defaultCurrency?.Id.ToString();
 
-                // Загружаем актуальные курсы валют
                 var allConvertions = await GetCurrencyConvertionsAsync(db, DateTime.UtcNow, ct);
 
                 var result = rawSlips.Select(s =>
@@ -100,6 +100,7 @@ public static class FinanceEndpoints
                     int billTypeInt = isPayment ? 1 : 0;
                     var docCurrencyId = s.DisplayCurrencyId?.ToString() ?? defaultCurrencyId;
                     decimal totalAmount = s.Lines != null && s.Lines.Any() ? s.Lines.Sum(l => l.Amount) : 0m;
+                    string authorName = s.User != null ? s.User.Username : (!string.IsNullOrEmpty(s.UserName) ? s.UserName : "admin");
 
                     return new
                     {
@@ -113,10 +114,11 @@ public static class FinanceEndpoints
                         OfficeId = s.OfficeId?.ToString(),
                         DepositoryId = s.DepositoryId?.ToString(),
                         PartnerId = s.PartnerId?.ToString(),
+                        UserId = s.UserId?.ToString(),
                         DisplayCurrencyId = docCurrencyId,
                         CurrencyId = docCurrencyId,
                         CurrencyConvertions = allConvertions,
-                        UserName = s.UserName,
+                        UserName = authorName,
                         IsCompleted = s.IsCompleted,
                         IsDisabled = s.IsDisabled,
                         Group = s.Group ?? string.Empty,
@@ -145,7 +147,7 @@ public static class FinanceEndpoints
             };
 
         // =========================================================================
-        // 2. СПИСОК ДЛЯ FINANCE (FUNDS SLIPS) С ПАГИНАЦИЕЙ
+        // 2. СПИСОК ДЛЯ FINANCE (FUNDS SLIPS)
         // =========================================================================
         Func<DateTime?, DateTime?, string?, string?, int?, int?, MermerDbContext, CancellationToken, Task<IResult>> getFundsSlipsHandler =
             async (from, till, depositoryId, partnerId, limit, offset, db, ct) =>
@@ -163,7 +165,6 @@ public static class FinanceEndpoints
                     DateTime tDt;
                     if (till.Value.TimeOfDay == TimeSpan.Zero)
                     {
-                        // Если till больше from (клиент уже передал полночь следующего дня) — не накидываем лишние сутки
                         if (from.HasValue && till.Value.Date > from.Value.Date)
                             tDt = till.Value.AddTicks(-1);
                         else
@@ -173,7 +174,6 @@ public static class FinanceEndpoints
                     {
                         tDt = till.Value;
                     }
-
                     endDate = DateTime.SpecifyKind(tDt, DateTimeKind.Utc);
                 }
                 else
@@ -206,6 +206,7 @@ public static class FinanceEndpoints
                     .Skip(skip)
                     .Take(take)
                     .Include(s => s.Lines)
+                    .Include(s => s.User)
                     .AsSplitQuery()
                     .ToListAsync(ct);
 
@@ -220,6 +221,7 @@ public static class FinanceEndpoints
 
                     var docCurrencyId = s.DisplayCurrencyId?.ToString() ?? defaultCurrencyId;
                     decimal totalAmount = s.Lines != null && s.Lines.Any() ? s.Lines.Sum(l => l.Amount) : 0m;
+                    string authorName = s.User != null ? s.User.Username : (!string.IsNullOrEmpty(s.UserName) ? s.UserName : "admin");
 
                     return new
                     {
@@ -233,10 +235,11 @@ public static class FinanceEndpoints
                         OfficeId = s.OfficeId?.ToString(),
                         DepositoryId = s.DepositoryId?.ToString(),
                         PartnerId = s.PartnerId?.ToString(),
+                        UserId = s.UserId?.ToString(),
                         DisplayCurrencyId = docCurrencyId,
                         CurrencyId = docCurrencyId,
                         CurrencyConvertions = allConvertions,
-                        UserName = s.UserName,
+                        UserName = authorName,
                         IsCompleted = s.IsCompleted,
                         IsDisabled = s.IsDisabled,
                         Group = s.Group ?? string.Empty,
@@ -281,7 +284,6 @@ public static class FinanceEndpoints
 
             var existing = await db.FundsSlips.Include(s => s.Lines).FirstOrDefaultAsync(s => s.Id == slipId);
 
-            // Фиксируем исходные валюты существующих строк
             var existingLinesMap = existing?.Lines?
                 .Where(l => l.Id != Guid.Empty)
                 .ToDictionary(l => l.Id) ?? new Dictionary<Guid, FundsSlipLineEntity>();
@@ -294,6 +296,36 @@ public static class FinanceEndpoints
             {
                 var defDep = await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => !d.IsDisabled);
                 depId = defDep?.Id;
+            }
+
+            // ОПРЕДЕЛЕНИЕ АВТОРА
+            string? uIdStr = GetStringProperty(root, "userId", "UserId", "authorId", "AuthorId");
+            Guid? authorUserId = Guid.TryParse(uIdStr, out var parsedU) && parsedU != Guid.Empty ? parsedU : null;
+            string authorUserName = GetStringProperty(root, "userName", "UserName", "author", "Author") ?? "admin";
+
+            if (!authorUserId.HasValue && !string.IsNullOrEmpty(authorUserName))
+            {
+                var u = await db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Username.ToLower() == authorUserName.ToLower());
+                authorUserId = u?.Id;
+            }
+
+            // ПРОВЕРКА ПРАВ НА КАССУ (DEPOSITORY)
+            if (authorUserId.HasValue && depId.HasValue)
+            {
+                var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == authorUserId.Value);
+                if (user != null && !user.IsAdmin)
+                {
+                    if (user.AccountPrivileges.TryGetValue(depId.Value.ToString(), out int accessLevel) && accessLevel == 0)
+                    {
+                        var dep = await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => d.Id == depId.Value);
+                        string depName = !string.IsNullOrWhiteSpace(dep?.Name) ? dep.Name : depId.Value.ToString();
+
+                        return Results.Json(new
+                        {
+                            message = $"Access denied: you do not have permission to use depository '{depName}'."
+                        }, statusCode: StatusCodes.Status403Forbidden);
+                    }
+                }
             }
 
             string? partIdStr = GetStringProperty(root, "partnerId", "PartnerId");
@@ -327,11 +359,11 @@ public static class FinanceEndpoints
                 dispCurId = defCur?.Id;
             }
 
-            DateTime date = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
+            DateTime? clientDate = null;
             string? dateStr = GetStringProperty(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var parsedDate))
+            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedDate))
             {
-                date = DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc);
+                clientDate = DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc);
             }
 
             string rawType = GetStringProperty(root, "fundsSlipType", "FundsSlipType", "billType", "BillType", "slipType", "SlipType", "type", "Type") ?? "FundsOpening";
@@ -349,7 +381,6 @@ public static class FinanceEndpoints
                     string? curIdStr = GetStringProperty(lineJson, "currencyId", "CurrencyId");
                     Guid? currencyGuid = Guid.TryParse(curIdStr, out var cG) && cG != Guid.Empty ? cG : dispCurId;
 
-                    // Если строка уже была в документе — сохраняем её оригинальную валюту
                     if (existingLinesMap.TryGetValue(lineGuid, out var oldLine) && oldLine.CurrencyId.HasValue)
                     {
                         currencyGuid = oldLine.CurrencyId;
@@ -390,7 +421,7 @@ public static class FinanceEndpoints
                 {
                     Id = slipId,
                     Code = code,
-                    Date = date,
+                    Date = clientDate ?? DateTime.UtcNow,
                     FundsSlipType = rawType,
                     DepositoryId = depId,
                     PartnerId = partId,
@@ -398,7 +429,8 @@ public static class FinanceEndpoints
                     DisplayCurrencyId = dispCurId,
                     IsCompleted = GetBoolProperty(root, "isCompleted", "IsCompleted"),
                     IsDisabled = GetBoolProperty(root, "isDisabled", "IsDisabled"),
-                    UserName = GetStringProperty(root, "userName", "UserName") ?? "admin",
+                    UserId = authorUserId,
+                    UserName = authorUserName,
                     Group = GetStringProperty(root, "group", "Group") ?? "",
                     Description = GetStringProperty(root, "description", "Description") ?? "",
                     Tags = tagsList.ToArray(),
@@ -415,13 +447,20 @@ public static class FinanceEndpoints
                 existing.DepositoryId = depId;
                 existing.PartnerId = partId;
                 existing.OfficeId = offId;
-                // Не перезаписываем DisplayCurrencyId
                 existing.IsCompleted = GetBoolProperty(root, "isCompleted", "IsCompleted");
                 existing.IsDisabled = GetBoolProperty(root, "isDisabled", "IsDisabled");
                 existing.Group = GetStringProperty(root, "group", "Group") ?? "";
                 existing.Tags = tagsList.ToArray();
                 existing.Description = GetStringProperty(root, "description", "Description") ?? "";
                 existing.UpdatedAt = DateTime.UtcNow;
+
+                // ОБНОВЛЕНИЕ ДАТЫ И АВТОРА
+                if (clientDate.HasValue && clientDate.Value.Year >= 2000)
+                {
+                    existing.Date = clientDate.Value;
+                }
+                if (authorUserId.HasValue) existing.UserId = authorUserId;
+                if (!string.IsNullOrEmpty(authorUserName)) existing.UserName = authorUserName;
 
                 if (existing.Lines != null) db.FundsSlipLines.RemoveRange(existing.Lines);
                 existing.Lines = linesList;
@@ -457,20 +496,9 @@ public static class FinanceEndpoints
 
             if (till.HasValue && till.Value.Year < 2099)
             {
-                DateTime tDt;
-                if (till.Value.TimeOfDay == TimeSpan.Zero)
-                {
-                    // Если from и till одинаковые (один день) — берем до конца этого дня.
-                    // Если till больше from (клиент уже передал полночь следующего дня) — не прибавляем лишний день!
-                    if (from.HasValue && till.Value.Date > from.Value.Date)
-                        tDt = till.Value.AddTicks(-1);
-                    else
-                        tDt = till.Value.Date.AddDays(1).AddTicks(-1);
-                }
-                else
-                {
-                    tDt = till.Value;
-                }
+                DateTime tDt = till.Value.TimeOfDay == TimeSpan.Zero
+                    ? (from.HasValue && till.Value.Date > from.Value.Date ? till.Value.AddTicks(-1) : till.Value.Date.AddDays(1).AddTicks(-1))
+                    : till.Value;
 
                 var tUtc = DateTime.SpecifyKind(tDt, DateTimeKind.Utc);
                 query = query.Where(s => s.Date <= tUtc);
@@ -487,12 +515,11 @@ public static class FinanceEndpoints
 
         financeGroup.MapGet("/slips/facets", async (string? fields, MermerDbContext db, CancellationToken ct) =>
         {
-            var today = DateTime.Today; // 18.11.2026
+            var today = DateTime.Today;
             var todayStart = DateTime.SpecifyKind(today, DateTimeKind.Utc);
             var tomorrowStart = todayStart.AddDays(1);
             var yesterdayStart = todayStart.AddDays(-1);
 
-            // Начало текущей недели (понедельник)
             int diff = (7 + (today.DayOfWeek - DayOfWeek.Monday)) % 7;
             var weekStart = DateTime.SpecifyKind(today.AddDays(-1 * diff), DateTimeKind.Utc);
             var pastWeekStart = weekStart.AddDays(-7);
@@ -503,7 +530,6 @@ public static class FinanceEndpoints
             var baseQuery = db.FundsSlips.AsNoTracking().Where(s => !s.IsDisabled && s.FundsSlipType != null &&
                 (s.FundsSlipType.ToLower().Contains("opening") || s.FundsSlipType.ToLower().Contains("revision")));
 
-            // Считаем строго каждый интервал без наложений
             var countToday = await baseQuery.CountAsync(s => s.Date >= todayStart && s.Date < tomorrowStart, ct);
             var countYesterday = await baseQuery.CountAsync(s => s.Date >= yesterdayStart && s.Date < todayStart, ct);
             var countWeek = await baseQuery.CountAsync(s => s.Date >= weekStart && s.Date < tomorrowStart, ct);
@@ -525,7 +551,7 @@ public static class FinanceEndpoints
                 ["Date"] = new Dictionary<string, int>
                 {
                     { "#Today", countToday },
-                    { "#Yesturday", countYesterday }, // Ключ с буквой 'u' для совместимости с WPF-клиентом
+                    { "#Yesturday", countYesterday },
                     { "#Yesterday", countYesterday },
                     { "#This Week", countWeek },
                     { "#Past Week", countPastWeek },
@@ -539,7 +565,10 @@ public static class FinanceEndpoints
         financeGroup.MapGet("/slips/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
         {
             if (!Guid.TryParse(id, out var guid)) return Results.NotFound();
-            var s = await db.FundsSlips.Include(x => x.Lines).FirstOrDefaultAsync(x => x.Id == guid, ct);
+            var s = await db.FundsSlips
+                .Include(x => x.Lines)
+                .Include(x => x.User)
+                .FirstOrDefaultAsync(x => x.Id == guid, ct);
             if (s == null) return Results.NotFound();
 
             var convertions = await GetCurrencyConvertionsAsync(db, s.Date, ct);
@@ -552,6 +581,7 @@ public static class FinanceEndpoints
 
             decimal totalAmount = s.Lines != null && s.Lines.Any() ? s.Lines.Sum(l => l.Amount) : 0m;
             var docCurrencyId = s.DisplayCurrencyId?.ToString() ?? (await db.Currencies.FirstOrDefaultAsync(c => c.IsDefault))?.Id.ToString();
+            string authorName = s.User != null ? s.User.Username : (!string.IsNullOrEmpty(s.UserName) ? s.UserName : "admin");
 
             return Results.Ok(new
             {
@@ -565,10 +595,11 @@ public static class FinanceEndpoints
                 OfficeId = s.OfficeId?.ToString(),
                 DepositoryId = s.DepositoryId?.ToString(),
                 PartnerId = s.PartnerId?.ToString(),
+                UserId = s.UserId?.ToString(),
                 DisplayCurrencyId = docCurrencyId,
                 CurrencyId = docCurrencyId,
                 CurrencyConvertions = convertions,
-                UserName = s.UserName,
+                UserName = authorName,
                 IsCompleted = s.IsCompleted,
                 IsDisabled = s.IsDisabled,
                 Group = s.Group ?? string.Empty,
@@ -602,7 +633,6 @@ public static class FinanceEndpoints
 
         billsGroup.MapGet("/count", async (DateTime? from, DateTime? till, string? depositoryId, string? partnerId, MermerDbContext db, CancellationToken ct) =>
         {
-            // Убираем !s.IsDisabled, чтобы удаленные записи учитывались так же, как в общем списке
             var query = db.FundsSlips.AsNoTracking();
 
             query = query.Where(s => s.FundsSlipType != null &&
@@ -618,19 +648,9 @@ public static class FinanceEndpoints
 
             if (till.HasValue && till.Value.Year < 2099)
             {
-                DateTime tDt;
-                if (till.Value.TimeOfDay == TimeSpan.Zero)
-                {
-                    // Если till больше from (клиент уже передал полночь следующего дня) — не накидываем лишние сутки!
-                    if (from.HasValue && till.Value.Date > from.Value.Date)
-                        tDt = till.Value.AddTicks(-1);
-                    else
-                        tDt = till.Value.Date.AddDays(1).AddTicks(-1);
-                }
-                else
-                {
-                    tDt = till.Value;
-                }
+                DateTime tDt = till.Value.TimeOfDay == TimeSpan.Zero
+                    ? (from.HasValue && till.Value.Date > from.Value.Date ? till.Value.AddTicks(-1) : till.Value.Date.AddDays(1).AddTicks(-1))
+                    : till.Value;
 
                 var tUtc = DateTime.SpecifyKind(tDt, DateTimeKind.Utc);
                 query = query.Where(s => s.Date <= tUtc);
@@ -659,7 +679,6 @@ public static class FinanceEndpoints
             var tomorrowStart = todayStart.AddDays(1);
             var yesterdayStart = todayStart.AddDays(-1);
 
-            // Начало текущей недели (понедельник)
             int diff = (7 + (today.DayOfWeek - DayOfWeek.Monday)) % 7;
             var weekStart = DateTime.SpecifyKind(today.AddDays(-1 * diff), DateTimeKind.Utc);
             var pastWeekStart = weekStart.AddDays(-7);
@@ -667,14 +686,11 @@ public static class FinanceEndpoints
             var monthStart = DateTime.SpecifyKind(new DateTime(today.Year, today.Month, 1), DateTimeKind.Utc);
             var pastMonthStart = monthStart.AddMonths(-1);
 
-            // Базовый запрос для ордеров оплат/поступлений (Bills)
-            // Убираем !s.IsDisabled, чтобы счетчики соответствовали отображению таблицы
             var baseQuery = db.FundsSlips.AsNoTracking().Where(s => s.FundsSlipType != null &&
                 (s.FundsSlipType.ToLower() == "payment" ||
                  s.FundsSlipType.ToLower() == "collection" ||
                  s.FundsSlipType.ToLower() == "expense"));
 
-            // Считаем строго каждый интервал без наложений
             var countToday = await baseQuery.CountAsync(s => s.Date >= todayStart && s.Date < tomorrowStart, ct);
             var countYesterday = await baseQuery.CountAsync(s => s.Date >= yesterdayStart && s.Date < todayStart, ct);
             var countWeek = await baseQuery.CountAsync(s => s.Date >= weekStart && s.Date < tomorrowStart, ct);
@@ -694,23 +710,26 @@ public static class FinanceEndpoints
                 ["TagNames"] = tags,
                 ["Tag"] = tags,
                 ["Date"] = new Dictionary<string, int>
-        {
-            { "#Today", countToday },
-            { "#Yesturday", countYesterday }, // для совместимости со старыми ресурсами UI
-            { "#Yesterday", countYesterday },
-            { "#This Week", countWeek },
-            { "#Past Week", countPastWeek },
-            { "#This Month", countMonth },
-            { "#Past Month", countPastMonth },
-            { "#All Records", countAll }
-        }
+                {
+                    { "#Today", countToday },
+                    { "#Yesturday", countYesterday },
+                    { "#Yesterday", countYesterday },
+                    { "#This Week", countWeek },
+                    { "#Past Week", countPastWeek },
+                    { "#This Month", countMonth },
+                    { "#Past Month", countPastMonth },
+                    { "#All Records", countAll }
+                }
             });
         });
 
         billsGroup.MapGet("/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
         {
             if (!Guid.TryParse(id, out var guid)) return Results.NotFound();
-            var s = await db.FundsSlips.Include(x => x.Lines).FirstOrDefaultAsync(x => x.Id == guid, ct);
+            var s = await db.FundsSlips
+                .Include(x => x.Lines)
+                .Include(x => x.User)
+                .FirstOrDefaultAsync(x => x.Id == guid, ct);
             if (s == null) return Results.NotFound();
 
             var convertions = await GetCurrencyConvertionsAsync(db, s.Date, ct);
@@ -720,6 +739,7 @@ public static class FinanceEndpoints
 
             decimal totalAmount = s.Lines != null && s.Lines.Any() ? s.Lines.Sum(l => l.Amount) : 0m;
             var docCurrencyId = s.DisplayCurrencyId?.ToString() ?? (await db.Currencies.FirstOrDefaultAsync(c => c.IsDefault))?.Id.ToString();
+            string authorName = s.User != null ? s.User.Username : (!string.IsNullOrEmpty(s.UserName) ? s.UserName : "admin");
 
             return Results.Ok(new
             {
@@ -733,10 +753,11 @@ public static class FinanceEndpoints
                 OfficeId = s.OfficeId?.ToString(),
                 DepositoryId = s.DepositoryId?.ToString(),
                 PartnerId = s.PartnerId?.ToString(),
+                UserId = s.UserId?.ToString(),
                 DisplayCurrencyId = docCurrencyId,
                 CurrencyId = docCurrencyId,
                 CurrencyConvertions = convertions,
-                UserName = s.UserName,
+                UserName = authorName,
                 IsCompleted = s.IsCompleted,
                 IsDisabled = s.IsDisabled,
                 Group = s.Group ?? string.Empty,
@@ -760,7 +781,7 @@ public static class FinanceEndpoints
         });
 
         // =========================================================================
-        // 6. РОУТЫ FUNDS TRANSFERS С ПАГИНАЦИЕЙ
+        // 6. РОУТЫ FUNDS TRANSFERS
         // =========================================================================
         var transferGroup = routes.MapGroup("/api/finance/transfers").WithTags("FundsTransfers");
 
@@ -774,7 +795,6 @@ public static class FinanceEndpoints
             var monthStart = new DateTime(todayLocal.Year, todayLocal.Month, 1, 0, 0, 0, DateTimeKind.Utc);
             var yearStart = new DateTime(todayLocal.Year, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
-            // Подсчет переводов с любым расхождением сумм отправлено/получено (включая удаленные)
             var countConflicted = await db.FundsTransfers
                 .AsNoTracking()
                 .Where(t => t.Lines.Sum(l => l.Amount) != t.Lines.Sum(l => l.ReceivedAmount))
@@ -795,14 +815,14 @@ public static class FinanceEndpoints
                 ["TagNames"] = tags,
                 ["Tag"] = tags,
                 ["Date"] = new Dictionary<string, int>
-        {
-            { "#Conflicted", countConflicted },
-            { "#Today", countToday },
-            { "#This Week", countWeek },
-            { "#This Month", countMonth },
-            { "#This Year", countYear },
-            { "#All Records", countAll }
-        }
+                {
+                    { "#Conflicted", countConflicted },
+                    { "#Today", countToday },
+                    { "#This Week", countWeek },
+                    { "#This Month", countMonth },
+                    { "#This Year", countYear },
+                    { "#All Records", countAll }
+                }
             });
         });
 
@@ -859,19 +879,9 @@ public static class FinanceEndpoints
             DateTime endDate;
             if (till.HasValue && till.Value.Year < 2099)
             {
-                DateTime tDt;
-                if (till.Value.TimeOfDay == TimeSpan.Zero)
-                {
-                    if (from.HasValue && till.Value.Date > from.Value.Date)
-                        tDt = till.Value.AddTicks(-1);
-                    else
-                        tDt = till.Value.Date.AddDays(1).AddTicks(-1);
-                }
-                else
-                {
-                    tDt = till.Value;
-                }
-
+                DateTime tDt = till.Value.TimeOfDay == TimeSpan.Zero
+                    ? (from.HasValue && till.Value.Date > from.Value.Date ? till.Value.AddTicks(-1) : till.Value.Date.AddDays(1).AddTicks(-1))
+                    : till.Value;
                 endDate = DateTime.SpecifyKind(tDt, DateTimeKind.Utc);
             }
             else
@@ -884,7 +894,6 @@ public static class FinanceEndpoints
             var defaultCurrencyId = defaultCurrency?.Id.ToString();
             var allConvertions = await GetCurrencyConvertionsAsync(db, DateTime.UtcNow, ct);
 
-            // ИСПРАВЛЕНИЕ: Убрали && !t.IsDisabled, чтобы удаленные записи отдавались в таблицу
             var transferQuery = db.FundsTransfers
                 .AsNoTracking()
                 .Where(t => t.Date >= startDate && t.Date <= endDate);
@@ -910,6 +919,7 @@ public static class FinanceEndpoints
                 .Skip(skip)
                 .Take(take)
                 .Include(t => t.Lines)
+                .Include(t => t.User)
                 .AsSplitQuery()
                 .ToListAsync(ct);
 
@@ -919,6 +929,7 @@ public static class FinanceEndpoints
                 decimal totalReceived = t.Lines != null && t.Lines.Any() ? t.Lines.Sum(l => l.ReceivedAmount) : 0m;
                 var docCurrencyId = t.DisplayCurrencyId?.ToString() ?? defaultCurrencyId;
                 bool isConflicted = totalSent != totalReceived;
+                string authorName = t.User != null ? t.User.Username : (!string.IsNullOrEmpty(t.UserName) ? t.UserName : "admin");
 
                 return new
                 {
@@ -931,7 +942,8 @@ public static class FinanceEndpoints
                     DisplayCurrencyId = docCurrencyId,
                     CurrencyId = docCurrencyId,
                     CurrencyConvertions = allConvertions,
-                    UserName = t.UserName,
+                    UserId = t.UserId?.ToString(),
+                    UserName = authorName,
                     IsCompleted = t.IsCompleted,
                     IsDisabled = t.IsDisabled,
                     IsConflicted = isConflicted,
@@ -959,7 +971,10 @@ public static class FinanceEndpoints
 
         transferGroup.MapGet("/{id:guid}", async (Guid id, MermerDbContext db, CancellationToken ct) =>
         {
-            var t = await db.FundsTransfers.Include(x => x.Lines).FirstOrDefaultAsync(x => x.Id == id, ct);
+            var t = await db.FundsTransfers
+                .Include(x => x.Lines)
+                .Include(x => x.User)
+                .FirstOrDefaultAsync(x => x.Id == id, ct);
             if (t == null) return Results.NotFound();
 
             var convertions = await GetCurrencyConvertionsAsync(db, t.Date, ct);
@@ -967,6 +982,7 @@ public static class FinanceEndpoints
             decimal totalSent = t.Lines != null && t.Lines.Any() ? t.Lines.Sum(l => l.Amount) : 0m;
             decimal totalReceived = t.Lines != null && t.Lines.Any() ? t.Lines.Sum(l => l.ReceivedAmount) : 0m;
             bool isConflicted = totalSent != totalReceived;
+            string authorName = t.User != null ? t.User.Username : (!string.IsNullOrEmpty(t.UserName) ? t.UserName : "admin");
 
             return Results.Ok(new
             {
@@ -979,7 +995,8 @@ public static class FinanceEndpoints
                 DisplayCurrencyId = docCurrencyId,
                 CurrencyId = docCurrencyId,
                 CurrencyConvertions = convertions,
-                UserName = t.UserName,
+                UserId = t.UserId?.ToString(),
+                UserName = authorName,
                 IsCompleted = t.IsCompleted,
                 IsDisabled = t.IsDisabled,
                 IsConflicted = isConflicted,
@@ -1027,13 +1044,53 @@ public static class FinanceEndpoints
             string? toDepIdStr = GetStringProperty(root, "destinationDepositoryId", "DestinationDepositoryId", "toDepositoryId", "ToDepositoryId");
             Guid? toDepId = Guid.TryParse(toDepIdStr, out var pToDep) ? pToDep : null;
 
+            // ОПРЕДЕЛЕНИЕ АВТОРА
+            string? uIdStr = GetStringProperty(root, "userId", "UserId", "authorId", "AuthorId");
+            Guid? authorUserId = Guid.TryParse(uIdStr, out var parsedU) && parsedU != Guid.Empty ? parsedU : null;
+            string authorUserName = GetStringProperty(root, "userName", "UserName", "author", "Author") ?? "admin";
+
+            if (!authorUserId.HasValue && !string.IsNullOrEmpty(authorUserName))
+            {
+                var u = await db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Username.ToLower() == authorUserName.ToLower());
+                authorUserId = u?.Id;
+            }
+
+            // ПРОВЕРКА ПРАВ НА КАССЫ ДЛЯ ПЕРЕВОДА
+            if (authorUserId.HasValue)
+            {
+                var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == authorUserId.Value);
+                if (user != null && !user.IsAdmin)
+                {
+                    if (fromDepId.HasValue && user.AccountPrivileges.TryGetValue(fromDepId.Value.ToString(), out int srcAcc) && srcAcc == 0)
+                    {
+                        var srcDep = await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => d.Id == fromDepId.Value);
+                        string srcDepName = !string.IsNullOrWhiteSpace(srcDep?.Name) ? srcDep.Name : fromDepId.Value.ToString();
+
+                        return Results.Json(new
+                        {
+                            message = $"Access denied: you do not have permission to use depository '{srcDepName}'."
+                        }, statusCode: StatusCodes.Status403Forbidden);
+                    }
+                    if (toDepId.HasValue && user.AccountPrivileges.TryGetValue(toDepId.Value.ToString(), out int dstAcc) && dstAcc == 0)
+                    {
+                        var dstDep = await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => d.Id == toDepId.Value);
+                        string dstDepName = !string.IsNullOrWhiteSpace(dstDep?.Name) ? dstDep.Name : toDepId.Value.ToString();
+
+                        return Results.Json(new
+                        {
+                            message = $"Access denied: you do not have permission to use depository '{dstDepName}'."
+                        }, statusCode: StatusCodes.Status403Forbidden);
+                    }
+                }
+            }
+
             string? dispCurStr = GetStringProperty(root, "displayCurrencyId", "DisplayCurrencyId", "currencyId", "CurrencyId");
             Guid? dispCurId = Guid.TryParse(dispCurStr, out var pCur) ? pCur : null;
 
-            DateTime date = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
+            DateTime? clientDate = null;
             string? dateStr = GetStringProperty(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var pDate))
-                date = DateTime.SpecifyKind(pDate, DateTimeKind.Utc);
+            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var pDate))
+                clientDate = DateTime.SpecifyKind(pDate, DateTimeKind.Utc);
 
             var tagsList = ExtractTagsFromRawJson(root);
 
@@ -1075,13 +1132,14 @@ public static class FinanceEndpoints
                 {
                     Id = transferId,
                     Code = code,
-                    Date = date,
+                    Date = clientDate ?? DateTime.UtcNow,
                     FromDepositoryId = fromDepId,
                     ToDepositoryId = toDepId,
                     DisplayCurrencyId = dispCurId,
-                    IsCompleted = GetBoolProperty(root, "isCompleted", "IsCompleted"),
-                    IsDisabled = GetBoolProperty(root, "isDisabled", "IsDisabled"),
-                    UserName = GetStringProperty(root, "userName", "UserName") ?? "admin",
+                    IsCompleted = GetBoolProp(root, "isCompleted", "IsCompleted"),
+                    IsDisabled = GetBoolProp(root, "isDisabled", "IsDisabled"),
+                    UserId = authorUserId,
+                    UserName = authorUserName,
                     Group = GetStringProperty(root, "group", "Group") ?? "",
                     Tags = tagsList.ToArray(),
                     Description = GetStringProperty(root, "description", "Description") ?? "",
@@ -1096,13 +1154,20 @@ public static class FinanceEndpoints
                 existing.Code = code;
                 existing.FromDepositoryId = fromDepId;
                 existing.ToDepositoryId = toDepId;
-                // Не перезаписываем DisplayCurrencyId
-                existing.IsCompleted = GetBoolProperty(root, "isCompleted", "IsCompleted");
-                existing.IsDisabled = GetBoolProperty(root, "isDisabled", "IsDisabled");
+                existing.IsCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
+                existing.IsDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
                 existing.Group = GetStringProperty(root, "group", "Group") ?? "";
                 existing.Tags = tagsList.ToArray();
                 existing.Description = GetStringProperty(root, "description", "Description") ?? "";
                 existing.UpdatedAt = DateTime.UtcNow;
+
+                // ОБНОВЛЕНИЕ ДАТЫ И АВТОРА
+                if (clientDate.HasValue && clientDate.Value.Year >= 2000)
+                {
+                    existing.Date = clientDate.Value;
+                }
+                if (authorUserId.HasValue) existing.UserId = authorUserId;
+                if (!string.IsNullOrEmpty(authorUserName)) existing.UserName = authorUserName;
 
                 if (existing.Lines != null) db.FundsTransferLines.RemoveRange(existing.Lines);
                 existing.Lines = linesList;
@@ -1115,6 +1180,7 @@ public static class FinanceEndpoints
 
         transferGroup.MapPost("", saveTransferHandler);
         transferGroup.MapPut("/{id:guid}", saveTransferHandler);
+
         // =========================================================================
         // 7. РОУТЫ DAILY FUNDS REGISTRIES
         // =========================================================================
@@ -1132,18 +1198,9 @@ public static class FinanceEndpoints
             DateTime endDate;
             if (till.HasValue && till.Value.Year < 2099)
             {
-                DateTime tDt;
-                if (till.Value.TimeOfDay == TimeSpan.Zero)
-                {
-                    if (from.HasValue && till.Value.Date > from.Value.Date)
-                        tDt = till.Value.AddTicks(-1);
-                    else
-                        tDt = till.Value.Date.AddDays(1).AddTicks(-1);
-                }
-                else
-                {
-                    tDt = till.Value;
-                }
+                DateTime tDt = till.Value.TimeOfDay == TimeSpan.Zero
+                    ? (from.HasValue && till.Value.Date > from.Value.Date ? till.Value.AddTicks(-1) : till.Value.Date.AddDays(1).AddTicks(-1))
+                    : till.Value;
                 endDate = DateTime.SpecifyKind(tDt, DateTimeKind.Utc);
             }
             else
@@ -1175,6 +1232,7 @@ public static class FinanceEndpoints
             {
                 decimal total = r.Lines != null && r.Lines.Any() ? r.Lines.Sum(l => l.Amount) : 0m;
                 var docCurrencyId = r.DisplayCurrencyId?.ToString() ?? defaultCurrencyId;
+                string authorName = !string.IsNullOrEmpty(r.UserName) ? r.UserName : "admin";
 
                 return new
                 {
@@ -1187,7 +1245,7 @@ public static class FinanceEndpoints
                     CurrencyId = docCurrencyId,
                     CurrencyConvertions = allConvertions,
                     UserId = r.UserId?.ToString(),
-                    UserName = r.UserName,
+                    UserName = authorName,
                     IsCompleted = r.IsCompleted,
                     IsDisabled = r.IsDisabled,
                     Group = r.GroupName ?? string.Empty,
@@ -1205,7 +1263,6 @@ public static class FinanceEndpoints
                     }).ToList() : new List<object>()
                 };
             });
-
             return Results.Ok(result);
         });
 
@@ -1221,18 +1278,9 @@ public static class FinanceEndpoints
 
             if (till.HasValue && till.Value.Year < 2099)
             {
-                DateTime tDt;
-                if (till.Value.TimeOfDay == TimeSpan.Zero)
-                {
-                    if (from.HasValue && till.Value.Date > from.Value.Date)
-                        tDt = till.Value.AddTicks(-1);
-                    else
-                        tDt = till.Value.Date.AddDays(1).AddTicks(-1);
-                }
-                else
-                {
-                    tDt = till.Value;
-                }
+                DateTime tDt = till.Value.TimeOfDay == TimeSpan.Zero
+                    ? (from.HasValue && till.Value.Date > from.Value.Date ? till.Value.AddTicks(-1) : till.Value.Date.AddDays(1).AddTicks(-1))
+                    : till.Value;
                 var tUtc = DateTime.SpecifyKind(tDt, DateTimeKind.Utc);
                 query = query.Where(r => r.Date <= tUtc);
             }
@@ -1295,12 +1343,15 @@ public static class FinanceEndpoints
         registryGroup.MapGet("/{id}", async (string id, MermerDbContext db, CancellationToken ct) =>
         {
             if (!Guid.TryParse(id, out var guid)) return Results.NotFound();
-            var r = await db.DailyFundsRegisteries.Include(x => x.Lines).FirstOrDefaultAsync(x => x.Id == guid, ct);
+            var r = await db.DailyFundsRegisteries
+                .Include(x => x.Lines)
+                .FirstOrDefaultAsync(x => x.Id == guid, ct);
             if (r == null) return Results.NotFound();
 
             var convertions = await GetCurrencyConvertionsAsync(db, r.Date, ct);
             var docCurrencyId = r.DisplayCurrencyId?.ToString() ?? (await db.Currencies.FirstOrDefaultAsync(c => c.IsDefault))?.Id.ToString();
             decimal total = r.Lines != null && r.Lines.Any() ? r.Lines.Sum(l => l.Amount) : 0m;
+            string authorName = !string.IsNullOrEmpty(r.UserName) ? r.UserName : "admin";
 
             return Results.Ok(new
             {
@@ -1313,7 +1364,7 @@ public static class FinanceEndpoints
                 CurrencyId = docCurrencyId,
                 CurrencyConvertions = convertions,
                 UserId = r.UserId?.ToString(),
-                UserName = r.UserName,
+                UserName = authorName,
                 IsCompleted = r.IsCompleted,
                 IsDisabled = r.IsDisabled,
                 Group = r.GroupName ?? string.Empty,
@@ -1357,13 +1408,39 @@ public static class FinanceEndpoints
             string? dispCurStr = GetStringProperty(root, "displayCurrencyId", "DisplayCurrencyId", "currencyId", "CurrencyId");
             Guid? dispCurId = Guid.TryParse(dispCurStr, out var pCur) ? pCur : null;
 
-            string? userIdStr = GetStringProperty(root, "userId", "UserId");
+            string? userIdStr = GetStringProperty(root, "userId", "UserId", "authorId", "AuthorId");
             Guid? userId = Guid.TryParse(userIdStr, out var pUser) ? pUser : null;
+            string authorUserName = GetStringProperty(root, "userName", "UserName", "author", "Author") ?? "admin";
 
-            DateTime date = DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Utc);
+            if (!userId.HasValue && !string.IsNullOrEmpty(authorUserName))
+            {
+                var u = await db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Username.ToLower() == authorUserName.ToLower());
+                userId = u?.Id;
+            }
+
+            // ПРОВЕРКА ПРАВ НА КАССУ
+            if (userId.HasValue && depId.HasValue)
+            {
+                var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId.Value);
+                if (user != null && !user.IsAdmin)
+                {
+                    if (user.AccountPrivileges.TryGetValue(depId.Value.ToString(), out int accLvl) && accLvl == 0)
+                    {
+                        var dep = await db.Depositories.AsNoTracking().FirstOrDefaultAsync(d => d.Id == depId.Value);
+                        string depName = !string.IsNullOrWhiteSpace(dep?.Name) ? dep.Name : depId.Value.ToString();
+
+                        return Results.Json(new
+                        {
+                            message = $"Access denied: you do not have permission to use depository '{depName}'."
+                        }, statusCode: StatusCodes.Status403Forbidden);
+                    }
+                }
+            }
+
+            DateTime? clientDate = null;
             string? dateStr = GetStringProperty(root, "date", "Date");
-            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, out var pDate))
-                date = DateTime.SpecifyKind(pDate, DateTimeKind.Utc);
+            if (!string.IsNullOrEmpty(dateStr) && DateTime.TryParse(dateStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var pDate))
+                clientDate = DateTime.SpecifyKind(pDate, DateTimeKind.Utc);
 
             var tagsList = ExtractTagsFromRawJson(root);
             string groupName = GetStringProperty(root, "group", "Group", "groupName", "GroupName") ?? "";
@@ -1404,13 +1481,13 @@ public static class FinanceEndpoints
                 {
                     Id = regId,
                     Code = code,
-                    Date = date,
+                    Date = clientDate ?? DateTime.UtcNow,
                     UserId = userId,
                     DepositoryId = depId,
                     DisplayCurrencyId = dispCurId,
-                    IsCompleted = GetBoolProperty(root, "isCompleted", "IsCompleted"),
-                    IsDisabled = GetBoolProperty(root, "isDisabled", "IsDisabled"),
-                    UserName = GetStringProperty(root, "userName", "UserName") ?? "admin",
+                    IsCompleted = GetBoolProp(root, "isCompleted", "IsCompleted"),
+                    IsDisabled = GetBoolProp(root, "isDisabled", "IsDisabled"),
+                    UserName = authorUserName,
                     GroupName = groupName,
                     Description = description,
                     Tags = tagsList.ToArray(),
@@ -1425,13 +1502,19 @@ public static class FinanceEndpoints
                 existing.Code = code;
                 existing.UserId = userId;
                 existing.DepositoryId = depId;
-                // Не перезаписываем DisplayCurrencyId
-                existing.IsCompleted = GetBoolProperty(root, "isCompleted", "IsCompleted");
-                existing.IsDisabled = GetBoolProperty(root, "isDisabled", "IsDisabled");
+                existing.IsCompleted = GetBoolProp(root, "isCompleted", "IsCompleted");
+                existing.IsDisabled = GetBoolProp(root, "isDisabled", "IsDisabled");
                 existing.GroupName = groupName;
                 existing.Description = description;
                 existing.Tags = tagsList.ToArray();
                 existing.UpdatedAt = DateTime.UtcNow;
+
+                // ОБНОВЛЕНИЕ ДАТЫ И АВТОРА
+                if (clientDate.HasValue && clientDate.Value.Year >= 2000)
+                {
+                    existing.Date = clientDate.Value;
+                }
+                if (!string.IsNullOrEmpty(authorUserName)) existing.UserName = authorUserName;
 
                 if (existing.Lines != null) db.DailyFundsRegisteryLines.RemoveRange(existing.Lines);
                 existing.Lines = linesList;
@@ -1458,14 +1541,12 @@ public static class FinanceEndpoints
             return Results.Ok();
         });
 
-        // =========================================================================
         // 8. ЖУРНАЛ ДВИЖЕНИЯ ДЕНЕЖНЫХ СРЕДСТВ
-        // =========================================================================
         routes.MapGet("/api/finance/actions/count", async (DateTime? from, DateTime? till, bool? isCompleted, HttpRequest req, MermerDbContext db, CancellationToken ct) =>
         {
             var startDate = from.HasValue
-    ? DateTime.SpecifyKind(from.Value, DateTimeKind.Utc)
-    : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
+                ? DateTime.SpecifyKind(from.Value, DateTimeKind.Utc)
+                : DateTime.SpecifyKind(new DateTime(2000, 1, 1), DateTimeKind.Utc);
 
             var endDate = till.HasValue
                 ? DateTime.SpecifyKind(till.Value.TimeOfDay == TimeSpan.Zero ? till.Value.Date.AddDays(1).AddTicks(-1) : till.Value, DateTimeKind.Utc)
@@ -1531,7 +1612,6 @@ public static class FinanceEndpoints
                 transfersCount = totalTransferLines * 2;
             }
 
-            // Подсчет накладных с привязкой к кассе
             DateTimeOffset startOffset = startDate;
             DateTimeOffset endOffset = endDate;
 
@@ -1571,18 +1651,15 @@ public static class FinanceEndpoints
                 .Distinct()
                 .ToList();
 
-            // 1. Загружаем базовую валюту системы (USD)
             var defaultCurrency = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
                                   ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => !c.IsDisabled, ct);
             var defaultCurrencyId = defaultCurrency?.Id;
 
-            // 2. Загружаем курсы валют для конвертации в базовую валюту
             var allRates = await db.CurrencyRates
                 .AsNoTracking()
                 .OrderByDescending(r => r.ValidFrom)
                 .ToListAsync(ct);
 
-            // Локальная функция пересчета любой валюты в базовую (USD)
             decimal ConvertToBaseCurrency(decimal amount, Guid? currencyId, DateTime docDate)
             {
                 if (amount == 0m || currencyId == null || currencyId == defaultCurrencyId)
@@ -1602,7 +1679,6 @@ public static class FinanceEndpoints
                 return amount;
             }
 
-            // Справочники
             var partnersMap = await db.Partners.AsNoTracking()
                 .Select(p => new { p.Id, p.Name, p.Code })
                 .ToDictionaryAsync(p => p.Id, p => !string.IsNullOrWhiteSpace(p.Name) ? p.Name : p.Code, ct);
@@ -1615,7 +1691,6 @@ public static class FinanceEndpoints
 
             var actions = new List<object>();
 
-            // 1. Кассовые ордера (FundsSlips: Collection, Payment, FundsOpening и т.д.)
             var slipsQuery = db.FundsSlips
                 .Include(s => s.Lines)
                 .AsNoTracking()
@@ -1637,7 +1712,6 @@ public static class FinanceEndpoints
                 foreach (var line in s.Lines ?? Enumerable.Empty<FundsSlipLineEntity>())
                 {
                     var lineCurId = line.CurrencyId ?? s.DisplayCurrencyId ?? defaultCurrencyId;
-                    // Пересчитываем сумму строки в базовую валюту USD
                     decimal baseAmount = ConvertToBaseCurrency(line.Amount, lineCurId, s.Date);
 
                     bool isIncome = s.FundsSlipType == "Collection" || s.FundsSlipType == "FundsOpening" || s.FundsSlipType == "FundsRevisionExceed";
@@ -1671,7 +1745,6 @@ public static class FinanceEndpoints
                 }
             }
 
-            // 2. Акты расходов (ExpenseSlips)
             var expenseQuery = db.ExpenseSlips
                 .Include(e => e.Lines)
                 .AsNoTracking()
@@ -1722,7 +1795,6 @@ public static class FinanceEndpoints
                 }
             }
 
-            // 3. Переводы между кассами (FundsTransfers)
             var transfersQuery = db.FundsTransfers
                 .Include(t => t.Lines)
                 .AsNoTracking()
@@ -1813,7 +1885,6 @@ public static class FinanceEndpoints
                 }
             }
 
-            // 4. Накладные (Invoices)
             DateTimeOffset startOffset = startDate;
             DateTimeOffset endOffset = endDate;
 
@@ -1919,9 +1990,7 @@ public static class FinanceEndpoints
             return Results.Json(actions.OrderByDescending(a => ((dynamic)a).TransactionDate), JsonOptions);
         }).WithTags("FundsActions");
 
-        // =========================================================================
         // 9. БАЛАНСЫ КАСС
-        // =========================================================================
         var balancesGroup = routes.MapGroup("/api/finance/balances").WithTags("FundsBalances");
 
         balancesGroup.MapGet("/bytype", async (string? depositoryId, DateTime? from, DateTime? till, MermerDbContext db, CancellationToken ct) =>
@@ -2099,7 +2168,7 @@ public static class FinanceEndpoints
             }
 
             var defCur = await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.IsDefault && !c.IsDisabled, ct)
-                         ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(ct);
+                         ?? await db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => !c.IsDisabled, ct);
             Guid defaultCurrencyId = defCur?.Id ?? Guid.Empty;
 
             const string sql = """
@@ -2273,6 +2342,8 @@ public static class FinanceEndpoints
     #endregion
 
     #region Helpers
+    private static bool GetBoolProp(JsonElement element, params string[] propNames)
+        => GetBoolProperty(element, propNames);
     private static List<string> ExtractTagsFromRawJson(JsonElement root)
     {
         var list = new List<string>();
@@ -2354,7 +2425,7 @@ public static class FinanceEndpoints
             if (TryGetPropertyCaseInsensitive(element, name, out var prop))
             {
                 if (prop.ValueKind == JsonValueKind.Number) return prop.GetDecimal();
-                if (prop.ValueKind == JsonValueKind.String && decimal.TryParse(prop.GetString(), out var val)) return val;
+                if (prop.ValueKind == JsonValueKind.String && decimal.TryParse(prop.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var val)) return val;
             }
         }
         return 0m;

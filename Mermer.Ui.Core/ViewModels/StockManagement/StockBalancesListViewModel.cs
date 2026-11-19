@@ -1,6 +1,8 @@
 ﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
+using MvvmCross.Platform;
 using MvvmCross.Plugins.Messenger;
+using Mermer.Authorization.Services;
 using Mermer.Common.Settings;
 using Mermer.Enterprise.Models;
 using Mermer.StockManagement.Models;
@@ -24,6 +26,7 @@ public class StockBalancesListViewModel :
 {
     private readonly IConfigurator _configurator;
     private readonly IStockBalancesRepository _repository;
+    private readonly ILoginService _loginService;
     private List<object> _selectedWarehouseIds;
     private bool _aggregateWarehouses = true;
     private string _stockId;
@@ -45,10 +48,11 @@ public class StockBalancesListViewModel :
         this.Warehouses = warehouses;
         this.StockSearcher = stockSearcher;
         this.StockSearcher.ResultSelected += this.StockSearcher_ResultSelected;
+
+        try { this._loginService = Mvx.Resolve<ILoginService>(); } catch { }
     }
 
     public StockSearcher StockSearcher { get; }
-
     public Reference<Warehouse> Warehouses { get; }
 
     public List<object> SelectedWarehouseIds
@@ -77,11 +81,11 @@ public class StockBalancesListViewModel :
         get
         {
             if (this.SelectedWarehouseIds == null || this.SelectedWarehouseIds.Count == 0)
-                return Array.Empty<string>();
+                return this.Warehouses?.List?.Select(w => w.Id).ToArray() ?? Array.Empty<string>();
 
             return this.SelectedWarehouseIds
                 .Select(x => x?.ToString())
-                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Where(x => !string.IsNullOrWhiteSpace(x) && AccountSecurityHelper.CanRead(this._loginService, x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
@@ -127,16 +131,17 @@ public class StockBalancesListViewModel :
 
     private void StockSearcher_ResultSelected(StockSearcher searcher, StockSearchResult result)
     {
-        this.SelectedStockMessage = this["Showing balances for stock: {0} | {1}", new object[2]
-        {
-            result.Code,
-            result.Name
-        }];
+        this.SelectedStockMessage = this["Showing balances for stock: {0} | {1}", result.Code, result.Name];
         this.StockId = result.Id;
     }
 
     protected override async Task PreLoad()
     {
+        if (this.Warehouses != null)
+        {
+            this.Warehouses.Filter = w => !w.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, w.Id);
+        }
+
         if (!_initialized)
         {
             await Task.WhenAll(
@@ -145,30 +150,27 @@ public class StockBalancesListViewModel :
                 this.StockSearcher.Initialize()
             );
 
-            // Читаем настройки приложения
             AppSettings config = await _configurator.GetConfigAsync<AppSettings>();
-
-            // 1. Проверяем склад из настроек
             string targetWhId = config?.DefaultWarehouseId;
 
-            // 2. Если не задан — ищем склад, принадлежащий выбранному офису
             if (string.IsNullOrEmpty(targetWhId) && !string.IsNullOrEmpty(config?.DefaultOfficeId))
             {
                 targetWhId = this.Warehouses?.List?
                     .FirstOrDefault(w => !w.IsDisabled && string.Equals(w.OfficeId, config.DefaultOfficeId, StringComparison.OrdinalIgnoreCase))?.Id;
             }
 
-            if (!string.IsNullOrEmpty(targetWhId))
+            if (!string.IsNullOrEmpty(targetWhId) && AccountSecurityHelper.CanRead(this._loginService, targetWhId))
             {
                 this._selectedWarehouseIds = new List<object> { targetWhId };
-                this.RaisePropertyChanged(() => this.SelectedWarehouseIds);
-                this.RaisePropertyChanged(() => this.WarehouseIds);
             }
             else
             {
-                this._selectedWarehouseIds = new List<object>();
+                var firstAllowed = this.Warehouses?.List?.FirstOrDefault();
+                this._selectedWarehouseIds = firstAllowed != null ? new List<object> { firstAllowed.Id } : new List<object>();
             }
 
+            this.RaisePropertyChanged(() => this.SelectedWarehouseIds);
+            this.RaisePropertyChanged(() => this.WarehouseIds);
             this._initialized = true;
         }
         else
@@ -184,62 +186,46 @@ public class StockBalancesListViewModel :
     {
         try
         {
-            // Уведомляем UI об изменении фильтров для пересчета значений счетчиков
             this.RaisePropertyChanged(() => this.Filters);
         }
         catch { }
     }
 
-    // ── ЗАГРУЗКА ДАННЫХ В ТАБЛИЦУ ──
-
-    // Плитка "All Records"
-    protected override Task<IEnumerable<StockBalanceByTypeWithBalanceAndData>> GetFilteredListAsync(ListFilter filter)
+    protected override async Task<IEnumerable<StockBalanceByTypeWithBalanceAndData>> GetFilteredListAsync(ListFilter filter)
     {
-        return this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, DateTime.MinValue, DateTime.MaxValue, this.AggregateWarehouses);
+        var result = await this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, DateTime.MinValue, DateTime.MaxValue, this.AggregateWarehouses);
+        return result?.Where(x => string.IsNullOrEmpty(x.WarehouseId) || AccountSecurityHelper.CanRead(this._loginService, x.WarehouseId));
     }
 
-    // Фильтры по периодам дат
-    protected override Task<IEnumerable<StockBalanceByTypeWithBalanceAndData>> GetFilteredListByDateAsync(DateTime from, DateTime till)
+    protected override async Task<IEnumerable<StockBalanceByTypeWithBalanceAndData>> GetFilteredListByDateAsync(DateTime from, DateTime till)
     {
-        return this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, from, till, this.AggregateWarehouses);
+        var result = await this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, from, till, this.AggregateWarehouses);
+        return result?.Where(x => string.IsNullOrEmpty(x.WarehouseId) || AccountSecurityHelper.CanRead(this._loginService, x.WarehouseId));
     }
 
-    protected override Task<IEnumerable<StockBalanceByTypeWithBalanceAndData>> GetListAsync(
+    protected override async Task<IEnumerable<StockBalanceByTypeWithBalanceAndData>> GetListAsync(
         params Expression<Func<StockBalanceByTypeWithBalanceAndData, bool>>[] predicates)
     {
-        return this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, DateTime.MinValue, DateTime.MaxValue, this.AggregateWarehouses);
+        var result = await this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, DateTime.MinValue, DateTime.MaxValue, this.AggregateWarehouses);
+        return result?.Where(x => string.IsNullOrEmpty(x.WarehouseId) || AccountSecurityHelper.CanRead(this._loginService, x.WarehouseId));
     }
 
-    // ── ПОДСЧЁТ СЧЁТЧИКОВ НА ПЛИТКАХ ──
-
-    // Счётчик плитки "All Records"
     protected override async Task<int> CountFilteredListAsync(ListFilter filter)
     {
-        var items = await this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, DateTime.MinValue, DateTime.MaxValue, this.AggregateWarehouses);
+        var items = await this.GetFilteredListAsync(filter);
         return items?.Count() ?? 0;
     }
 
-    // Счётчик для плиток дат (#Today, #This Week, #This Year и т.д.)
     protected override async Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
     {
-        var items = await this._repository.GetByTypeAsync(this.WarehouseIds, this.StockId, from, till, this.AggregateWarehouses);
+        var items = await this.GetFilteredListByDateAsync(from, till);
         return items?.Count() ?? 0;
     }
 
-    protected override Task<int> CountListAsync(params Expression<Func<StockBalanceByTypeWithBalanceAndData, bool>>[] predicates)
-    {
-        return Task.FromResult(0);
-    }
-
-    protected override Expression<Func<StockBalanceByTypeWithBalanceAndData, bool>> GetDateFilter(DateTime from, DateTime till)
-    {
-        return x => true;
-    }
-
-    // ── КОМАНДЫ ──
+    protected override Task<int> CountListAsync(params Expression<Func<StockBalanceByTypeWithBalanceAndData, bool>>[] predicates) => Task.FromResult(0);
+    protected override Expression<Func<StockBalanceByTypeWithBalanceAndData, bool>> GetDateFilter(DateTime from, DateTime till) => x => true;
 
     public ICommand RemoveSelectedStockId => new MvxCommand(this.OnRemoveSelectedStockId, () => !this.IsBusy);
-
     private void OnRemoveSelectedStockId() => this.StockId = null;
 
     public ICommand SelectOrViewDetailsCommand =>

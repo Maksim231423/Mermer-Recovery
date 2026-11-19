@@ -1,9 +1,4 @@
-﻿// Decompiled with JetBrains decompiler
-// Type: Mermer.Ui.Core.ViewModels.StockManagement.StockActionsListViewModel
-// Assembly: Mermer.Ui.Core, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
-// MVID: DC92D011-8413-44AC-9F10-F866D891CF66
-// Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.Ui.Core.dll
-
+﻿using Mermer.Authorization.Services;
 using Mermer.Commerce.Models;
 using Mermer.Common.Settings;
 using Mermer.Data.Storage;
@@ -21,6 +16,7 @@ using Mermer.Ui.Core.ViewModels.Common;
 using Mermer.Warehousing.Models;
 using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
+using MvvmCross.Platform;
 using MvvmCross.Plugins.Messenger;
 using System;
 using System.Collections.Generic;
@@ -32,20 +28,21 @@ using System.Windows.Input;
 #nullable disable
 namespace Mermer.Ui.Core.ViewModels.StockManagement;
 
-public class StockActionsListViewModel : 
+public class StockActionsListViewModel :
   ListViewModelBaseWithFilterDate<StockActionWithData>,
   IMvxViewModel<StockActionsFilter>,
   IMvxViewModel
 {
-  private readonly IConfigurator _configurator;
-  private readonly IStockActionsRepository _repository;
-  private readonly IRepository<Stock> _stocksRepository;
-  private readonly MvxSubscriptionToken _messageToken;
+    private readonly IConfigurator _configurator;
+    private readonly IStockActionsRepository _repository;
+    private readonly IRepository<Stock> _stocksRepository;
+    private readonly ILoginService _loginService;
+    private readonly MvxSubscriptionToken _messageToken;
     private List<object> _selectedWarehouseIds = new List<object>();
     private string _stockId;
-  private string _selectedStockMessage;
-  private StockActionsFilter _parameter;
-  private bool _loaded;
+    private string _selectedStockMessage;
+    private StockActionsFilter _parameter;
+    private bool _loaded;
     private string _currencyId;
 
     public virtual string CurrencyId
@@ -56,24 +53,23 @@ public class StockActionsListViewModel :
             if (this._currencyId == value) return;
             this._currencyId = value;
             this.RaisePropertyChanged(() => this.CurrencyId);
-
-            // Мгновенный пересчет при смене валюты в комбобоксе
             this.ApplyCustomCurrencyRate();
         }
     }
 
     public Reference<Currency> Currencies { get; private set; }
+
     public StockActionsListViewModel(
-    IMvxMessenger messenger,
-    IConfigurator configurator,
-    StockSearcher stockSearcher,
-    Reference<Warehouse> warehouses,
-    Reference<Currency> currencies, 
-    IStockActionsRepository repository,
-    IRepository<Stock> stocksRepository,
-    IMvxNavigationService navigationService,
-    IUserInteractionService userInteractionService)
-    : base(messenger, navigationService, userInteractionService)
+        IMvxMessenger messenger,
+        IConfigurator configurator,
+        StockSearcher stockSearcher,
+        Reference<Warehouse> warehouses,
+        Reference<Currency> currencies,
+        IStockActionsRepository repository,
+        IRepository<Stock> stocksRepository,
+        IMvxNavigationService navigationService,
+        IUserInteractionService userInteractionService)
+        : base(messenger, navigationService, userInteractionService)
     {
         this._configurator = configurator;
         this._repository = repository;
@@ -84,11 +80,13 @@ public class StockActionsListViewModel :
         this.StockSearcher.ResultSelected += new SearchResultSelected(this.StockSearcher_ResultSelected);
         this.Types = new LocalizedTransactionTypes("Repricing");
         this.Currencies = currencies;
+
+        try { this._loginService = Mvx.Resolve<ILoginService>(); } catch { }
+
         if (this.Currencies != null)
         {
             this.Currencies.Filter = c => !c.IsDisabled;
         }
-        this.Currencies = currencies; 
     }
 
     public List<object> SelectedWarehouseIds
@@ -116,56 +114,52 @@ public class StockActionsListViewModel :
 
             return this.SelectedWarehouseIds
                 .Select(x => x?.ToString())
-                .Where(x => !string.IsNullOrEmpty(x))
+                .Where(x => !string.IsNullOrEmpty(x) && AccountSecurityHelper.CanRead(this._loginService, x))
                 .ToArray();
         }
     }
 
     public virtual string StockId
-  {
-    get => this._stockId;
-    set
     {
-      if (this.SetProperty<string>(ref this._stockId, value, nameof (StockId)) && !this.IsBusy)
-        this.Initialize();
-      this.RaisePropertyChanged<bool>((Expression<Func<bool>>) (() => this.StockIdSelected));
+        get => this._stockId;
+        set
+        {
+            if (this.SetProperty<string>(ref this._stockId, value, nameof(StockId)) && !this.IsBusy)
+                this.Initialize();
+            this.RaisePropertyChanged<bool>((Expression<Func<bool>>)(() => this.StockIdSelected));
+        }
     }
-  }
 
-  public bool StockIdSelected => !string.IsNullOrEmpty(this.StockId);
+    public bool StockIdSelected => !string.IsNullOrEmpty(this.StockId);
 
-  public virtual string SelectedStockMessage
-  {
-    get => this._selectedStockMessage;
-    set
+    public virtual string SelectedStockMessage
     {
-      this.SetProperty<string>(ref this._selectedStockMessage, value, nameof (SelectedStockMessage));
+        get => this._selectedStockMessage;
+        set => this.SetProperty<string>(ref this._selectedStockMessage, value, nameof(SelectedStockMessage));
     }
-  }
 
-  public StockSearcher StockSearcher { get; }
+    public StockSearcher StockSearcher { get; }
+    public Reference<Warehouse> Warehouses { get; }
+    public LocalizedTransactionTypes Types { get; }
 
-  public Reference<Warehouse> Warehouses { get; }
-
-  public LocalizedTransactionTypes Types { get; }
-
-  private void StockSearcher_ResultSelected(StockSearcher searcher, StockSearchResult result)
-  {
-    this.SelectedStockMessage = this["Showing actions for stock: {0} | {1}", new object[2]
+    private void StockSearcher_ResultSelected(StockSearcher searcher, StockSearchResult result)
     {
-      (object) result.Code,
-      (object) result.Name
-    }];
-    this.StockId = result.Id;
-  }
+        this.SelectedStockMessage = this["Showing actions for stock: {0} | {1}", (object)result.Code, (object)result.Name];
+        this.StockId = result.Id;
+    }
 
-  public void Prepare(StockActionsFilter parameter) => this._parameter = parameter;
+    public void Prepare(StockActionsFilter parameter) => this._parameter = parameter;
 
     protected override async Task PreLoad()
     {
         if (this.Currencies != null)
         {
             this.Currencies.Filter = c => !c.IsDisabled;
+        }
+
+        if (this.Warehouses != null)
+        {
+            this.Warehouses.Filter = w => !w.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, w.Id);
         }
 
         await Task.WhenAll(
@@ -179,7 +173,7 @@ public class StockActionsListViewModel :
         {
             if (_parameter != null && _parameter.WarehouseIds != null && _parameter.WarehouseIds.Any())
             {
-                _selectedWarehouseIds = _parameter.WarehouseIds.Cast<object>().ToList();
+                _selectedWarehouseIds = _parameter.WarehouseIds.Where(id => AccountSecurityHelper.CanRead(this._loginService, id)).Cast<object>().ToList();
                 StockId = _parameter.StockId;
                 DateFilterFrom = _parameter.DateFrom;
                 DateFilterTill = _parameter.DateTill;
@@ -193,26 +187,23 @@ public class StockActionsListViewModel :
             }
             else
             {
-                // Читаем настройки приложения
                 AppSettings config = await _configurator.GetConfigAsync<AppSettings>();
-
-                // 1. Проверяем склад по умолчанию из настроек
                 string targetWhId = config?.DefaultWarehouseId;
 
-                // 2. Если в настройках склад не задан — ищем склад, привязанный к дефолтному офису
                 if (string.IsNullOrEmpty(targetWhId) && !string.IsNullOrEmpty(config?.DefaultOfficeId))
                 {
                     targetWhId = this.Warehouses?.List?
                         .FirstOrDefault(w => !w.IsDisabled && string.Equals(w.OfficeId, config.DefaultOfficeId, StringComparison.OrdinalIgnoreCase))?.Id;
                 }
 
-                if (!string.IsNullOrEmpty(targetWhId))
+                if (!string.IsNullOrEmpty(targetWhId) && AccountSecurityHelper.CanRead(this._loginService, targetWhId))
                 {
                     _selectedWarehouseIds = new List<object> { targetWhId };
                 }
                 else
                 {
-                    _selectedWarehouseIds = new List<object>();
+                    var firstAllowed = this.Warehouses?.List?.FirstOrDefault();
+                    _selectedWarehouseIds = firstAllowed != null ? new List<object> { firstAllowed.Id } : new List<object>();
                 }
             }
 
@@ -223,7 +214,6 @@ public class StockActionsListViewModel :
         if (string.IsNullOrEmpty(StockId))
             SelectedStockMessage = this["Showing actions for all stocks"];
 
-        // Валюта всегда остается сброшенной при открытии окна
         this.CurrencyId = null;
     }
 
@@ -238,7 +228,6 @@ public class StockActionsListViewModel :
     {
         if (list == null) return list;
 
-        // Если валюта не выбрана (None / null), обнуляем колонку пересчета в кастомную валюту
         if (string.IsNullOrEmpty(this._currencyId))
         {
             var emptyCurList = list.ToList();
@@ -270,94 +259,80 @@ public class StockActionsListViewModel :
     }
 
     protected override Task OnLoad()
-  {
-    if (this._parameter == null)
-      return base.OnLoad();
-    this._parameter = (StockActionsFilter) null;
-    return this.LoadByDateAsync(false);
-  }
+    {
+        if (this._parameter == null)
+            return base.OnLoad();
+        this._parameter = (StockActionsFilter)null;
+        return this.LoadByDateAsync(false);
+    }
 
-  protected override Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
-  {
-    return this._repository.CountAsync(new DateTime?(from), new DateTime?(till), this.StockId, this.WarehouseIds);
-  }
+    protected override Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
+    {
+        return this._repository.CountAsync(new DateTime?(from), new DateTime?(till), this.StockId, this.WarehouseIds);
+    }
 
-  protected override Task<int> CountFilteredListAsync(ListFilter filter)
-  {
-    return this._repository.CountAsync(new DateTime?(), new DateTime?(), this.StockId, this.WarehouseIds);
-  }
+    protected override Task<int> CountFilteredListAsync(ListFilter filter)
+    {
+        return this._repository.CountAsync(new DateTime?(), new DateTime?(), this.StockId, this.WarehouseIds);
+    }
 
     protected override async Task<IEnumerable<StockActionWithData>> GetFilteredListByDateAsync(DateTime from, DateTime till)
     {
         var result = await this._repository.GetAsync(from, till, this.StockId, this.WarehouseIds);
+        result = result?.Where(x => AccountSecurityHelper.CanRead(this._loginService, x.ActionWarehouseId));
         return ApplyCustomCurrencyRate(result);
     }
 
     protected override async Task<IEnumerable<StockActionWithData>> GetFilteredListAsync(ListFilter filter)
     {
         var result = await this._repository.GetAsync(default(DateTime?), default(DateTime?), this.StockId, this.WarehouseIds);
+        result = result?.Where(x => AccountSecurityHelper.CanRead(this._loginService, x.ActionWarehouseId));
         return ApplyCustomCurrencyRate(result);
     }
 
-    protected override Task<int> CountListAsync(params Expression<Func<StockActionWithData, bool>>[] predicates)
+    protected override Task<int> CountListAsync(params Expression<Func<StockActionWithData, bool>>[] predicates) => Task.FromResult(0);
+
+    protected override async Task<IEnumerable<StockActionWithData>> GetListAsync(params Expression<Func<StockActionWithData, bool>>[] predicates)
     {
-        return Task.FromResult(0);
+        var result = await this._repository.GetAsync(null, null, this.StockId, this.WarehouseIds);
+        result = result?.Where(x => AccountSecurityHelper.CanRead(this._loginService, x.ActionWarehouseId));
+        return ApplyCustomCurrencyRate(result);
     }
 
-    protected override Task<IEnumerable<StockActionWithData>> GetListAsync(params Expression<Func<StockActionWithData, bool>>[] predicates)
+    protected override Expression<Func<StockActionWithData, bool>> GetDateFilter(DateTime from, DateTime till) => x => true;
+
+    public ICommand RemoveSelectedStockId => new MvxCommand(this.OnRemoveSelectedStockId, () => !this.IsBusy);
+
+    private void OnRemoveSelectedStockId() => this.StockId = (string)null;
+
+    public ICommand SelectOrViewDetailsCommand => new MvxAsyncCommand(this.OnSelectOrViewDetailsAsync, () => !this.IsBusy && this.SelectedItem != null);
+
+    private Task OnSelectOrViewDetailsAsync()
     {
-        return this._repository.GetAsync(null, null, this.StockId, this.WarehouseIds);
+        switch (this.SelectedItem.TransactionType)
+        {
+            case "Purchase":
+            case "PurchaseReturn":
+            case "Sales":
+            case "SalesReturn":
+                return this.NavigationService.Navigate<DetailsViewModel<Invoice>, string>(this.SelectedItem.TransactionId);
+            case "RevisionDeficit":
+            case "RevisionExceed":
+            case "StockOpening":
+            case "StockSpoilage":
+            case "StockUsage":
+                return this.NavigationService.Navigate<DetailsViewModel<StockSlip>, string>(this.SelectedItem.TransactionId);
+            case "StockTransferDestination":
+            case "StockTransferSource":
+                return this.NavigationService.Navigate<DetailsViewModel<StockTransfer>, string>(this.SelectedItem.TransactionId);
+            default:
+                return Task.CompletedTask;
+        }
     }
 
-    protected override Expression<Func<StockActionWithData, bool>> GetDateFilter(DateTime from, DateTime till)
+    public override void Dispose()
     {
-        return x => true;
+        base.Dispose();
+        this._messageToken?.Dispose();
     }
-
-    public ICommand RemoveSelectedStockId
-  {
-    get
-    {
-      return (ICommand) new MvxCommand(new Action(this.OnRemoveSelectedStockId), (Func<bool>) (() => !this.IsBusy));
-    }
-  }
-
-  private void OnRemoveSelectedStockId() => this.StockId = (string) null;
-
-  public ICommand SelectOrViewDetailsCommand
-  {
-    get
-    {
-      return (ICommand) new MvxAsyncCommand(new Func<Task>(this.OnSelectOrViewDetailsAsync), (Func<bool>) (() => !this.IsBusy && this.SelectedItem != null));
-    }
-  }
-
-  private Task OnSelectOrViewDetailsAsync()
-  {
-    switch (this.SelectedItem.TransactionType)
-    {
-      case "Purchase":
-      case "PurchaseReturn":
-      case "Sales":
-      case "SalesReturn":
-        return this.NavigationService.Navigate<DetailsViewModel<Invoice>, string>(this.SelectedItem.TransactionId);
-      case "RevisionDeficit":
-      case "RevisionExceed":
-      case "StockOpening":
-      case "StockSpoilage":
-      case "StockUsage":
-        return this.NavigationService.Navigate<DetailsViewModel<StockSlip>, string>(this.SelectedItem.TransactionId);
-      case "StockTransferDestination":
-      case "StockTransferSource":
-        return this.NavigationService.Navigate<DetailsViewModel<StockTransfer>, string>(this.SelectedItem.TransactionId);
-      default:
-        return Task.CompletedTask;
-    }
-  }
-
-  public override void Dispose()
-  {
-    base.Dispose();
-    this._messageToken?.Dispose();
-  }
 }

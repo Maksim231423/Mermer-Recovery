@@ -1,5 +1,6 @@
 ﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
+using Mermer.Authorization.Enums;
 using Mermer.Authorization.Services;
 using Mermer.Commerce.Models;
 using Mermer.CRM.Models;
@@ -85,9 +86,6 @@ public class InvoiceDetailsViewModel :
     public Reference<Depository> Depositories { get; }
     public ListHelper<InvoiceDiscountType>[] DiscountTypes { get; set; }
 
-    /// <summary>
-    /// 3-й блок баланса отображается только тогда, когда выбран партнер И есть долг / неполная оплата (эффект на баланс не нулевой)
-    /// </summary>
     public bool CanShowPartnerBalance
     {
         get
@@ -95,11 +93,9 @@ public class InvoiceDetailsViewModel :
             if (Details == null || string.IsNullOrEmpty(Details.PartnerId))
                 return false;
 
-            // Если в чеке есть неоплаченный остаток или отмечена запись в долг
             if (Details.DisplayLeftTotal > 0 || Details.DebitCreditLeftAmount)
                 return true;
 
-            // Если чек полностью оплачен (эффект на баланс нулевой) — скрываем 3-й блок
             if (Details.IsPayed && Details.DisplayDebitTotal == 0m && Details.DisplayCreditTotal == 0m)
                 return false;
 
@@ -189,8 +185,18 @@ public class InvoiceDetailsViewModel :
             if (!string.IsNullOrEmpty(ItemId)) return;
 
             Details.InvoiceType = _newInvoiceType;
-            Details.OfficeId = AppSettings.DefaultOfficeId;
-            Details.DepositoryId = AppSettings.DefaultDepositoryId;
+
+            // Подставляем только объекты с правом Operate
+            string defOffice = AppSettings.DefaultOfficeId;
+            Details.OfficeId = AccountSecurityHelper.CanOperate(LoginService, defOffice)
+                ? defOffice
+                : Offices?.List?.FirstOrDefault(o => !o.IsDisabled && AccountSecurityHelper.CanOperate(LoginService, o.Id))?.Id;
+
+            string defDep = AppSettings.DefaultDepositoryId;
+            Details.DepositoryId = AccountSecurityHelper.CanOperate(LoginService, defDep)
+                ? defDep
+                : Depositories?.List?.FirstOrDefault(d => !d.IsDisabled && AccountSecurityHelper.CanOperate(LoginService, d.Id))?.Id;
+
             Details.StockPriceGroup = AppSettings.DefaultStockPriceGroup;
             Details.DueDate = DateTime.Now.AddDays(AppSettings.DefaultDueDateInDays).Date;
         }
@@ -207,13 +213,11 @@ public class InvoiceDetailsViewModel :
         {
             await base.PostLoad();
 
-            // 1. Быстрая инициализация коллекций без лишних пересозданий
             Details.Payments ??= new WatchedObservableCollection<InvoicePayment>();
             Details.Changes ??= new WatchedObservableCollection<InvoicePayment>();
             Details.Discounts ??= new WatchedObservableCollection<InvoiceDiscount>();
             Details.CurrencyConvertions ??= new WatchedObservableCollection<CurrencyConvertion>();
 
-            // 2. Параллельный прогрев кэша товаров для строк без UnitId
             if (Details?.Lines != null && Details.Lines.Any())
             {
                 var linesWithoutUnit = Details.Lines
@@ -241,7 +245,6 @@ public class InvoiceDetailsViewModel :
                 }
             }
 
-            // 3. Актуализация валютных конвертаций документа
             var activeCurrencies = Currencies?.List?.Where(c => !c.IsDisabled).ToList();
             if (activeCurrencies != null && activeCurrencies.Any())
             {
@@ -282,7 +285,6 @@ public class InvoiceDetailsViewModel :
                 Details.UpdateCurrencyConvertion();
             }
 
-            // 4. Актуализация конвертации строк оплаты
             if (Details.Payments != null)
             {
                 foreach (var p in Details.Payments)
@@ -301,7 +303,6 @@ public class InvoiceDetailsViewModel :
                 }
             }
 
-            // 5. Пакетное обновление связанных свойств интерфейса
             RaisePropertyChanged(() => Details);
             RaisePropertyChanged(() => PartnerBalanceToDate);
             RaisePropertyChanged(() => PartnerBalanceResult);
@@ -313,7 +314,7 @@ public class InvoiceDetailsViewModel :
             StockSearcher.WarehouseId = Details.WarehouseId;
 
             Partners.Filter = x => !x.IsDisabled || x.Id == Details?.PartnerId;
-            Offices.Filter = x => !x.IsDisabled || x.Id == Details?.OfficeId;
+            Offices.Filter = x => !x.IsDisabled && (AccountSecurityHelper.CanOperate(LoginService, x.Id) || (!string.IsNullOrEmpty(ItemId) && x.Id == Details?.OfficeId && AccountSecurityHelper.CanRead(LoginService, x.Id)));
 
             UpdateFacilityFilters();
 
@@ -327,7 +328,6 @@ public class InvoiceDetailsViewModel :
             _isInitializing = false;
         }
 
-        // 6. Запуск расчета сальдо строго один раз после полной готовности формы
         UpdatePartnerBalance();
     }
 
@@ -380,6 +380,12 @@ public class InvoiceDetailsViewModel :
             if (x.IsDisabled && !string.Equals(x.Id, Details?.WarehouseId, StringComparison.OrdinalIgnoreCase))
                 return false;
 
+            bool hasAccess = AccountSecurityHelper.CanOperate(LoginService, x.Id) ||
+                             (!string.IsNullOrEmpty(ItemId) && string.Equals(x.Id, Details?.WarehouseId, StringComparison.OrdinalIgnoreCase) && AccountSecurityHelper.CanRead(LoginService, x.Id));
+
+            if (!hasAccess)
+                return false;
+
             if (string.IsNullOrWhiteSpace(Details?.OfficeId))
                 return true;
 
@@ -394,6 +400,12 @@ public class InvoiceDetailsViewModel :
             if (x.IsDisabled && !string.Equals(x.Id, Details?.DepositoryId, StringComparison.OrdinalIgnoreCase))
                 return false;
 
+            bool hasAccess = AccountSecurityHelper.CanOperate(LoginService, x.Id) ||
+                             (!string.IsNullOrEmpty(ItemId) && string.Equals(x.Id, Details?.DepositoryId, StringComparison.OrdinalIgnoreCase) && AccountSecurityHelper.CanRead(LoginService, x.Id));
+
+            if (!hasAccess)
+                return false;
+
             if (string.IsNullOrWhiteSpace(Details?.OfficeId))
                 return true;
 
@@ -405,6 +417,7 @@ public class InvoiceDetailsViewModel :
 
         Warehouses?.RaisePropertyChanged("List");
         Depositories?.RaisePropertyChanged("List");
+        Offices?.RaisePropertyChanged("List");
     }
 
     private void UpdatePartnerBalance()
@@ -469,14 +482,29 @@ public class InvoiceDetailsViewModel :
                 throw new Exception("Office is not selected! Please select an office.");
             }
 
+            if (!AccountSecurityHelper.CanOperate(LoginService, Details.OfficeId))
+            {
+                throw new Exception("Access Denied: You do not have permission to operate with the selected office.");
+            }
+
             if (string.IsNullOrWhiteSpace(Details.WarehouseId) || Details.WarehouseId == Guid.Empty.ToString())
             {
                 throw new Exception("Warehouse is not selected! Please select a warehouse.");
             }
 
+            if (!AccountSecurityHelper.CanOperate(LoginService, Details.WarehouseId))
+            {
+                throw new Exception("Access Denied: You do not have permission to operate with the selected warehouse.");
+            }
+
             if (string.IsNullOrWhiteSpace(Details.DepositoryId) || Details.DepositoryId == Guid.Empty.ToString())
             {
                 throw new Exception("Depository/Account is not selected! Please select a depository.");
+            }
+
+            if (!AccountSecurityHelper.CanOperate(LoginService, Details.DepositoryId))
+            {
+                throw new Exception("Access Denied: You do not have permission to operate with the selected depository.");
             }
 
             if (string.IsNullOrWhiteSpace(Details.PartnerId) || Details.PartnerId == Guid.Empty.ToString())
