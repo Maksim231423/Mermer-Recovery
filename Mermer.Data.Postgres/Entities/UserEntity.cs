@@ -28,6 +28,7 @@ public class UserEntity
     public bool IsAdmin { get; set; }
 
     [Column("is_disabled")]
+
     public bool IsDisabled { get; set; }
 
     [Column("description")]

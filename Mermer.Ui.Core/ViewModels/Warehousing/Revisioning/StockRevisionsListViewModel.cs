@@ -1,6 +1,5 @@
 ﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Plugins.Messenger;
-using Mermer.Authorization.Enums;
 using Mermer.Authorization.Services;
 using Mermer.Enterprise.Models;
 using Mermer.Transactions.Services;
@@ -22,10 +21,6 @@ namespace Mermer.Ui.Core.ViewModels.Warehousing.Revisioning;
 
 public class StockRevisionsListViewModel : TransactionsListViewModel<StockRevision>
 {
-    private const string FilterActiveString = "Active";
-    private const string FilterCompletedString = "Completed";
-    private const string FilterDeletedString = "Deleted";
-    private const string FilterAllString = "All Records";
     private readonly ILoginService _loginService;
     private readonly ITransactionCodeGenerationService _codeGentor;
 
@@ -101,22 +96,11 @@ public class StockRevisionsListViewModel : TransactionsListViewModel<StockRevisi
 
     private void ApplySecurityFilters()
     {
-        if (this._loginService?.Session != null && !this._loginService.Session.IsAdmin && this._loginService.Session.Accounts != null)
+        if (this.Warehouses != null)
         {
-            var accounts = this._loginService.Session.Accounts;
-
-            // Скрываем склады с явным запретом (None / 0)
-            this.Warehouses.Filter = w =>
-                !w.IsDisabled &&
-                (!accounts.TryGetValue(w.Id, out var level) ||
-                 (level != AccountAccessLevel.None && (level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read))));
+            this.Warehouses.Filter = w => !w.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, w.Id);
+            this.Warehouses.RaisePropertyChanged("List");
         }
-        else
-        {
-            this.Warehouses.Filter = w => !w.IsDisabled;
-        }
-
-        this.Warehouses.RaisePropertyChanged("List");
     }
 
     protected override async Task OnCreateNewAsync()
@@ -125,21 +109,23 @@ public class StockRevisionsListViewModel : TransactionsListViewModel<StockRevisi
         {
             ApplySecurityFilters();
 
-            // Передаем в мастер создания только отфильтрованные (разрешенные) склады
-            var allowedWarehouses = this.Warehouses.List.ToList();
+            // Передаем в мастер создания только склады с правом совершения операций (Operate)
+            var operateWarehouses = this.Warehouses.List
+                .Where(w => !w.IsDisabled && AccountSecurityHelper.CanOperate(this._loginService, w.Id))
+                .ToList();
 
-            StockRevisionsListNewRevisionViewModel.Result result = await this.NavigationService.Navigate<StockRevisionsListNewRevisionViewModel, IEnumerable<Warehouse>, StockRevisionsListNewRevisionViewModel.Result>(allowedWarehouses);
+            var result = await this.NavigationService.Navigate<StockRevisionsListNewRevisionViewModel, IEnumerable<Warehouse>, StockRevisionsListNewRevisionViewModel.Result>(operateWarehouses);
             if (result == null)
                 return;
 
-            StockRevision stockRevision = new StockRevision
+            var stockRevision = new StockRevision
             {
                 Id = Guid.NewGuid().ToString(),
                 Code = await this._codeGentor.GetNextCode(),
                 Date = result.StartDate,
                 WarehouseId = result.WarehouseId,
-                UserId = this._loginService.Session.UserId,
-                UserName = this._loginService.Session.Username
+                UserId = this._loginService.Session?.UserId,
+                UserName = this._loginService.Session?.Username
             };
 
             await this.Repository.CreateAsync(stockRevision);
@@ -151,33 +137,46 @@ public class StockRevisionsListViewModel : TransactionsListViewModel<StockRevisi
         }
     }
 
-    protected override Task<int> CountFilteredListAsync(ListFilter filter)
+    protected override async Task<int> CountFilteredListAsync(ListFilter filter)
     {
-        switch (filter.Tag.ToString())
+        if (this._loginService?.Session == null || this._loginService.Session.IsAdmin || this._loginService.Session.Accounts == null)
         {
-            case "Active":
-                return this.Repository.CountAsync((Expression<Func<StockRevision, bool>>)(x => !x.IsCompleted && !x.IsDisabled));
-            case "Completed":
-                return this.Repository.CountAsync((Expression<Func<StockRevision, bool>>)(x => x.IsCompleted && !x.IsDisabled));
-            case "Deleted":
-                return this.Repository.CountAsync((Expression<Func<StockRevision, bool>>)(x => x.IsDisabled));
-            default:
-                return base.CountFilteredListAsync(filter);
+            switch (filter?.Tag?.ToString())
+            {
+                case "Active":
+                    return await this.Repository.CountAsync(x => !x.IsCompleted && !x.IsDisabled);
+                case "Completed":
+                    return await this.Repository.CountAsync(x => x.IsCompleted && !x.IsDisabled);
+                case "Deleted":
+                    return await this.Repository.CountAsync(x => x.IsDisabled);
+                default:
+                    return await base.CountFilteredListAsync(filter);
+            }
         }
+
+        var items = await this.GetFilteredListAsync(filter);
+        return items?.Count() ?? 0;
     }
 
-    protected override Task<IEnumerable<StockRevision>> GetFilteredListAsync(ListFilter filter)
+    protected override async Task<IEnumerable<StockRevision>> GetFilteredListAsync(ListFilter filter)
     {
-        switch (filter.Tag.ToString())
+        IEnumerable<StockRevision> raw;
+        switch (filter?.Tag?.ToString())
         {
             case "Active":
-                return this.Repository.GetAsync((Expression<Func<StockRevision, bool>>)(x => !x.IsCompleted && !x.IsDisabled));
+                raw = await this.Repository.GetAsync(x => !x.IsCompleted && !x.IsDisabled);
+                break;
             case "Completed":
-                return this.Repository.GetAsync((Expression<Func<StockRevision, bool>>)(x => x.IsCompleted && !x.IsDisabled));
+                raw = await this.Repository.GetAsync(x => x.IsCompleted && !x.IsDisabled);
+                break;
             case "Deleted":
-                return this.Repository.GetAsync((Expression<Func<StockRevision, bool>>)(x => x.IsDisabled));
+                raw = await this.Repository.GetAsync(x => x.IsDisabled);
+                break;
             default:
-                return base.GetFilteredListAsync(filter);
+                raw = await base.GetFilteredListAsync(filter);
+                break;
         }
+
+        return ApplySecurityFilter(raw);
     }
 }

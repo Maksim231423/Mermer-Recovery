@@ -1,10 +1,4 @@
-﻿// Decompiled with JetBrains decompiler
-// Type: Mermer.Ui.Core.ViewModels.CRM.PartnerSlipsListViewModel
-// Assembly: Mermer.Ui.Core, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
-// MVID: DC92D011-8413-44AC-9F10-F866D891CF66
-// Assembly location: C:\Users\Admin\AppData\Local\Temp\Bofyhol\f9d7aa10a6\lib\net45\Mermer.Ui.Core.dll
-
-using MvvmCross.Core.Navigation;
+﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Plugins.Messenger;
 using Mermer.CRM.Models;
 using Mermer.Enterprise.Models;
@@ -20,19 +14,26 @@ namespace Mermer.Ui.Core.ViewModels.CRM;
 
 public class PartnerSlipsListViewModel : TransactionsListViewModel<PartnerSlip>
 {
-  public PartnerSlipsListViewModel(
-    Reference<Office> offices,
-    IRepository<PartnerSlip> repository,
-    IListAuthorizer<PartnerSlip> authorizer,
-    IMvxMessenger messenger,
-    IMvxNavigationService navigationService,
-    IUserInteractionService userInteractionService)
-    : base(repository, authorizer, messenger, navigationService, userInteractionService)
-  {
-    this.Offices = offices;
-  }
+    public PartnerSlipsListViewModel(
+      Reference<Office> offices,
+      IRepository<PartnerSlip> repository,
+      IListAuthorizer<PartnerSlip> authorizer,
+      IMvxMessenger messenger,
+      IMvxNavigationService navigationService,
+      IUserInteractionService userInteractionService)
+      : base(repository, authorizer, messenger, navigationService, userInteractionService)
+    {
+        this.Offices = offices;
+    }
 
-  public Reference<Office> Offices { get; }
+    public Reference<Office> Offices { get; }
 
-  protected override Task PreLoad() => Task.WhenAll(base.PreLoad(), this.Offices.Initialize());
+    protected override async Task PreLoad()
+    {
+        await Task.WhenAll(base.PreLoad(), this.Offices.Initialize());
+
+        var loginService = this.GetLoginService();
+        this.Offices.Filter = o => !o.IsDisabled && AccountSecurityHelper.CanRead(loginService, o.Id);
+        this.Offices?.RaisePropertyChanged("List");
+    }
 }

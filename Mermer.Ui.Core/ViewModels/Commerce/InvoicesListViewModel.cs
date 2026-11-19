@@ -55,13 +55,9 @@ public class InvoicesListViewModel : ListViewModelBaseWithFilterDate<InvoiceInfo
     public override string Caption => this["Invoices", Array.Empty<object>()];
 
     public Reference<Office> Offices { get; }
-
     public Reference<Partner> Partners { get; }
-
     public Reference<Warehouse> Warehouses { get; }
-
     public Reference<Depository> Depositories { get; }
-
     public LocalizedTransactionTypes Types { get; set; }
 
     protected override Task PreLoad()
@@ -78,23 +74,9 @@ public class InvoicesListViewModel : ListViewModelBaseWithFilterDate<InvoiceInfo
 
                 InvokeOnMainThread(() =>
                 {
-                    if (this._loginService?.Session != null && !this._loginService.Session.IsAdmin && this._loginService.Session.Accounts != null)
-                    {
-                        var allowedIds = this._loginService.Session.Accounts
-                            .Where(a => a.Value.HasFlag(AccountAccessLevel.Operate) || a.Value.HasFlag(AccountAccessLevel.Read))
-                            .Select(a => a.Key)
-                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-                        this.Warehouses.Filter = w => !w.IsDisabled && allowedIds.Contains(w.Id);
-                        this.Depositories.Filter = d => !d.IsDisabled && allowedIds.Contains(d.Id);
-                        this.Offices.Filter = o => !o.IsDisabled && allowedIds.Contains(o.Id);
-                    }
-                    else
-                    {
-                        this.Warehouses.Filter = w => !w.IsDisabled;
-                        this.Depositories.Filter = d => !d.IsDisabled;
-                        this.Offices.Filter = o => !o.IsDisabled;
-                    }
+                    this.Warehouses.Filter = w => !w.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, w.Id);
+                    this.Depositories.Filter = d => !d.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, d.Id);
+                    this.Offices.Filter = o => !o.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, o.Id);
 
                     this.Warehouses.RaisePropertyChanged("List");
                     this.Depositories.RaisePropertyChanged("List");
@@ -109,80 +91,66 @@ public class InvoicesListViewModel : ListViewModelBaseWithFilterDate<InvoiceInfo
         return base.PreLoad();
     }
 
-    protected override Task<int> CountFilteredListAsync(ListFilter filter)
+    private IEnumerable<InvoiceInfo> ApplySecurityFilter(IEnumerable<InvoiceInfo> items)
     {
-        return this._repository.CountInfoAsync(DateTime.MinValue, DateTime.MaxValue);
+        if (items == null) return Enumerable.Empty<InvoiceInfo>();
+        if (this._loginService?.Session == null || this._loginService.Session.IsAdmin || this._loginService.Session.Accounts == null)
+            return items;
+
+        return items.Where(x => AccountSecurityHelper.CanReadTransaction(this._loginService, x)).ToList();
     }
 
-    protected override Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
+    protected override async Task<int> CountFilteredListAsync(ListFilter filter)
     {
-        return this._repository.CountInfoAsync(from, till);
+        if (this._loginService?.Session == null || this._loginService.Session.IsAdmin || this._loginService.Session.Accounts == null)
+            return await this._repository.CountInfoAsync(DateTime.MinValue, DateTime.MaxValue);
+
+        var items = await this.GetFilteredListAsync(filter);
+        return items?.Count() ?? 0;
     }
 
-    protected override Task<IEnumerable<InvoiceInfo>> GetFilteredListAsync(ListFilter filter)
+    protected override async Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
     {
-        return this._repository.GetInfoAsync(DateTime.MinValue, DateTime.MaxValue);
+        if (this._loginService?.Session == null || this._loginService.Session.IsAdmin || this._loginService.Session.Accounts == null)
+            return await this._repository.CountInfoAsync(from, till);
+
+        var items = await this.GetFilteredListByDateAsync(from, till);
+        return items?.Count() ?? 0;
     }
 
-    protected override Task<IEnumerable<InvoiceInfo>> GetFilteredListByDateAsync(
-      DateTime from,
-      DateTime till)
+    protected override async Task<IEnumerable<InvoiceInfo>> GetFilteredListAsync(ListFilter filter)
     {
-        return this._repository.GetInfoAsync(from, till);
+        var items = await this._repository.GetInfoAsync(DateTime.MinValue, DateTime.MaxValue);
+        return this.ApplySecurityFilter(items);
+    }
+
+    protected override async Task<IEnumerable<InvoiceInfo>> GetFilteredListByDateAsync(DateTime from, DateTime till)
+    {
+        var items = await this._repository.GetInfoAsync(from, till);
+        return this.ApplySecurityFilter(items);
     }
 
     public bool HasCreateAccess => this._authorizer.CanCreate();
 
-    public ICommand CreateNewCommand
-    {
-        get
-        {
-            return (ICommand)new MvxAsyncCommand(new Func<Task>(this.OnCreateNewAsync), (Func<bool>)(() => !this.IsBusy && this.HasCreateAccess));
-        }
-    }
+    public ICommand CreateNewCommand => new MvxAsyncCommand(this.OnCreateNewAsync, () => !this.IsBusy && this.HasCreateAccess);
 
     protected virtual Task OnCreateNewAsync()
     {
         return this.NavigationService.Navigate<DetailsViewModel<Invoice>, string>(string.Empty);
     }
 
-    public ICommand ViewDetailsCommand
-    {
-        get
-        {
-            return (ICommand)new MvxAsyncCommand(new Func<Task>(this.OnViewDetailsAsync), (Func<bool>)(() => !this.IsBusy && this.SelectedItem != null));
-        }
-    }
+    public ICommand ViewDetailsCommand => new MvxAsyncCommand(this.OnViewDetailsAsync, () => !this.IsBusy && this.SelectedItem != null);
 
     protected virtual Task OnViewDetailsAsync()
     {
         return this.NavigationService.Navigate<DetailsViewModel<Invoice>, string>(this.SelectedItem.Id);
     }
 
-    public ICommand SelectOrViewDetailsCommand
-    {
-        get
-        {
-            return (ICommand)new MvxAsyncCommand(new Func<Task>(this.OnSelectOrViewDetailsAsync), (Func<bool>)(() => !this.IsBusy && this.SelectedItem != null));
-        }
-    }
+    public ICommand SelectOrViewDetailsCommand => new MvxAsyncCommand(this.OnSelectOrViewDetailsAsync, () => !this.IsBusy && this.SelectedItem != null);
 
     protected virtual Task OnSelectOrViewDetailsAsync() => this.OnViewDetailsAsync();
 
-    protected override Expression<Func<InvoiceInfo, bool>> GetDateFilter(DateTime from, DateTime till)
-    {
-        throw new NotImplementedException();
-    }
-
-    protected override Task<int> CountListAsync(
-      params Expression<Func<InvoiceInfo, bool>>[] predicates)
-    {
-        throw new NotImplementedException();
-    }
-
-    protected override Task<IEnumerable<InvoiceInfo>> GetListAsync(
-      params Expression<Func<InvoiceInfo, bool>>[] predicates)
-    {
-        throw new NotImplementedException();
-    }
+    protected override Expression<Func<InvoiceInfo, bool>> GetDateFilter(DateTime from, DateTime till) => throw new NotImplementedException();
+    protected override Task<int> CountListAsync(params Expression<Func<InvoiceInfo, bool>>[] predicates) => throw new NotImplementedException();
+    protected override Task<IEnumerable<InvoiceInfo>> GetListAsync(params Expression<Func<InvoiceInfo, bool>>[] predicates) => throw new NotImplementedException();
 }

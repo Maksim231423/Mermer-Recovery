@@ -11,7 +11,6 @@ using Mermer.Mvvm.Services;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Linq.Expressions;
 using System.Threading.Tasks;
 
 namespace Mermer.Ui.Core.ViewModels.Warehousing;
@@ -89,6 +88,17 @@ public class StockTransfersListViewModel :
         };
     }
 
+    protected override async Task PreLoad()
+    {
+        await base.PreLoad();
+        if (this.Warehouses != null)
+        {
+            var ls = this.GetLoginService();
+            this.Warehouses.Filter = w => !w.IsDisabled && AccountSecurityHelper.CanRead(ls, w.Id);
+            this.Warehouses.RaisePropertyChanged("List");
+        }
+    }
+
     protected override Task OnLoad()
     {
         if (!_initialized)
@@ -99,19 +109,25 @@ public class StockTransfersListViewModel :
         return base.OnLoad();
     }
 
-    protected override Task<int> CountByFilterAsync(ListFilter filter)
+    protected override async Task<int> CountByFilterAsync(ListFilter filter)
     {
         if (filter.Tag?.ToString() == "Conflicted")
-            return Repository.CountAsync(x => x.IsConflicted);
+        {
+            var items = await this.GetFilteredListAsync(filter);
+            return items?.Count() ?? 0;
+        }
 
-        return base.CountByFilterAsync(filter);
+        return await base.CountByFilterAsync(filter);
     }
 
-    protected override Task<IEnumerable<StockTransfer>> GetFilteredListAsync(ListFilter filter)
+    protected override async Task<IEnumerable<StockTransfer>> GetFilteredListAsync(ListFilter filter)
     {
         if (filter.Tag?.ToString() == "Conflicted")
-            return Repository.GetAsync(x => x.IsConflicted);
+        {
+            var raw = await Repository.GetAsync(x => x.IsConflicted);
+            return ApplySecurityFilter(raw);
+        }
 
-        return base.GetFilteredListAsync(filter);
+        return await base.GetFilteredListAsync(filter);
     }
 }

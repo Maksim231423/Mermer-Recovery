@@ -99,12 +99,17 @@ public class StockBalancesByStatusesListViewModel : ListViewModelBaseWithFilter<
     {
         get
         {
+            var allowedWarehouses = this.Warehouses?.List?
+                .Where(w => !w.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, w.Id))
+                .Select(w => w.Id)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase) ?? new HashSet<string>();
+
             if (this.SelectedWarehouseIds == null || this.SelectedWarehouseIds.Count == 0)
-                return this.Warehouses?.List?.Select(w => w.Id).ToArray() ?? Array.Empty<string>();
+                return allowedWarehouses.ToArray();
 
             return this.SelectedWarehouseIds
                 .Select(x => x?.ToString())
-                .Where(x => !string.IsNullOrWhiteSpace(x) && AccountSecurityHelper.CanRead(this._loginService, x))
+                .Where(x => !string.IsNullOrWhiteSpace(x) && allowedWarehouses.Contains(x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
@@ -115,7 +120,7 @@ public class StockBalancesByStatusesListViewModel : ListViewModelBaseWithFilter<
         get => this._displayCurrencyId;
         set
         {
-            if (!this.SetProperty(ref this._displayCurrencyId, value, nameof(DisplayCurrencyId)))
+            if (!this.SetProperty<string>(ref this._displayCurrencyId, value, nameof(DisplayCurrencyId)))
                 return;
 
             if (!this.IsBusy && this._loaded)
@@ -157,6 +162,12 @@ public class StockBalancesByStatusesListViewModel : ListViewModelBaseWithFilter<
         {
             await Task.WhenAll(Currencies.Initialize(), Warehouses.Initialize());
 
+            if (this.Warehouses != null)
+            {
+                this.Warehouses.Filter = w => !w.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, w.Id);
+                this.Warehouses.RaisePropertyChanged("List");
+            }
+
             AppSettings configAsync = await _configurator.GetConfigAsync<AppSettings>();
             string defWh = configAsync?.DefaultWarehouseId;
             if (!string.IsNullOrEmpty(defWh) && AccountSecurityHelper.CanRead(this._loginService, defWh))
@@ -165,7 +176,7 @@ public class StockBalancesByStatusesListViewModel : ListViewModelBaseWithFilter<
             }
             else
             {
-                var firstAllowed = this.Warehouses?.List?.FirstOrDefault();
+                var firstAllowed = this.Warehouses?.List?.FirstOrDefault(w => AccountSecurityHelper.CanRead(this._loginService, w.Id));
                 this._selectedWarehouseIds = firstAllowed != null ? new List<object> { firstAllowed.Id } : new List<object>();
             }
 
@@ -183,9 +194,19 @@ public class StockBalancesByStatusesListViewModel : ListViewModelBaseWithFilter<
 
     private async Task PreLoadBalances()
     {
-        string[] whFilter = this.WarehouseIds.Length > 0
-            ? this.WarehouseIds
-            : (this.Warehouses?.List?.Select(w => w.Id).ToArray() ?? Array.Empty<string>());
+        string[] whFilter = this.WarehouseIds;
+        if (whFilter == null || whFilter.Length == 0)
+        {
+            whFilter = this.Warehouses?.List?
+                .Where(w => !w.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, w.Id))
+                .Select(w => w.Id)
+                .ToArray() ?? Array.Empty<string>();
+        }
+
+        if (whFilter.Length == 0)
+        {
+            whFilter = new[] { Guid.Empty.ToString() };
+        }
 
         var stocks = await _stocksRepository.GetAsync();
         var balancesList = await _balancesRepository.GetAsync(null, DateTime.UtcNow, whFilter);

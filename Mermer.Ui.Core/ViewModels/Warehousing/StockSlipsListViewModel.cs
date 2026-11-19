@@ -1,6 +1,5 @@
 ﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Plugins.Messenger;
-using Mermer.Authorization.Enums;
 using Mermer.Authorization.Services;
 using Mermer.Enterprise.Models;
 using Mermer.Ui.Core.Helpers;
@@ -9,8 +8,6 @@ using Mermer.Warehousing.Models;
 using Mermer.Data.Authorizers;
 using Mermer.Data.Storage;
 using Mermer.Mvvm.Services;
-using System;
-using System.Linq;
 using System.Threading.Tasks;
 
 #nullable disable
@@ -37,20 +34,10 @@ public class StockSlipsListViewModel : StockTransactionsListViewModel<StockSlip,
     {
         await base.PostLoad();
 
-        if (this._loginService?.Session != null && !this._loginService.Session.IsAdmin && this._loginService.Session.Accounts != null)
+        if (this.Warehouses != null)
         {
-            var allowedWarehouseIds = this._loginService.Session.Accounts
-                .Where(a => a.Value.HasFlag(AccountAccessLevel.Operate) || a.Value.HasFlag(AccountAccessLevel.Read))
-                .Select(a => a.Key)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-            this.Warehouses.Filter = w => !w.IsDisabled && allowedWarehouseIds.Contains(w.Id);
+            this.Warehouses.Filter = w => !w.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, w.Id);
+            this.Warehouses.RaisePropertyChanged("List");
         }
-        else
-        {
-            this.Warehouses.Filter = w => !w.IsDisabled;
-        }
-
-        this.Warehouses?.RaisePropertyChanged("List");
     }
 }

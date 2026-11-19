@@ -293,14 +293,30 @@ public abstract class TransactionsListViewModel<T> : ListViewModel<T> where T : 
         return filter is ListFilterByDate listFilterByDate ? this.CountFilteredListByDateAsync(listFilterByDate.From, listFilterByDate.Till.AddDays(1.0)) : this.CountFilteredListAsync(filter);
     }
 
-    protected virtual Task<int> CountFilteredListAsync(ListFilter filter)
+    protected virtual async Task<int> CountFilteredListAsync(ListFilter filter)
     {
-        return this.Repository.CountAsync();
+        var loginService = GetLoginService();
+        if (loginService?.Session == null || loginService.Session.IsAdmin || loginService.Session.Accounts == null)
+        {
+            return await this.Repository.CountAsync();
+        }
+
+        // Для не-админа загружаем записи и считаем только разрешенные
+        var items = await this.GetFilteredListAsync(filter);
+        return this.ApplySecurityFilter(items)?.Count() ?? 0;
     }
 
-    protected virtual Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
+    protected virtual async Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
     {
-        return this.Repository.CountAsync((Expression<Func<T, bool>>)(x => x.Date >= from && x.Date < till));
+        var loginService = GetLoginService();
+        if (loginService?.Session == null || loginService.Session.IsAdmin || loginService.Session.Accounts == null)
+        {
+            return await this.Repository.CountAsync((Expression<Func<T, bool>>)(x => x.Date >= from && x.Date < till));
+        }
+
+        // Для не-админа отсекаем MERKEZ и возвращаем точное число видимых строк
+        var items = await this.GetFilteredListByDateAsync(from, till);
+        return this.ApplySecurityFilter(items)?.Count() ?? 0;
     }
 
     protected virtual Task<IEnumerable<T>> GetFilteredListAsync(ListFilter filter)

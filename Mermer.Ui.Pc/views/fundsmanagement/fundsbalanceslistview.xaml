@@ -28,27 +28,20 @@
                   IsChecked="True" VerticalAlignment="Center"/>
     <dxlc:LayoutControl Margin="0" Orientation="Vertical">
       <dxlc:LayoutGroup Orientation="Vertical" Margin="10, 10, 10, 0">
-        <dxlc:LayoutItem HorizontalAlignment="Left" Width="300" Label="{Localize Depository}">
-          <dxg:LookUpEdit NullValueButtonPlacement="EditBox" AutoPopulateColumns="false" DisplayMember="Name"
-                          ValueMember="Id" EditValue="{Binding DepositoryId, UpdateSourceTrigger=PropertyChanged}"
-                          ItemsSource="{Binding Depositories.List}" NullText="{Localize 'All Depositories'}">
-            <dxe:PopupBaseEdit.PopupContentTemplate>
-              <ControlTemplate>
-                <dxg:GridControl Name="PART_GridControl" AutoExpandAllGroups="true">
-                  <dxg:GridControl.Columns>
-                    <dxg:GridColumn FieldName="Name"/>
-                  </dxg:GridControl.Columns>
-                  <dxg:GridControl.View>
-                    <dxg:TableView AutoWidth="true"/>
-                  </dxg:GridControl.View>
-                </dxg:GridControl>
-              </ControlTemplate>
-            </dxe:PopupBaseEdit.PopupContentTemplate>
-            <dxg:LookUpEdit.StyleSettings>
-              <dxg:SearchLookUpEditStyleSettings/>
-            </dxg:LookUpEdit.StyleSettings>
-          </dxg:LookUpEdit>
-        </dxlc:LayoutItem>
+                <dxlc:LayoutItem HorizontalAlignment="Left" Width="300" Label="{Localize Depository}">
+                    <dxe:ComboBoxEdit DisplayMember="Name" 
+                      ValueMember="Id"
+                      ShowCustomItems="True"
+                      IsTextEditable="False"
+                      SeparatorString=", "
+                      NullText="{Localize 'All Depositories'}"
+                      EditValue="{Binding SelectedDepositoryIds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                      ItemsSource="{Binding Depositories.List}">
+                        <dxe:ComboBoxEdit.StyleSettings>
+                            <dxe:CheckedComboBoxStyleSettings ShowSelectAllItem="True"/>
+                        </dxe:ComboBoxEdit.StyleSettings>
+                    </dxe:ComboBoxEdit>
+                </dxlc:LayoutItem>
                 <dxlc:LayoutItem HorizontalAlignment="Left" Width="300" Label="{Localize 'Balance Currency'}">
                     <dxe:ComboBoxEdit ShowCustomItems="True" DisplayMember="Name" ValueMember="Id"
                             EditValue="{Binding CurrencyId, UpdateSourceTrigger=PropertyChanged}"

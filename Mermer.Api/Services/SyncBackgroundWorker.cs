@@ -189,7 +189,7 @@ public class SyncBackgroundWorker : BackgroundService
         var baseUrl = options.ServerUrl.TrimEnd('/');
 
         // 1. ВЫБОРКА ВСЕХ НЕОТПРАВЛЕННЫХ ТАБЛИЦ
-        var unsyncedInvoices = await db.Invoices.AsSplitQuery().Include(i => i.Lines).Include(i => i.Payments).Include(i => i.Discounts).Where(i => !i.IsSynced).OrderBy(i => i.CreatedAt).Take(100).ToListAsync(cancellationToken);
+        var unsyncedInvoices = await db.Invoices.AsSplitQuery().Include(i => i.Lines).Include(i => i.Payments).Include(i => i.Discounts).Where(i => !EF.Property<bool>(i, "IsSynced")).OrderBy(i => i.CreatedAt).Take(100).ToListAsync(cancellationToken);
         var unsyncedStockSlips = await db.StockSlips.AsSplitQuery().Include(s => s.Lines).Where(s => !EF.Property<bool>(s, "IsSynced")).OrderBy(s => s.CreatedAt).Take(100).ToListAsync(cancellationToken);
         var unsyncedStockTransfers = await db.StockTransfers.AsSplitQuery().Include(s => s.Lines).Where(s => !EF.Property<bool>(s, "IsSynced")).OrderBy(s => s.CreatedAt).Take(100).ToListAsync(cancellationToken);
         var unsyncedStockRevisions = await db.StockRevisions.AsSplitQuery().Include(s => s.Lines).Where(s => !EF.Property<bool>(s, "IsSynced")).OrderBy(s => s.CreatedAt).Take(100).ToListAsync(cancellationToken);
@@ -205,11 +205,14 @@ public class SyncBackgroundWorker : BackgroundService
         var unsyncedPartnerTransfers = await db.PartnerTransfers.AsSplitQuery().Include(p => p.Lines).Where(p => !EF.Property<bool>(p, "IsSynced")).OrderBy(p => p.CreatedAt).Take(100).ToListAsync(cancellationToken);
         var unsyncedPartners = await db.Partners.Where(p => !EF.Property<bool>(p, "IsSynced")).OrderBy(p => p.CreatedAt).Take(100).ToListAsync(cancellationToken);
 
+        var unsyncedUsers = await db.Users.Where(u => !EF.Property<bool>(u, "IsSynced")).OrderBy(u => u.CreatedAt).Take(100).ToListAsync(cancellationToken);
+        var unsyncedRoles = await db.Roles.Where(r => !EF.Property<bool>(r, "IsSynced")).OrderBy(r => r.CreatedAt).Take(100).ToListAsync(cancellationToken);
+
         bool hasDataToPush = unsyncedInvoices.Any() || unsyncedStockSlips.Any() || unsyncedStockTransfers.Any() ||
                              unsyncedStockRevisions.Any() || unsyncedStockOrders.Any() || unsyncedAggregatedOrders.Any() ||
                              unsyncedFundsSlips.Any() || unsyncedFundsTransfers.Any() || unsyncedDailyRegisters.Any() ||
                              unsyncedExpenseSlips.Any() || unsyncedPartnerSlips.Any() || unsyncedPartnerTransfers.Any() ||
-                             unsyncedPartners.Any();
+                             unsyncedPartners.Any() || unsyncedUsers.Any() || unsyncedRoles.Any();
 
         if (hasDataToPush)
         {
@@ -393,6 +396,28 @@ public class SyncBackgroundWorker : BackgroundService
                     Rating = p.Rating,
                     CurrencyId = p.CurrencyId,
                     IsDisabled = p.IsDisabled
+                }).ToList(),
+
+                Users = unsyncedUsers.Select(u => new UserSyncDto
+                {
+                    Id = u.Id,
+                    Username = u.Username,
+                    Password = u.Password,
+                    IsAdmin = u.IsAdmin,
+                    IsDisabled = u.IsDisabled,
+                    Description = u.Description,
+                    Roles = u.Roles ?? new List<string>(),
+                    AccountPrivileges = u.AccountPrivileges
+                }).ToList(),
+
+                Roles = unsyncedRoles.Select(r => new RoleSyncDto
+                {
+                    Id = r.Id,
+                    Name = r.Name,
+                    Description = r.Description,
+                    AuthorizationsJson = r.AuthorizationsJson,
+                    AccountPrivilegesJson = r.AccountPrivilegesJson,
+                    IsDisabled = r.IsDisabled
                 }).ToList()
             };
 
@@ -411,83 +436,95 @@ public class SyncBackgroundWorker : BackgroundService
                 var result = await pushResponse.Content.ReadFromJsonAsync<SyncPushResponseDto>(cancellationToken: cancellationToken);
                 if (result != null && result.Success)
                 {
-                    // Атомарно помечаем отправленные пачки как синхронизированные прямо в БД
+                    // Атомарно помечаем отправленные пачки как синхронизированные через нативный SQL
                     if (unsyncedInvoices.Any())
                     {
-                        var ids = unsyncedInvoices.Select(x => x.Id).ToList();
-                        await db.Invoices.Where(x => ids.Contains(x.Id)).ExecuteUpdateAsync(s => s.SetProperty(b => b.IsSynced, true), cancellationToken);
+                        var ids = unsyncedInvoices.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE invoices SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
                     }
 
                     if (unsyncedStockSlips.Any())
                     {
-                        var ids = unsyncedStockSlips.Select(x => x.Id).ToList();
-                        await db.StockSlips.Where(x => ids.Contains(x.Id)).ExecuteUpdateAsync(s => s.SetProperty(b => EF.Property<bool>(b, "IsSynced"), true), cancellationToken);
+                        var ids = unsyncedStockSlips.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE stock_slips SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
                     }
 
                     if (unsyncedStockTransfers.Any())
                     {
-                        var ids = unsyncedStockTransfers.Select(x => x.Id).ToList();
-                        await db.StockTransfers.Where(x => ids.Contains(x.Id)).ExecuteUpdateAsync(s => s.SetProperty(b => EF.Property<bool>(b, "IsSynced"), true), cancellationToken);
+                        var ids = unsyncedStockTransfers.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE stock_transfers SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
                     }
 
                     if (unsyncedStockRevisions.Any())
                     {
-                        var ids = unsyncedStockRevisions.Select(x => x.Id).ToList();
-                        await db.StockRevisions.Where(x => ids.Contains(x.Id)).ExecuteUpdateAsync(s => s.SetProperty(b => EF.Property<bool>(b, "IsSynced"), true), cancellationToken);
+                        var ids = unsyncedStockRevisions.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE stock_revisions SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
                     }
 
                     if (unsyncedStockOrders.Any())
                     {
-                        var ids = unsyncedStockOrders.Select(x => x.Id).ToList();
-                        await db.StockOrders.Where(x => ids.Contains(x.Id)).ExecuteUpdateAsync(s => s.SetProperty(b => EF.Property<bool>(b, "IsSynced"), true), cancellationToken);
+                        var ids = unsyncedStockOrders.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE stock_orders SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
                     }
 
                     if (unsyncedAggregatedOrders.Any())
                     {
-                        var ids = unsyncedAggregatedOrders.Select(x => x.Id).ToList();
-                        await db.AggregatedStockOrders.Where(x => ids.Contains(x.Id)).ExecuteUpdateAsync(s => s.SetProperty(b => EF.Property<bool>(b, "IsSynced"), true), cancellationToken);
+                        var ids = unsyncedAggregatedOrders.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE aggregated_stock_orders SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
                     }
 
                     if (unsyncedFundsSlips.Any())
                     {
-                        var ids = unsyncedFundsSlips.Select(x => x.Id).ToList();
-                        await db.FundsSlips.Where(x => ids.Contains(x.Id)).ExecuteUpdateAsync(s => s.SetProperty(b => EF.Property<bool>(b, "IsSynced"), true), cancellationToken);
+                        var ids = unsyncedFundsSlips.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE funds_slips SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
                     }
 
                     if (unsyncedFundsTransfers.Any())
                     {
-                        var ids = unsyncedFundsTransfers.Select(x => x.Id).ToList();
-                        await db.FundsTransfers.Where(x => ids.Contains(x.Id)).ExecuteUpdateAsync(s => s.SetProperty(b => EF.Property<bool>(b, "IsSynced"), true), cancellationToken);
+                        var ids = unsyncedFundsTransfers.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE funds_transfers SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
                     }
 
                     if (unsyncedDailyRegisters.Any())
                     {
-                        var ids = unsyncedDailyRegisters.Select(x => x.Id).ToList();
-                        await db.DailyFundsRegisteries.Where(x => ids.Contains(x.Id)).ExecuteUpdateAsync(s => s.SetProperty(b => EF.Property<bool>(b, "IsSynced"), true), cancellationToken);
+                        var ids = unsyncedDailyRegisters.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE daily_funds_registeries SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
                     }
 
                     if (unsyncedExpenseSlips.Any())
                     {
-                        var ids = unsyncedExpenseSlips.Select(x => x.Id).ToList();
-                        await db.ExpenseSlips.Where(x => ids.Contains(x.Id)).ExecuteUpdateAsync(s => s.SetProperty(b => EF.Property<bool>(b, "IsSynced"), true), cancellationToken);
+                        var ids = unsyncedExpenseSlips.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE expense_slips SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
                     }
 
                     if (unsyncedPartnerSlips.Any())
                     {
-                        var ids = unsyncedPartnerSlips.Select(x => x.Id).ToList();
-                        await db.PartnerSlips.Where(x => ids.Contains(x.Id)).ExecuteUpdateAsync(s => s.SetProperty(b => EF.Property<bool>(b, "IsSynced"), true), cancellationToken);
+                        var ids = unsyncedPartnerSlips.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE partner_slips SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
                     }
 
                     if (unsyncedPartnerTransfers.Any())
                     {
-                        var ids = unsyncedPartnerTransfers.Select(x => x.Id).ToList();
-                        await db.PartnerTransfers.Where(x => ids.Contains(x.Id)).ExecuteUpdateAsync(s => s.SetProperty(b => EF.Property<bool>(b, "IsSynced"), true), cancellationToken);
+                        var ids = unsyncedPartnerTransfers.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE partner_transfers SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
                     }
 
                     if (unsyncedPartners.Any())
                     {
-                        var ids = unsyncedPartners.Select(x => x.Id).ToList();
-                        await db.Partners.Where(x => ids.Contains(x.Id)).ExecuteUpdateAsync(s => s.SetProperty(b => EF.Property<bool>(b, "IsSynced"), true), cancellationToken);
+                        var ids = unsyncedPartners.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE partners SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
+                    }
+
+                    if (unsyncedUsers.Any())
+                    {
+                        var ids = unsyncedUsers.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE users SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
+                    }
+
+                    if (unsyncedRoles.Any())
+                    {
+                        var ids = unsyncedRoles.Select(x => x.Id).ToArray();
+                        await db.Database.ExecuteSqlRawAsync("UPDATE roles SET is_synced = true WHERE id = ANY({0})", new object[] { ids }, cancellationToken);
                     }
 
                     Console.ForegroundColor = ConsoleColor.Green;
@@ -496,7 +533,8 @@ public class SyncBackgroundWorker : BackgroundService
                                       $"{unsyncedFundsSlips.Count} FundsSlips, {unsyncedFundsTransfers.Count} FundsTransfers, " +
                                       $"{unsyncedStockTransfers.Count} StockTransfers, {unsyncedStockRevisions.Count} StockRevisions, " +
                                       $"{unsyncedStockOrders.Count} StockOrders, {unsyncedExpenseSlips.Count} ExpenseSlips, " +
-                                      $"{unsyncedPartnerSlips.Count} PartnerSlips, {unsyncedDailyRegisters.Count} DailyRegisters.");
+                                      $"{unsyncedPartnerSlips.Count} PartnerSlips, {unsyncedDailyRegisters.Count} DailyRegisters, " +
+                                      $"{unsyncedUsers.Count} Users, {unsyncedRoles.Count} Roles.");
                     Console.ResetColor();
                 }
             }
@@ -531,6 +569,80 @@ public class SyncBackgroundWorker : BackgroundService
 
     private static async Task ApplyPullDataAsync(MermerDbContext db, SyncPullResponseDto pullData, DateTimeOffset now, CancellationToken cancellationToken)
     {
+        // 1. РОЛИ (ROLES)
+        if (pullData.Roles != null && pullData.Roles.Any())
+        {
+            foreach (var dto in pullData.Roles)
+            {
+                var entity = await db.Roles.FirstOrDefaultAsync(x => x.Id == dto.Id, cancellationToken);
+                if (entity == null)
+                {
+                    entity = new Data.Postgres.Entities.RoleEntity
+                    {
+                        Id = dto.Id,
+                        Name = dto.Name,
+                        Description = dto.Description,
+                        AuthorizationsJson = dto.AuthorizationsJson,
+                        AccountPrivilegesJson = dto.AccountPrivilegesJson,
+                        IsDisabled = dto.IsDisabled,
+                        CreatedAt = now,
+                        UpdatedAt = now
+                    };
+                    db.Roles.Add(entity);
+                }
+                else
+                {
+                    entity.Name = dto.Name;
+                    entity.Description = dto.Description;
+                    entity.AuthorizationsJson = dto.AuthorizationsJson;
+                    entity.AccountPrivilegesJson = dto.AccountPrivilegesJson;
+                    entity.IsDisabled = dto.IsDisabled;
+                    entity.UpdatedAt = now;
+                }
+            }
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        // 2. ПОЛЬЗОВАТЕЛИ (USERS)
+        if (pullData.Users != null && pullData.Users.Any())
+        {
+            foreach (var dto in pullData.Users)
+            {
+                var entity = await db.Users.FirstOrDefaultAsync(x => x.Id == dto.Id, cancellationToken);
+                if (entity == null)
+                {
+                    entity = new Data.Postgres.Entities.UserEntity
+                    {
+                        Id = dto.Id,
+                        Username = dto.Username,
+                        Password = dto.Password ?? string.Empty,
+                        IsAdmin = dto.IsAdmin,
+                        IsDisabled = dto.IsDisabled,
+                        Description = dto.Description,
+                        Roles = dto.Roles ?? new List<string>(),
+                        AccountPrivileges = dto.AccountPrivileges ?? new Dictionary<string, int>(),
+                        CreatedAt = now,
+                        UpdatedAt = now
+                    };
+                    db.Users.Add(entity);
+                }
+                else
+                {
+                    entity.Username = dto.Username;
+                    if (!string.IsNullOrEmpty(dto.Password)) entity.Password = dto.Password;
+                    entity.IsAdmin = dto.IsAdmin;
+                    entity.IsDisabled = dto.IsDisabled;
+                    entity.Description = dto.Description;
+                    entity.Roles = dto.Roles ?? new List<string>();
+                    if (dto.AccountPrivileges != null)
+                        entity.AccountPrivileges = dto.AccountPrivileges;
+                    entity.UpdatedAt = now;
+                }
+            }
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        // 3. ОФИСЫ (OFFICES)
         if (pullData.Offices != null && pullData.Offices.Any())
         {
             foreach (var dto in pullData.Offices)
@@ -544,6 +656,7 @@ public class SyncBackgroundWorker : BackgroundService
             await db.SaveChangesAsync(cancellationToken);
         }
 
+        // 4. СКЛАДЫ (WAREHOUSES)
         if (pullData.Warehouses != null && pullData.Warehouses.Any())
         {
             foreach (var dto in pullData.Warehouses)
@@ -557,6 +670,7 @@ public class SyncBackgroundWorker : BackgroundService
             await db.SaveChangesAsync(cancellationToken);
         }
 
+        // 5. КАССЫ (DEPOSITORIES)
         if (pullData.Depositories != null && pullData.Depositories.Any())
         {
             foreach (var dto in pullData.Depositories)
@@ -570,6 +684,7 @@ public class SyncBackgroundWorker : BackgroundService
             await db.SaveChangesAsync(cancellationToken);
         }
 
+        // 6. ТОВАРЫ (STOCKS)
         if (pullData.Stocks != null && pullData.Stocks.Any())
         {
             foreach (var dto in pullData.Stocks)
@@ -583,6 +698,7 @@ public class SyncBackgroundWorker : BackgroundService
             await db.SaveChangesAsync(cancellationToken);
         }
 
+        // 7. ОСТАТКИ (STOCK BALANCES)
         if (pullData.StockBalances != null && pullData.StockBalances.Any())
         {
             foreach (var dto in pullData.StockBalances)

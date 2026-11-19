@@ -88,29 +88,46 @@ public class FundsTransfersListViewModel :
         };
     }
 
+    protected override async Task PreLoad()
+    {
+        await base.PreLoad();
+        if (Depositories != null)
+        {
+            var ls = GetLoginService();
+            Depositories.Filter = d => !d.IsDisabled && AccountSecurityHelper.CanRead(ls, d.Id);
+            Depositories.RaisePropertyChanged("List");
+        }
+    }
+
     protected override Task OnLoad()
     {
         if (!_initialized)
         {
-            SelectedFilter = Filters.ElementAt(2); // По умолчанию выбираем "This Week"
+            SelectedFilter = Filters.ElementAt(2);
             _initialized = true;
         }
         return base.OnLoad();
     }
 
-    protected override Task<int> CountByFilterAsync(ListFilter filter)
+    protected override async Task<int> CountByFilterAsync(ListFilter filter)
     {
         if (filter.Tag?.ToString() == "Conflicted")
-            return Repository.CountAsync(x => x.IsConflicted);
+        {
+            var items = await this.GetFilteredListAsync(filter);
+            return items?.Count() ?? 0;
+        }
 
-        return base.CountByFilterAsync(filter);
+        return await base.CountByFilterAsync(filter);
     }
 
-    protected override Task<IEnumerable<FundsTransfer>> GetFilteredListAsync(ListFilter filter)
+    protected override async Task<IEnumerable<FundsTransfer>> GetFilteredListAsync(ListFilter filter)
     {
         if (filter.Tag?.ToString() == "Conflicted")
-            return Repository.GetAsync(x => x.IsConflicted);
+        {
+            var raw = await Repository.GetAsync(x => x.IsConflicted);
+            return ApplySecurityFilter(raw);
+        }
 
-        return base.GetFilteredListAsync(filter);
+        return await base.GetFilteredListAsync(filter);
     }
 }

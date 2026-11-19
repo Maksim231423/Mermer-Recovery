@@ -992,7 +992,9 @@ public class MermerDbContext : DbContext
             typeof(ExpenseSlipEntity),
             typeof(PartnerSlipEntity),
             typeof(PartnerTransferEntity),
-            typeof(PartnerEntity)
+            typeof(PartnerEntity),
+            typeof(UserEntity),
+            typeof(RoleEntity)
         };
 
         foreach (var entityType in modelBuilder.Model.GetEntityTypes())
@@ -1024,7 +1026,7 @@ public class MermerDbContext : DbContext
                     .IsRequired();
             }
 
-            // 2. Теневое свойство IsSynced регистрируем ТОЛЬКО для основных документов
+            // 2. Теневое свойство IsSynced регистрируем для документов, партнеров, пользователей и ролей
             if (syncableTypes.Contains(clrType))
             {
                 var syncProp = entityType.FindProperty("IsSynced");

@@ -13,27 +13,37 @@ namespace Mermer.Ui.Core.ViewModels.Authorization;
 
 public class RoleAction : BindableObject
 {
-  private readonly Role _role;
+    private readonly Role _role;
 
-  public RoleAction(Role role) => this._role = role;
+    public RoleAction(Role role) => this._role = role;
 
-  public virtual string Id { get; set; }
+    public virtual string Id { get; set; }
 
-  public virtual string Name { get; set; }
+    public virtual string Name { get; set; }
 
-  public virtual int SeletedValue
-  {
-    get => !this._role.Authorizations.ContainsKey(this.Id) ? 0 : this._role.Authorizations[this.Id];
-    set
+    // Проверяет, сохранял ли пользователь это действие
+    public virtual bool IsConfigured =>
+        this._role.Authorizations != null && this._role.Authorizations.ContainsKey(this.Id);
+
+    public virtual int SeletedValue
     {
-      if (!this._role.Authorizations.ContainsKey(this.Id))
-        this._role.Authorizations.Add(this.Id, 0);
-      this._role.Authorizations[this.Id] = value;
-      this.RaisePropertyChanged(nameof (SeletedValue));
-      foreach (BindableObject option in this.Options)
-        option.RaisePropertyChanged("IsSelected");
-    }
-  }
+        get => !IsConfigured ? -1 : this._role.Authorizations[this.Id];
+        set
+        {
+            if (this._role.Authorizations == null)
+                this._role.Authorizations = new Dictionary<string, int>();
 
-  public virtual IEnumerable<RoleOption> Options { get; set; }
+            this._role.Authorizations[this.Id] = value;
+            this.RaisePropertyChanged(nameof(SeletedValue));
+            this.RaisePropertyChanged(nameof(IsConfigured));
+
+            if (this.Options != null)
+            {
+                foreach (BindableObject option in this.Options)
+                    option.RaisePropertyChanged("IsSelected");
+            }
+        }
+    }
+
+    public virtual IEnumerable<RoleOption> Options { get; set; }
 }

@@ -266,14 +266,22 @@ public class StockActionsListViewModel :
         return this.LoadByDateAsync(false);
     }
 
-    protected override Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
+    protected override async Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
     {
-        return this._repository.CountAsync(new DateTime?(from), new DateTime?(till), this.StockId, this.WarehouseIds);
+        if (this._loginService?.Session == null || this._loginService.Session.IsAdmin || this._loginService.Session.Accounts == null)
+            return await this._repository.CountAsync(new DateTime?(from), new DateTime?(till), this.StockId, this.WarehouseIds);
+
+        var items = await this.GetFilteredListByDateAsync(from, till);
+        return items?.Count() ?? 0;
     }
 
-    protected override Task<int> CountFilteredListAsync(ListFilter filter)
+    protected override async Task<int> CountFilteredListAsync(ListFilter filter)
     {
-        return this._repository.CountAsync(new DateTime?(), new DateTime?(), this.StockId, this.WarehouseIds);
+        if (this._loginService?.Session == null || this._loginService.Session.IsAdmin || this._loginService.Session.Accounts == null)
+            return await this._repository.CountAsync(new DateTime?(), new DateTime?(), this.StockId, this.WarehouseIds);
+
+        var items = await this.GetFilteredListAsync(filter);
+        return items?.Count() ?? 0;
     }
 
     protected override async Task<IEnumerable<StockActionWithData>> GetFilteredListByDateAsync(DateTime from, DateTime till)

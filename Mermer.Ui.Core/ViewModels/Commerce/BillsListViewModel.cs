@@ -40,20 +40,7 @@ public class BillsListViewModel : FundsTransactionsListViewModel<Bill, BillLine>
     {
         await Task.WhenAll(base.PreLoad(), this.Partners.Initialize());
 
-        if (this._loginService?.Session != null && !this._loginService.Session.IsAdmin && this._loginService.Session.Accounts != null)
-        {
-            var accounts = this._loginService.Session.Accounts;
-
-            this.Depositories.Filter = d =>
-                !d.IsDisabled &&
-                (!accounts.TryGetValue(d.Id, out var level) ||
-                 (level != AccountAccessLevel.None && (level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read))));
-        }
-        else
-        {
-            this.Depositories.Filter = d => !d.IsDisabled;
-        }
-
+        this.Depositories.Filter = d => !d.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, d.Id);
         this.Depositories?.RaisePropertyChanged("List");
     }
 }

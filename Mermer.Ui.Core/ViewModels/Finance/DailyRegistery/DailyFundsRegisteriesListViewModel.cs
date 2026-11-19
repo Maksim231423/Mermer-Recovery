@@ -1,6 +1,5 @@
 ﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Plugins.Messenger;
-using Mermer.Authorization.Enums;
 using Mermer.Authorization.Services;
 using Mermer.Enterprise.Models;
 using Mermer.Finance.DailyRegistery.Models;
@@ -13,6 +12,7 @@ using Mermer.Data.Storage;
 using Mermer.Mvvm.Services;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Linq.Expressions;
 using System.Threading.Tasks;
 
@@ -55,7 +55,7 @@ public class DailyFundsRegisteriesListViewModel :
             this._balanceAuthorizer.Authorize();
             this.CanViewBalance = true;
         }
-        catch (Exception ex)
+        catch (Exception)
         {
         }
         return base.PreLoad();
@@ -65,33 +65,22 @@ public class DailyFundsRegisteriesListViewModel :
     {
         await base.PostLoad();
 
-        if (this._loginService?.Session != null && !this._loginService.Session.IsAdmin && this._loginService.Session.Accounts != null)
+        if (this.Depositories != null)
         {
-            var accounts = this._loginService.Session.Accounts;
-
-            this.Depositories.Filter = d =>
-                !d.IsDisabled &&
-                (!accounts.TryGetValue(d.Id, out var level) ||
-                 (level != AccountAccessLevel.None && (level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read))));
+            this.Depositories.Filter = d => !d.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, d.Id);
+            this.Depositories.RaisePropertyChanged("List");
         }
-        else
-        {
-            this.Depositories.Filter = d => !d.IsDisabled;
-        }
-
-        this.Depositories?.RaisePropertyChanged("List");
     }
 
-    protected override async Task<IEnumerable<DailyFundsRegistery>> GetFilteredListAsync(
-      ListFilter filter)
+    protected override async Task<IEnumerable<DailyFundsRegistery>> GetFilteredListAsync(ListFilter filter)
     {
-        return (IEnumerable<DailyFundsRegistery>)await ((IDailyFundsRegisteriesRepository)this.Repository).GetAsync(Array.Empty<Expression<Func<DailyFundsRegistery, bool>>>());
+        var raw = await ((IDailyFundsRegisteriesRepository)this.Repository).GetAsync(Array.Empty<Expression<Func<DailyFundsRegistery, bool>>>());
+        return this.ApplySecurityFilter(raw);
     }
 
-    protected override async Task<IEnumerable<DailyFundsRegistery>> GetFilteredListByDateAsync(
-      DateTime from,
-      DateTime till)
+    protected override async Task<IEnumerable<DailyFundsRegistery>> GetFilteredListByDateAsync(DateTime from, DateTime till)
     {
-        return (IEnumerable<DailyFundsRegistery>)await ((IDailyFundsRegisteriesRepository)this.Repository).GetAsync((Expression<Func<DailyFundsRegistery, bool>>)(x => x.Date >= from && x.Date < till));
+        var raw = await ((IDailyFundsRegisteriesRepository)this.Repository).GetAsync((Expression<Func<DailyFundsRegistery, bool>>)(x => x.Date >= from && x.Date < till));
+        return this.ApplySecurityFilter(raw);
     }
 }

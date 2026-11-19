@@ -127,7 +127,17 @@ public class SyncService : ISyncService
 
             Users = await _dbContext.Users.AsNoTracking()
                 .Where(x => EF.Property<string>(x, "ClientId") == targetClientId || EF.Property<string>(x, "ClientId") == "default")
-                .Select(x => new UserSyncDto { Id = x.Id, Username = x.Username, Password = x.Password, IsAdmin = x.IsAdmin, IsDisabled = x.IsDisabled, Description = x.Description, Roles = x.Roles }).ToListAsync(cancellationToken),
+                .Select(x => new UserSyncDto
+                {
+                    Id = x.Id,
+                    Username = x.Username,
+                    Password = x.Password,
+                    IsAdmin = x.IsAdmin,
+                    IsDisabled = x.IsDisabled,
+                    Description = x.Description,
+                    Roles = x.Roles ?? new List<string>(),
+                    AccountPrivileges = x.AccountPrivileges
+                }).ToListAsync(cancellationToken),
 
             Stocks = await _dbContext.Stocks.AsNoTracking()
                 .Where(x => EF.Property<string>(x, "ClientId") == targetClientId || EF.Property<string>(x, "ClientId") == "default")
@@ -584,6 +594,84 @@ public class SyncService : ISyncService
                         _dbContext.Entry(partner).Property("IsSynced").CurrentValue = true;
 
                         response.ProcessedPartnersCount++;
+                    }
+                }
+
+                // 14. ПОЛЬЗОВАТЕЛИ (USERS)
+                if (request.Users != null && request.Users.Any())
+                {
+                    foreach (var uDto in request.Users)
+                    {
+                        var user = await _dbContext.Users.FirstOrDefaultAsync(u => u.Id == uDto.Id, cancellationToken);
+                        if (user == null)
+                        {
+                            user = new UserEntity
+                            {
+                                Id = uDto.Id,
+                                Username = uDto.Username,
+                                Password = uDto.Password ?? string.Empty,
+                                IsAdmin = uDto.IsAdmin,
+                                IsDisabled = uDto.IsDisabled,
+                                Description = uDto.Description ?? string.Empty,
+                                Roles = uDto.Roles ?? new List<string>(),
+                                AccountPrivileges = uDto.AccountPrivileges ?? new Dictionary<string, int>(),
+                                CreatedAt = now,
+                                UpdatedAt = now
+                            };
+                            _dbContext.Users.Add(user);
+                        }
+                        else
+                        {
+                            user.Username = uDto.Username;
+                            if (!string.IsNullOrEmpty(uDto.Password)) user.Password = uDto.Password;
+                            user.IsAdmin = uDto.IsAdmin;
+                            user.IsDisabled = uDto.IsDisabled;
+                            user.Description = uDto.Description ?? string.Empty;
+                            user.Roles = uDto.Roles ?? new List<string>();
+                            if (uDto.AccountPrivileges != null) user.AccountPrivileges = uDto.AccountPrivileges;
+                            user.UpdatedAt = now;
+                        }
+
+                        _dbContext.Entry(user).Property("ClientId").CurrentValue = targetClientId;
+                        _dbContext.Entry(user).Property("IsSynced").CurrentValue = true;
+                        response.ProcessedUsersCount++;
+                    }
+                }
+
+                // 15. РОЛИ (ROLES)
+                if (request.Roles != null && request.Roles.Any())
+                {
+                    foreach (var rDto in request.Roles)
+                    {
+                        var role = await _dbContext.Roles.FirstOrDefaultAsync(r => r.Id == rDto.Id, cancellationToken);
+                        if (role == null)
+                        {
+                            role = new RoleEntity
+                            {
+                                Id = rDto.Id,
+                                Name = rDto.Name,
+                                Description = rDto.Description ?? string.Empty,
+                                AuthorizationsJson = rDto.AuthorizationsJson,
+                                AccountPrivilegesJson = rDto.AccountPrivilegesJson,
+                                IsDisabled = rDto.IsDisabled,
+                                CreatedAt = now,
+                                UpdatedAt = now
+                            };
+                            _dbContext.Roles.Add(role);
+                        }
+                        else
+                        {
+                            role.Name = rDto.Name;
+                            role.Description = rDto.Description ?? string.Empty;
+                            role.AuthorizationsJson = rDto.AuthorizationsJson;
+                            role.AccountPrivilegesJson = rDto.AccountPrivilegesJson;
+                            role.IsDisabled = rDto.IsDisabled;
+                            role.UpdatedAt = now;
+                        }
+
+                        _dbContext.Entry(role).Property("ClientId").CurrentValue = targetClientId;
+                        _dbContext.Entry(role).Property("IsSynced").CurrentValue = true;
+                        response.ProcessedRolesCount++;
                     }
                 }
 

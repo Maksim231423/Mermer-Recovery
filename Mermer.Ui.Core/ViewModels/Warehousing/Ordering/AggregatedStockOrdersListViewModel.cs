@@ -1,6 +1,5 @@
 ﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Plugins.Messenger;
-using Mermer.Authorization.Enums;
 using Mermer.Authorization.Services;
 using Mermer.Enterprise.Models;
 using Mermer.Ui.Core.Helpers;
@@ -38,20 +37,10 @@ public class AggregatedStockOrdersListViewModel : TransactionsListViewModel<Aggr
     {
         await Task.WhenAll(base.PreLoad(), this.Warehouses.Initialize());
 
-        if (this._loginService?.Session != null && !this._loginService.Session.IsAdmin && this._loginService.Session.Accounts != null)
+        if (this.Warehouses != null)
         {
-            var accounts = this._loginService.Session.Accounts;
-
-            this.Warehouses.Filter = w =>
-                !w.IsDisabled &&
-                (!accounts.TryGetValue(w.Id, out var level) ||
-                 (level != AccountAccessLevel.None && (level.HasFlag(AccountAccessLevel.Operate) || level.HasFlag(AccountAccessLevel.Read))));
+            this.Warehouses.Filter = w => !w.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, w.Id);
+            this.Warehouses.RaisePropertyChanged("List");
         }
-        else
-        {
-            this.Warehouses.Filter = w => !w.IsDisabled;
-        }
-
-        this.Warehouses?.RaisePropertyChanged("List");
     }
 }

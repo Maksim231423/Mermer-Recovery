@@ -1,6 +1,8 @@
 ﻿using MvvmCross.Core.Navigation;
 using MvvmCross.Core.ViewModels;
+using MvvmCross.Platform;
 using MvvmCross.Plugins.Messenger;
+using Mermer.Authorization.Services;
 using Mermer.Common.Settings;
 using Mermer.Enterprise.Models;
 using Mermer.Finance.Spending.Models;
@@ -24,6 +26,7 @@ public class ExpenseActionsListViewModel : ListViewModelBaseWithFilterDate<Expen
 {
     private readonly IConfigurator _configurator;
     private readonly IExpenseActionsRepository _repository;
+    private readonly ILoginService _loginService;
     private List<object> _selectedDepositoryIds;
     private string _expenseId;
     private bool _loaded;
@@ -43,6 +46,8 @@ public class ExpenseActionsListViewModel : ListViewModelBaseWithFilterDate<Expen
         this.Expenses = expenses;
         this.Depositories = depositories;
         this.Types = new LocalizedTransactionTypes("Repricing");
+
+        try { this._loginService = Mvx.Resolve<ILoginService>(); } catch { }
     }
 
     public List<object> SelectedDepositoryIds
@@ -73,7 +78,7 @@ public class ExpenseActionsListViewModel : ListViewModelBaseWithFilterDate<Expen
             return list
                 .SelectMany(x => (x?.ToString() ?? string.Empty).Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
                 .Select(x => x.Trim())
-                .Where(x => !string.IsNullOrEmpty(x) && Guid.TryParse(x, out _))
+                .Where(x => !string.IsNullOrEmpty(x) && Guid.TryParse(x, out _) && AccountSecurityHelper.CanRead(this._loginService, x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
@@ -100,14 +105,7 @@ public class ExpenseActionsListViewModel : ListViewModelBaseWithFilterDate<Expen
 
     protected override async Task PreLoad()
     {
-        if (!_loaded && (SelectedDepositoryIds == null || !SelectedDepositoryIds.Any()))
-        {
-            AppSettings configAsync = await _configurator.GetConfigAsync<AppSettings>();
-            if (configAsync != null && !string.IsNullOrEmpty(configAsync.DefaultDepositoryId))
-            {
-                SelectedDepositoryIds = new List<object> { configAsync.DefaultDepositoryId };
-            }
-        }
+        this.Depositories.Filter = d => !d.IsDisabled && AccountSecurityHelper.CanRead(this._loginService, d.Id);
 
         await Task.WhenAll(
             base.PreLoad(),
@@ -115,40 +113,59 @@ public class ExpenseActionsListViewModel : ListViewModelBaseWithFilterDate<Expen
             Depositories.Initialize()
         );
 
+        if (!_loaded && (SelectedDepositoryIds == null || !SelectedDepositoryIds.Any()))
+        {
+            AppSettings configAsync = await _configurator.GetConfigAsync<AppSettings>();
+            string defDep = configAsync?.DefaultDepositoryId;
+            if (!string.IsNullOrEmpty(defDep) && AccountSecurityHelper.CanRead(this._loginService, defDep))
+            {
+                SelectedDepositoryIds = new List<object> { defDep };
+            }
+            else
+            {
+                var firstAllowed = Depositories?.List?.FirstOrDefault();
+                SelectedDepositoryIds = firstAllowed != null ? new List<object> { firstAllowed.Id } : new List<object>();
+            }
+        }
+
         _loaded = true;
     }
 
-    protected override Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
+    protected override async Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
     {
-        return this._repository.CountAsync(from, till, this.DepositoryIds, this.ExpenseId);
+        if (this._loginService?.Session == null || this._loginService.Session.IsAdmin || this._loginService.Session.Accounts == null)
+            return await this._repository.CountAsync(from, till, this.DepositoryIds, this.ExpenseId);
+
+        var items = await this.GetFilteredListByDateAsync(from, till);
+        return items?.Count() ?? 0;
     }
 
-    protected override Task<int> CountFilteredListAsync(ListFilter filter)
+    protected override async Task<int> CountFilteredListAsync(ListFilter filter)
     {
-        return this._repository.CountAsync(null, null, this.DepositoryIds, this.ExpenseId);
+        if (this._loginService?.Session == null || this._loginService.Session.IsAdmin || this._loginService.Session.Accounts == null)
+            return await this._repository.CountAsync(null, null, this.DepositoryIds, this.ExpenseId);
+
+        var items = await this.GetFilteredListAsync(filter);
+        return items?.Count() ?? 0;
     }
 
-    protected override Task<IEnumerable<ExpenseAction>> GetFilteredListByDateAsync(DateTime from, DateTime till)
+    protected override async Task<IEnumerable<ExpenseAction>> GetFilteredListByDateAsync(DateTime from, DateTime till)
     {
-        return this._repository.GetAsync(from, till, this.DepositoryIds, this.ExpenseId);
+        var result = await this._repository.GetAsync(from, till, this.DepositoryIds, this.ExpenseId);
+        return result?.Where(x => AccountSecurityHelper.CanRead(this._loginService, x.ActionDepositoryId));
     }
 
-    protected override Task<IEnumerable<ExpenseAction>> GetFilteredListAsync(ListFilter filter)
+    protected override async Task<IEnumerable<ExpenseAction>> GetFilteredListAsync(ListFilter filter)
     {
-        return this._repository.GetAsync(null, null, this.DepositoryIds, this.ExpenseId);
+        var result = await this._repository.GetAsync(null, null, this.DepositoryIds, this.ExpenseId);
+        return result?.Where(x => AccountSecurityHelper.CanRead(this._loginService, x.ActionDepositoryId));
     }
 
     protected override Expression<Func<ExpenseAction, bool>> GetDateFilter(DateTime from, DateTime till) => throw new NotImplementedException();
     protected override Task<int> CountListAsync(params Expression<Func<ExpenseAction, bool>>[] predicates) => throw new NotImplementedException();
     protected override Task<IEnumerable<ExpenseAction>> GetListAsync(params Expression<Func<ExpenseAction, bool>>[] predicates) => throw new NotImplementedException();
 
-    public ICommand SelectOrViewDetailsCommand
-    {
-        get
-        {
-            return new MvxAsyncCommand(this.OnSelectOrViewDetailsAsync, () => !this.IsBusy && this.SelectedItem != null);
-        }
-    }
+    public ICommand SelectOrViewDetailsCommand => new MvxAsyncCommand(this.OnSelectOrViewDetailsAsync, () => !this.IsBusy && this.SelectedItem != null);
 
     private Task OnSelectOrViewDetailsAsync()
     {

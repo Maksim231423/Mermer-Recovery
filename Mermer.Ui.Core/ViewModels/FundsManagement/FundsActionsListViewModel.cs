@@ -200,14 +200,22 @@ public class FundsActionsListViewModel :
         return this.LoadByDateAsync(false);
     }
 
-    protected override Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
+    protected override async Task<int> CountFilteredListByDateAsync(DateTime from, DateTime till)
     {
-        return this._repository.CountAsync(from, till, null, this.DepositoryIds);
+        if (this._loginService?.Session == null || this._loginService.Session.IsAdmin || this._loginService.Session.Accounts == null)
+            return await this._repository.CountAsync(from, till, null, this.DepositoryIds);
+
+        var items = await this.GetFilteredListByDateAsync(from, till);
+        return items?.Count() ?? 0;
     }
 
-    protected override Task<int> CountFilteredListAsync(ListFilter filter)
+    protected override async Task<int> CountFilteredListAsync(ListFilter filter)
     {
-        return this._repository.CountAsync(null, null, null, this.DepositoryIds);
+        if (this._loginService?.Session == null || this._loginService.Session.IsAdmin || this._loginService.Session.Accounts == null)
+            return await this._repository.CountAsync(null, null, null, this.DepositoryIds);
+
+        var items = await this.GetFilteredListAsync(filter);
+        return items?.Count() ?? 0;
     }
 
     protected override async Task<IEnumerable<FundsAction>> GetFilteredListByDateAsync(DateTime from, DateTime till)
@@ -228,13 +236,7 @@ public class FundsActionsListViewModel :
     protected override Task<IEnumerable<FundsAction>> GetListAsync(params Expression<Func<FundsAction, bool>>[] predicates) => throw new NotImplementedException();
     protected override Expression<Func<FundsAction, bool>> GetDateFilter(DateTime from, DateTime till) => throw new NotImplementedException();
 
-    public ICommand SelectOrViewDetailsCommand
-    {
-        get
-        {
-            return new MvxAsyncCommand(this.OnSelectOrViewDetailsAsync, () => !this.IsBusy && this.SelectedItem != null);
-        }
-    }
+    public ICommand SelectOrViewDetailsCommand => new MvxAsyncCommand(this.OnSelectOrViewDetailsAsync, () => !this.IsBusy && this.SelectedItem != null);
 
     private Task OnSelectOrViewDetailsAsync()
     {
